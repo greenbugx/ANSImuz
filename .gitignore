@@ -1,0 +1,8 @@
+/target
+__pycache__/
+*.py[cod]
+/.venv
+/scripts
+.env
+.idea/
+.vscode/
