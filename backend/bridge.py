@@ -1,11 +1,8 @@
+from providers import yt_music
+
 def search_music(query):
-    print(f"[Python] Searching for: {query}")
-    # dummy shit
-    return [
-        {
-            "title": "Retro Beats",
-            "artist": "Lofi Terminal",
-            "stream_url": "https://example.com",
-            "art_url": "https://example.com"
-        }
-    ]
+    """
+    Main bridge function invoked directly by Rust via PyO3.
+    """
+    # for now pull directly from YT Music
+    return yt_music.search(query)
