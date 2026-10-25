@@ -246,12 +246,28 @@ fn play_track(
         return;
     };
 
-    match player.play(&track.stream_url, app.volume, events) {
+    let source = AudioPlayer::cached_audio(&track.stream_url)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| track.stream_url.clone());
+
+    match player.play(&source, app.volume, events) {
         Ok(()) => {
             app.playing = Some(index);
             app.selected = index;
             app.paused = false;
             app.set_status(format!("PLAYING: {} — {}", track.title, track.artist));
+
+            player.prefetch_later(&track.stream_url, 15);
+
+            if app.tracks.len() > 1 {
+                let next = app
+                    .tracks
+                    .get((index + 1) % app.tracks.len())
+                    .expect("index within tracks");
+
+                player.prefetch_later(&next.stream_url, 25);
+                art::prefetch(&next.art_url);
+            }
         }
         Err(error) => app.set_status(format!("PLAYER ERROR: {}", error)),
     }

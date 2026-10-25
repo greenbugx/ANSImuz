@@ -111,6 +111,14 @@ fn request_art(url: &str, side: u32) -> Result<DynamicImage, String> {
     Err("loading".into())
 }
 
+pub fn prefetch(url: &str) {
+    if url.trim().is_empty() {
+        return;
+    }
+
+    let _ = request_art(url, 64);
+}
+
 pub fn render_art(frame: &mut Frame, area: Rect, url: &str, title: &str, artist: &str) {
     if area.width < 4 || area.height < 3 {
         return;

@@ -1,13 +1,17 @@
 use std::{
+    collections::HashSet,
     fs,
     io::{BufRead, BufReader, Write},
     os::unix::net::UnixStream,
     path::PathBuf,
     process::{Child, Command, Stdio},
+    sync::{Arc, Mutex},
     sync::mpsc::Sender,
     thread,
     time::Duration,
 };
+
+const MAX_DUMP_BYTES: u64 = 64 * 1024 * 1024;
 
 pub enum PlayerEvent {
     Position {
@@ -27,6 +31,7 @@ pub struct AudioPlayer {
     paused: bool,
     last_error: Option<String>,
     generation: u64,
+    dumping: Arc<Mutex<HashSet<String>>>,
 }
 
 impl AudioPlayer {
@@ -40,7 +45,37 @@ impl AudioPlayer {
             paused: false,
             last_error: None,
             generation: 0,
+            dumping: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+
+    pub fn cached_audio(url: &str) -> Option<PathBuf> {
+        let path = audio_cache_dir().join(format!("{}.audio", audio_hash(url)));
+        path.exists().then_some(path)
+    }
+
+    pub fn prefetch_later(&self, url: &str, delay_secs: u64) {
+        if url.trim().is_empty() || Self::cached_audio(url).is_some() {
+            return;
+        }
+
+        let dumping = Arc::clone(&self.dumping);
+        let owned = url.to_string();
+
+        thread::spawn(move || {
+            thread::sleep(Duration::from_secs(delay_secs));
+
+            let already_dumping = dumping
+                .lock()
+                .map(|set| set.contains(&owned))
+                .unwrap_or(true);
+
+            if already_dumping || audio_cache_dir().join(format!("{}.audio", audio_hash(&owned))).exists() {
+                return;
+            }
+
+            start_dump(owned, dumping);
+        });
     }
 
     pub fn generation(&self) -> u64 {
@@ -251,4 +286,90 @@ fn json_number(line: &str, key: &str) -> Option<f64> {
         .unwrap_or(rest.len());
 
     rest[..end].parse().ok()
+}
+
+fn audio_cache_dir() -> PathBuf {
+    std::env::temp_dir().join("ansimuz-audio")
+}
+
+fn audio_hash(url: &str) -> String {
+    url.bytes()
+        .fold(14695981039346656037u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(1099511628211)
+        })
+        .to_string()
+}
+
+fn start_dump(url: String, dumping: Arc<Mutex<HashSet<String>>>) {
+    {
+        let mut set = match dumping.lock() {
+            Ok(set) => set,
+            Err(_) => return,
+        };
+
+        if set.contains(&url) {
+            return;
+        }
+        set.insert(url.clone());
+    }
+
+    let _ = fs::create_dir_all(audio_cache_dir());
+    let part = audio_cache_dir().join(format!("{}.part", audio_hash(&url)));
+    let final_path = audio_cache_dir().join(format!("{}.audio", audio_hash(&url)));
+
+    let child = Command::new("mpv")
+        .arg("--no-video")
+        .arg("--no-audio")
+        .arg("--really-quiet")
+        .arg(format!("--stream-dump={}", part.display()))
+        .arg(&url)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+
+    let mut child = match child {
+        Ok(child) => child,
+        Err(_) => {
+            if let Ok(mut set) = dumping.lock() {
+                set.remove(&url);
+            }
+            return;
+        }
+    };
+
+    thread::spawn(move || {
+        for _ in 0..600 {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if status.success() && part.exists() {
+                        let _ = fs::rename(&part, &final_path);
+                    } else {
+                        let _ = fs::remove_file(&part);
+                    }
+                    break;
+                }
+                Ok(None) => {
+                    if part
+                        .metadata()
+                        .map(|meta| meta.len() > MAX_DUMP_BYTES)
+                        .unwrap_or(false)
+                    {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        let _ = fs::remove_file(&part);
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+
+            thread::sleep(Duration::from_secs(1));
+        }
+
+        let _ = fs::remove_file(&part);
+
+        if let Ok(mut set) = dumping.lock() {
+            set.remove(&url);
+        }
+    });
 }
