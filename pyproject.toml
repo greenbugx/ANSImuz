@@ -1,0 +1,12 @@
+[project]
+name = "ansimuz-backend"
+version = "0.1.0"
+description = "Python YouTube Music search backend for ANSIMUZ"
+requires-python = ">=3.10"
+dependencies = [
+    "ytmusicapi>=1.12.3",
+]
+
+[build-system]
+requires = ["setuptools>=65"]
+build-backend = "setuptools.build_meta"
