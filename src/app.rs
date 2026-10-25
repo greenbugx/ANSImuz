@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -88,7 +90,6 @@ pub struct Track {
     pub title: String,
     pub artist: String,
     pub stream_url: String,
-    #[allow(dead_code)]
     pub art_url: String,
 }
 
@@ -109,6 +110,7 @@ pub struct App {
     pub paused: bool,
     pub volume: u8,
     pub status: String,
+    status_at: Option<Instant>,
     pub should_quit: bool,
 }
 
@@ -125,8 +127,14 @@ impl App {
             paused: false,
             volume: 70,
             status: String::new(),
+            status_at: None,
             should_quit: false,
         }
+    }
+
+    pub fn set_status(&mut self, message: impl Into<String>) {
+        self.status = message.into();
+        self.status_at = Some(Instant::now());
     }
 
     pub fn move_selection(&mut self, delta: isize) {
@@ -184,9 +192,10 @@ impl App {
             Constraint::Length(if show_logo { logo_height } else { 0 }),
             Constraint::Length(3),
             Constraint::Length(1),
-            Constraint::Min(3),
             Constraint::Length(1),
-            Constraint::Length(10),
+            Constraint::Length(8),
+            Constraint::Length(1),
+            Constraint::Min(10),
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
@@ -229,7 +238,7 @@ impl App {
         self.render_search_box(frame, rows[2], green, bold_green, dim);
 
         frame.render_widget(
-            Paragraph::new(self.status.as_str())
+            Paragraph::new(self.visible_status())
                 .style(dim)
                 .alignment(Alignment::Center),
             rows[3],
@@ -263,11 +272,30 @@ impl App {
         let mut list_state = ListState::default();
         list_state.select(Some(self.selected));
 
-        frame.render_stateful_widget(List::new(items), rows[4], &mut list_state);
+        frame.render_stateful_widget(List::new(items), rows[5], &mut list_state);
 
-        art::render_art_placeholder(frame, rows[6]);
+        let current = self
+            .playing
+            .and_then(|index| self.tracks.get(index))
+            .or_else(|| self.tracks.get(self.selected));
 
-        let width = rows[8].width as usize;
+        art::render_art(
+            frame,
+            rows[7],
+            current.map(|track| track.art_url.as_str()).unwrap_or(""),
+            current.map(|track| track.title.as_str()).unwrap_or(""),
+            current.map(|track| track.artist.as_str()).unwrap_or(""),
+        );
+
+        let bar_width = (rows[9].width * 3 / 5).max(20) as usize;
+        let bar_area = Rect {
+            x: rows[9].x + (rows[9].width - bar_width as u16) / 2,
+            y: rows[9].y,
+            width: bar_width as u16,
+            height: 1,
+        };
+
+        let width = bar_width;
         let bar: Line = playback
             .and_then(|(elapsed, duration)| duration.filter(|d| *d > 0.0).map(|d| (elapsed, d)))
             .map(|(elapsed, duration)| {
@@ -290,21 +318,28 @@ impl App {
             })
             .unwrap_or_else(|| Line::from(Span::styled("▄".repeat(width), dim)));
 
-        frame.render_widget(Paragraph::new(bar), rows[8]);
+        frame.render_widget(Paragraph::new(bar), bar_area);
+
+        let cluster = Rect {
+            x: rows[10].x + rows[10].width.saturating_sub(45) / 2,
+            y: rows[10].y,
+            width: 45.min(rows[10].width),
+            height: rows[10].height,
+        };
 
         let thirds = Layout::horizontal([
-            Constraint::Fill(1),
-            Constraint::Fill(1),
-            Constraint::Fill(1),
+            Constraint::Length(15),
+            Constraint::Length(15),
+            Constraint::Length(15),
         ])
-        .split(rows[9]);
+        .split(cluster);
 
         frame.render_widget(
             Paragraph::new("|◀").style(bold_green).alignment(Alignment::Center),
             thirds[0],
         );
 
-        let play_icon = if self.paused { "▮▮" } else { "▶" };
+        let play_icon = if self.paused { "▶" } else { "▮▮" };
         frame.render_widget(
             Paragraph::new(play_icon)
                 .style(bold_green)
@@ -321,8 +356,19 @@ impl App {
             Paragraph::new("↑↓ SELECT  ENTER PLAY  SPACE PAUSE  ←→ TRACK  Q QUIT")
                 .style(dim)
                 .alignment(Alignment::Center),
-            rows[11],
+            rows[12],
         );
+    }
+
+    fn visible_status(&self) -> &str {
+        if self.loading {
+            return "SEARCHING…";
+        }
+
+        match self.status_at {
+            Some(at) if at.elapsed() < Duration::from_secs(3) => self.status.as_str(),
+            _ => "",
+        }
     }
 
     fn render_search_box(

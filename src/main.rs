@@ -77,14 +77,14 @@ fn run_app(
                     app.selected = 0;
                     app.last_query = query;
                     app.mode = Mode::Nav;
-                    app.status = if count == 0 {
+                    app.set_status(if count == 0 {
                         "NO RESULTS".into()
                     } else {
                         format!("{} RESULTS", count)
-                    };
+                    });
                 }
                 Err(error) => {
-                    app.status = format!("SEARCH ERROR: {}", error);
+                    app.set_status(format!("SEARCH ERROR: {}", error));
                 }
             }
         }
@@ -93,10 +93,10 @@ fn run_app(
             app.playing = None;
             app.paused = false;
 
-            app.status = match player.error() {
+            app.set_status(match player.error() {
                 Some(error) => format!("PLAYER ERROR: {}", error),
-                None => "PLAYBACK ENDED".into(),
-            };
+                None => "PLAYBACK ENDED".to_string(),
+            });
         }
 
         let current = player.generation();
@@ -107,20 +107,10 @@ fn run_app(
                     playback = Some((elapsed, duration));
                 }
                 PlayerEvent::Failed { generation, message } if generation == current => {
-                    app.status = format!("PLAYER ERROR: {}", message);
+                    app.set_status(format!("PLAYER ERROR: {}", message));
                 }
                 _ => {}
             }
-        }
-
-        if app.playing.is_some() && !player.is_playing() {
-            app.playing = None;
-            app.paused = false;
-
-            app.status = match player.error() {
-                Some(error) => format!("PLAYER ERROR: {}", error),
-                None => "PLAYBACK ENDED".into(),
-            };
         }
 
         if app.playing.is_none() {
@@ -172,7 +162,7 @@ fn handle_key(
 
                 if !query.is_empty() && query != app.last_query {
                     app.loading = true;
-                    app.status = "SEARCHING…".into();
+                    app.set_status("SEARCHING…");
 
                     let tx = search_tx.clone();
 
@@ -213,13 +203,13 @@ fn handle_key(
                     match player.toggle_pause() {
                         Ok(()) => {
                             app.paused = !app.paused;
-                            app.status = if app.paused {
-                                "PAUSED".into()
+                            app.set_status(if app.paused {
+                                "PAUSED".to_string()
                             } else {
                                 now_playing(app)
-                            };
+                            });
                         }
-                        Err(error) => app.status = format!("PLAYER ERROR: {}", error),
+                        Err(error) => app.set_status(format!("PLAYER ERROR: {}", error)),
                     }
                 }
             }
@@ -230,13 +220,13 @@ fn handle_key(
             KeyCode::Char('+') | KeyCode::Char('=') => {
                 app.volume = app.volume.saturating_add(5).min(100);
                 let _ = player.set_volume(app.volume);
-                app.status = format!("VOLUME {}", app.volume);
+                app.set_status(format!("VOLUME {}", app.volume));
             }
 
             KeyCode::Char('-') => {
                 app.volume = app.volume.saturating_sub(5);
                 let _ = player.set_volume(app.volume);
-                app.status = format!("VOLUME {}", app.volume);
+                app.set_status(format!("VOLUME {}", app.volume));
             }
 
             KeyCode::Char('/') => app.mode = Mode::Type,
@@ -261,9 +251,9 @@ fn play_track(
             app.playing = Some(index);
             app.selected = index;
             app.paused = false;
-            app.status = format!("PLAYING: {} — {}", track.title, track.artist);
+            app.set_status(format!("PLAYING: {} — {}", track.title, track.artist));
         }
-        Err(error) => app.status = format!("PLAYER ERROR: {}", error),
+        Err(error) => app.set_status(format!("PLAYER ERROR: {}", error)),
     }
 }
 
