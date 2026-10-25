@@ -158,12 +158,7 @@ impl Drop for AudioPlayer {
     }
 }
 
-fn observe(
-    generation: u64,
-    socket_path: PathBuf,
-    volume: u8,
-    events: Sender<PlayerEvent>,
-) {
+fn observe(generation: u64, socket_path: PathBuf, volume: u8, events: Sender<PlayerEvent>) {
     for _ in 0..80 {
         if socket_path.exists() {
             break;
@@ -180,62 +175,71 @@ fn observe(
         return;
     }
 
-    let stream = match UnixStream::connect(&socket_path) {
-        Ok(stream) => stream,
-        Err(error) => {
-            let _ = events.send(PlayerEvent::Failed {
-                generation,
-                message: format!("cannot reach mpv: {error}"),
-            });
-            return;
-        }
-    };
+    if let Ok(mut stream) = UnixStream::connect(&socket_path) {
+        let _ = stream.write_all(
+            format!(
+                r#"{{"command":["set_property","volume",{}]}}"#,
+                volume.min(100)
+            )
+            .as_bytes(),
+        );
+        let _ = stream.write_all(b"\n");
+    }
 
-    let mut control = match stream.try_clone() {
-        Ok(control) => control,
-        Err(error) => {
-            let _ = events.send(PlayerEvent::Failed {
-                generation,
-                message: format!("cannot reach mpv: {error}"),
-            });
-            return;
-        }
-    };
-
-    let _ = control.write_all(
-        format!(r#"{{"command":["set_property","volume",{}]}}\n"#, volume.min(100)).as_bytes(),
-    );
-    let _ = control.write_all(
-        format!(r#"{{"command":["observe_property",1,"time-pos"]}}\n"#).as_bytes(),
-    );
-    let _ = control.write_all(
-        format!(r#"{{"command":["observe_property",2,"duration"]}}\n"#).as_bytes(),
-    );
-
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
     let mut duration: Option<f64> = None;
 
     loop {
+        thread::sleep(Duration::from_millis(250));
+
+        let Ok(mut stream) = UnixStream::connect(&socket_path) else {
+            break;
+        };
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
+
+        if stream
+            .write_all(br#"{"command":["get_property","time-pos"]}"#)
+            .and_then(|_| stream.write_all(b"\n"))
+            .is_err()
+        {
+            break;
+        }
+
+        let elapsed = read_reply(&mut stream);
+
+        if duration.is_none() {
+            let _ = stream.write_all(br#"{"command":["get_property","duration"]}"#);
+            let _ = stream.write_all(b"\n");
+            duration = read_reply(&mut stream);
+        }
+
+        if let Some(elapsed) = elapsed {
+            let _ = events.send(PlayerEvent::Position {
+                generation,
+                elapsed,
+                duration,
+            });
+        }
+    }
+}
+
+fn read_reply(stream: &mut UnixStream) -> Option<f64> {
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+
+    for _ in 0..8 {
         line.clear();
 
         match reader.read_line(&mut line) {
-            Ok(0) | Err(_) => break,
+            Ok(0) | Err(_) => return None,
             Ok(_) => {
-                if line.contains("\"id\":1") {
-                    if let Some(elapsed) = json_number(&line, "data") {
-                        let _ = events.send(PlayerEvent::Position {
-                            generation,
-                            elapsed,
-                            duration,
-                        });
-                    }
-                } else if line.contains("\"id\":2") {
-                    duration = json_number(&line, "data");
+                if line.contains("\"error\"") {
+                    return json_number(&line, "data");
                 }
             }
         }
     }
+
+    None
 }
 
 fn json_number(line: &str, key: &str) -> Option<f64> {
