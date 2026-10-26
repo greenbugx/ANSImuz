@@ -18,8 +18,10 @@ mod app;
 mod art;
 mod player;
 mod settings;
+mod visualizer;
 
 use player::{AudioPlayer, PlayerEvent};
+use visualizer::AudioVisualizer;
 
 type SearchResult = (String, Result<Vec<Track>, String>);
 
@@ -59,6 +61,7 @@ fn run_app(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::new();
     let mut player = AudioPlayer::new();
+    let mut visualizer = AudioVisualizer::new();
 
     let (search_tx, search_rx): (Sender<SearchResult>, Receiver<SearchResult>) =
         mpsc::channel();
@@ -118,7 +121,19 @@ fn run_app(
             playback = None;
         }
 
-        terminal.draw(|frame| app.render(frame, playback))?;
+        if app.playing.is_some() && !visualizer.has_attempted() {
+            if let Err(error) = visualizer.start() {
+                app.set_status(error);
+            }
+        } else if app.playing.is_none() && visualizer.has_attempted() {
+            visualizer.stop();
+        }
+
+        let spectrum = visualizer.bands();
+        let spectrum_active = visualizer.is_active();
+        terminal.draw(|frame| {
+            app.render(frame, playback, &spectrum, spectrum_active)
+        })?;
 
         if event::poll(Duration::from_millis(80))? {
             let Event::Key(key) = event::read()? else {
@@ -143,6 +158,7 @@ fn run_app(
         }
     }
 
+    visualizer.stop();
     player.stop();
     Ok(())
 }
