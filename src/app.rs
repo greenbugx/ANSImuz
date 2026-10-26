@@ -10,6 +10,7 @@ use ratatui::{
 
 use crate::art;
 use crate::settings::Settings;
+use crate::visualizer::BAND_COUNT;
 
 fn logo_bitmap() -> Vec<Vec<bool>> {
     let lines: Vec<&str> = include_str!("../ascii.art")
@@ -162,7 +163,13 @@ impl App {
         Some((base + delta).rem_euclid(len) as usize)
     }
 
-    pub fn render(&self, frame: &mut Frame, playback: Option<(f64, Option<f64>)>) {
+    pub fn render(
+        &self,
+        frame: &mut Frame,
+        playback: Option<(f64, Option<f64>)>,
+        spectrum: &[u8; BAND_COUNT],
+        spectrum_active: bool,
+    ) {
         let area = frame.area();
 
         if area.width < 40 || area.height < 24 {
@@ -289,12 +296,26 @@ impl App {
             .and_then(|index| self.tracks.get(index))
             .or_else(|| self.tracks.get(self.selected));
 
+        let media_columns = Layout::horizontal([
+            Constraint::Percentage(38),
+            Constraint::Percentage(62),
+        ])
+        .split(rows[7]);
+
         art::render_art(
             frame,
-            rows[7],
+            media_columns[0],
             current.map(|track| track.art_url.as_str()).unwrap_or(""),
             current.map(|track| track.title.as_str()).unwrap_or(""),
             current.map(|track| track.artist.as_str()).unwrap_or(""),
+        );
+        render_spectrum(
+            frame,
+            media_columns[1],
+            spectrum,
+            spectrum_active,
+            self.playing.is_some(),
+            self.paused,
         );
 
         let bar_width = (rows[9].width * 3 / 5).max(20) as usize;
@@ -563,4 +584,124 @@ fn truncate(text: &str, max: usize) -> String {
             .take(max.saturating_sub(1))
             .collect::<String>()
     )
+}
+
+
+fn render_spectrum(
+    frame: &mut Frame,
+    area: Rect,
+    bands: &[u8; BAND_COUNT],
+    capture_active: bool,
+    playing: bool,
+    paused: bool,
+) {
+    if area.width < 8 || area.height < 4 {
+        return;
+    }
+
+    let heading = if !playing {
+        "SPECTRUM / IDLE"
+    } else if paused {
+        "SPECTRUM / PAUSED"
+    } else if capture_active {
+        "SPECTRUM / LIVE"
+    } else {
+        "SPECTRUM / NO OUTPUT MONITOR"
+    };
+    let heading_color = if capture_active && playing && !paused {
+        Color::Rgb(190, 195, 199)
+    } else {
+        Color::DarkGray
+    };
+
+    frame.render_widget(
+        Paragraph::new(heading)
+            .style(Style::default().fg(heading_color).add_modifier(Modifier::BOLD)),
+        Rect { x: area.x, y: area.y, width: area.width, height: 1 },
+    );
+
+    let chart_height = area.height.saturating_sub(3) as usize;
+    let chart_width = area.width as usize;
+    if chart_height == 0 || chart_width == 0 {
+        return;
+    }
+
+    let count = BAND_COUNT.min((chart_width / 2).max(1));
+    let slot_width = (chart_width / count).max(1);
+    let chart_area = Rect {
+        x: area.x,
+        y: area.y + 1,
+        width: area.width,
+        height: chart_height as u16,
+    };
+
+    // Draw bottom-up columns, grouped logarithmically from bass (left) to treble (right).
+    for row in 0..chart_height {
+        let from_bottom = chart_height - row;
+        let mut spans = Vec::with_capacity(count * 2);
+
+        for column in 0..count {
+            let start = column * BAND_COUNT / count;
+            let end = ((column + 1) * BAND_COUNT / count).max(start + 1);
+            let level = bands[start..end.min(BAND_COUNT)]
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(0) as usize;
+            let bar_height = (level * chart_height + 99) / 100;
+            let lit = playing && !paused && capture_active && from_bottom <= bar_height;
+
+            if lit {
+                let vertical_level = (bar_height.saturating_sub(from_bottom) * 4)
+                    / chart_height.max(1);
+                let glyph = match vertical_level {
+                    0 => "░",
+                    1 => "▒",
+                    2 => "▓",
+                    _ => "█",
+                };
+                let shade = (105 + (level * 150 / 100)).min(255) as u8;
+                spans.push(Span::styled(
+                    glyph.repeat(slot_width),
+                    Style::default().fg(Color::Rgb(shade, shade, shade)),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    " ".repeat(slot_width),
+                    Style::default(),
+                ));
+            }
+
+            if column + 1 < count && slot_width > 2 {
+                spans.push(Span::raw(" "));
+            }
+        }
+
+        let line = Line::from(spans);
+        frame.render_widget(
+            Paragraph::new(line),
+            Rect {
+                x: chart_area.x,
+                y: chart_area.y + row as u16,
+                width: chart_area.width,
+                height: 1,
+            },
+        );
+    }
+
+    let footer = if capture_active {
+        "LOW  ─────────────────────  HIGH"
+    } else {
+        "Waiting for audio output capture"
+    };
+    frame.render_widget(
+        Paragraph::new(footer)
+            .style(Style::default().fg(Color::DarkGray)),
+        Rect {
+            x: area.x,
+            y: area.y + area.height - 1,
+            width: area.width,
+            height: 1,
+        },
+    );
 }
