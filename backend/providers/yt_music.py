@@ -14,20 +14,19 @@ def search(query):
     tracks = []
     # pull up to top 10 matches
     for item in search_results[:10]:
-        # extract high-res artwork if available, fallback to default
-        art_url = ""
-        if "thumbnails" in item and item["thumbnails"]:
-            art_url = item["thumbnails"][-1]["url"]
-
         # grab artist name
         artist = "Unknown Artist"
         if "artists" in item and item["artists"]:
             artist = item["artists"][0]["name"]
 
+        # max resolution thumbnail endpoint, falls back to hqdefault at download time
+        video_id = item.get("videoId", "")
+        art_url = f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg" if video_id else ""
+
         tracks.append({
             "title": item.get("title", "Unknown Track"),
             "artist": artist,
-            "stream_url": f"https://youtube.com/watch?v={item['videoId']}",
+            "stream_url": f"https://youtube.com/watch?v={video_id}",
             "art_url": art_url,
             "source": "youtube"
         })
