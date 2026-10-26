@@ -24,6 +24,8 @@ use player::{AudioPlayer, PlayerEvent};
 type SearchResult = (String, Result<Vec<Track>, String>);
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    art::init_picker();
+
     let mut terminal = setup_terminal()?;
 
     let result = run_app(&mut terminal);
@@ -156,10 +158,9 @@ fn handle_key(
 ) {
     if app.settings_open {
         match key.code {
-            KeyCode::Char(' ') | KeyCode::Enter => {
-                app.settings.audio_cache = !app.settings.audio_cache;
-                app.settings.save();
-            }
+            KeyCode::Up => app.settings_cursor = app.settings_cursor.saturating_sub(1),
+            KeyCode::Down => app.settings_cursor = (app.settings_cursor + 1).min(2),
+            KeyCode::Char(' ') | KeyCode::Enter => app.apply_setting(),
             KeyCode::Char('/') => {
                 app.settings_open = false;
                 app.mode = Mode::Type;

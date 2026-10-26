@@ -114,6 +114,7 @@ pub struct App {
     status_at: Option<Instant>,
     pub settings: Settings,
     pub settings_open: bool,
+    pub settings_cursor: usize,
     pub should_quit: bool,
 }
 
@@ -133,8 +134,19 @@ impl App {
             status_at: None,
             settings: Settings::load(),
             settings_open: false,
+            settings_cursor: 0,
             should_quit: false,
         }
+    }
+
+    pub fn apply_setting(&mut self) {
+        match self.settings_cursor {
+            0 => self.settings.audio_cache = !self.settings.audio_cache,
+            1 => self.settings.art_hq = !self.settings.art_hq,
+            _ => self.settings.art_palette = !self.settings.art_palette,
+        }
+
+        self.settings.save();
     }
 
     pub fn set_status(&mut self, message: impl Into<String>) {
@@ -217,10 +229,27 @@ impl App {
         let green = Style::default().fg(Color::Green);
         let bold_green = green.add_modifier(Modifier::BOLD);
         let dim = Style::default().fg(Color::DarkGray);
-        let selected = Style::default()
-            .fg(Color::Black)
-            .bg(Color::Green)
-            .add_modifier(Modifier::BOLD);
+
+        let current = self
+            .playing
+            .and_then(|index| self.tracks.get(index))
+            .or_else(|| self.tracks.get(self.selected));
+
+        let selected = match self
+            .settings
+            .art_palette
+            .then(|| current.and_then(|track| art::dominant_color(&track.art_url)))
+            .flatten()
+        {
+            Some((r, g, b)) => Style::default()
+                .fg(Color::Black)
+                .bg(Color::Rgb(r, g, b))
+                .add_modifier(Modifier::BOLD),
+            None => Style::default()
+                .fg(Color::Black)
+                .bg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        };
 
         let filled = (self.volume as usize).min(100) / 10;
         let bars = format!("{}{}", "█".repeat(filled), "░".repeat(10 - filled));
@@ -284,17 +313,13 @@ impl App {
 
         frame.render_stateful_widget(List::new(items), rows[5], &mut list_state);
 
-        let current = self
-            .playing
-            .and_then(|index| self.tracks.get(index))
-            .or_else(|| self.tracks.get(self.selected));
-
         art::render_art(
             frame,
             rows[7],
             current.map(|track| track.art_url.as_str()).unwrap_or(""),
             current.map(|track| track.title.as_str()).unwrap_or(""),
             current.map(|track| track.artist.as_str()).unwrap_or(""),
+            self.settings.art_hq,
         );
 
         let bar_width = (rows[9].width * 3 / 5).max(20) as usize;
@@ -386,24 +411,37 @@ impl App {
         let bold_green = green.add_modifier(Modifier::BOLD);
         let dim = Style::default().fg(Color::DarkGray);
 
-        let state = if self.settings.audio_cache {
-            "ON"
-        } else {
-            "OFF"
-        };
-        let state_style = if self.settings.audio_cache {
-            bold_green
-        } else {
-            dim
-        };
+        let cache_state = if self.settings.audio_cache { "ON" } else { "OFF" };
+        let cache_style = if self.settings.audio_cache { bold_green } else { dim };
 
-        let setting_rows = [(
-            "Audio Cache:",
-            state,
-            state_style,
-            "Save played songs to /tmp for instant replays",
-        )];
+        let palette_state = if self.settings.art_palette { "ON" } else { "OFF" };
+        let palette_style = if self.settings.art_palette { bold_green } else { dim };
 
+        let mode = if self.settings.art_hq { "HQ" } else { "PIXEL" };
+        let mode_style = if self.settings.art_hq { bold_green } else { dim };
+
+        let setting_rows = [
+            (
+                "Audio Cache:",
+                cache_state,
+                cache_style,
+                "Save played songs to /tmp for instant replays",
+            ),
+            (
+                "Art Mode:",
+                mode,
+                mode_style,
+                "HQ uses true graphics, pixel uses unicode blocks",
+            ),
+            (
+                "Art Palette:",
+                palette_state,
+                palette_style,
+                "Tint the selected track with the artwork colors",
+            ),
+        ];
+
+        let cursor = self.settings_cursor.min(setting_rows.len() - 1);
         let block_height = setting_rows.len() as u16 + 4;
         let top = area.y + (area.height - block_height) / 2;
 
@@ -436,6 +474,7 @@ impl App {
         for (offset, (name, value, value_style, description)) in
             setting_rows.iter().enumerate()
         {
+            let active = offset == cursor;
             let row = Rect {
                 x: table_x,
                 y: top + 2 + offset as u16,
@@ -450,24 +489,51 @@ impl App {
             ])
             .split(row);
 
+            let cell_style = if active {
+                Style::default().bg(Color::Green)
+            } else {
+                Style::default()
+            };
+
+            let name_style = if active {
+                Style::default().fg(Color::Black)
+            } else {
+                green
+            };
+
+            let value_style = if active {
+                Style::default()
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                *value_style
+            };
+
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled(*name, green),
+                    Span::styled(*name, name_style),
                     Span::raw(" "),
-                    Span::styled(*value, *value_style),
+                    Span::styled(*value, value_style),
                 ]))
+                .style(cell_style)
                 .alignment(Alignment::Right),
                 columns[0],
             );
 
+            let description_style = if active {
+                Style::default().fg(Color::Black)
+            } else {
+                dim
+            };
+
             frame.render_widget(
-                Paragraph::new(*description).style(dim),
+                Paragraph::new(*description).style(description_style),
                 columns[2],
             );
         }
 
         frame.render_widget(
-            Paragraph::new("SPACE TOGGLE   ESC BACK")
+            Paragraph::new("↑↓ SELECT   SPACE TOGGLE   ESC BACK")
                 .style(dim)
                 .alignment(Alignment::Center),
             Rect {
