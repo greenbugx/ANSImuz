@@ -159,7 +159,7 @@ fn handle_key(
     if app.settings_open {
         match key.code {
             KeyCode::Up => app.settings_cursor = app.settings_cursor.saturating_sub(1),
-            KeyCode::Down => app.settings_cursor = (app.settings_cursor + 1).min(2),
+            KeyCode::Down => app.settings_cursor = (app.settings_cursor + 1).min(3),
             KeyCode::Char(' ') | KeyCode::Enter => app.apply_setting(),
             KeyCode::Char('/') => {
                 app.settings_open = false;

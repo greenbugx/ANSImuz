@@ -1,5 +1,7 @@
 use std::{env, fs, path::PathBuf};
 
+use crate::{art, player};
+
 #[derive(Clone, Copy, Debug)]
 pub struct Settings {
     pub audio_cache: bool,
@@ -59,4 +61,43 @@ fn config_path() -> PathBuf {
     env::var("HOME")
         .map(|home| PathBuf::from(home).join(".config/ansimuz/settings.conf"))
         .unwrap_or_else(|_| PathBuf::from(".ansimuz-settings"))
+}
+
+pub fn cache_bytes() -> u64 {
+    dir_size(&art::cache_dir()) + dir_size(&player::audio_cache_dir())
+}
+
+pub fn clear_caches() {
+    let _ = fs::remove_dir_all(art::cache_dir());
+    let _ = fs::remove_dir_all(player::audio_cache_dir());
+    art::clear_memory_cache();
+}
+
+pub fn human_size(bytes: u64) -> String {
+    let kb = bytes as f64 / 1024.0;
+
+    if kb < 1024.0 {
+        format!("{kb:.1} KB")
+    } else if kb < 1024.0 * 1024.0 {
+        format!("{:.1} MB", kb / 1024.0)
+    } else {
+        format!("{:.1} GB", kb / 1024.0 / 1024.0)
+    }
+}
+
+fn dir_size(path: &PathBuf) -> u64 {
+    let Ok(entries) = fs::read_dir(path) else {
+        return 0;
+    };
+
+    entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| {
+            if entry.path().is_dir() {
+                dir_size(&entry.path())
+            } else {
+                entry.metadata().map(|meta| meta.len()).unwrap_or(0)
+            }
+        })
+        .sum()
 }

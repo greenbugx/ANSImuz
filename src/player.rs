@@ -293,7 +293,7 @@ fn json_number(line: &str, key: &str) -> Option<f64> {
     rest[..end].parse().ok()
 }
 
-fn audio_cache_dir() -> PathBuf {
+pub fn audio_cache_dir() -> PathBuf {
     std::env::temp_dir().join("ansimuz-audio")
 }
 

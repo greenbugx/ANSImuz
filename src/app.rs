@@ -143,7 +143,12 @@ impl App {
         match self.settings_cursor {
             0 => self.settings.audio_cache = !self.settings.audio_cache,
             1 => self.settings.art_hq = !self.settings.art_hq,
-            _ => self.settings.art_palette = !self.settings.art_palette,
+            2 => self.settings.art_palette = !self.settings.art_palette,
+            _ => {
+                crate::settings::clear_caches();
+                self.set_status("CACHES CLEARED");
+                return;
+            }
         }
 
         self.settings.save();
@@ -420,24 +425,38 @@ impl App {
         let mode = if self.settings.art_hq { "HQ" } else { "PIXEL" };
         let mode_style = if self.settings.art_hq { bold_green } else { dim };
 
-        let setting_rows = [
+        let cache_size = crate::settings::cache_bytes();
+        let size_text = if cache_size > 0 {
+            crate::settings::human_size(cache_size)
+        } else {
+            "EMPTY".to_string()
+        };
+        let size_style = if cache_size > 0 { bold_green } else { dim };
+
+        let setting_rows = vec![
             (
-                "Audio Cache:",
-                cache_state,
+                "Audio Cache:".to_string(),
+                cache_state.to_string(),
                 cache_style,
-                "Save played songs to /tmp for instant replays",
+                "Save played songs to /tmp for instant replays".to_string(),
             ),
             (
-                "Art Mode:",
-                mode,
+                "Art Mode:".to_string(),
+                mode.to_string(),
                 mode_style,
-                "HQ uses true graphics, pixel uses unicode blocks",
+                "HQ uses true graphics, pixel uses unicode blocks".to_string(),
             ),
             (
-                "Art Palette:",
-                palette_state,
+                "Art Palette:".to_string(),
+                palette_state.to_string(),
                 palette_style,
-                "Tint the selected track with the artwork colors",
+                "Tint the selected track with the artwork colors".to_string(),
+            ),
+            (
+                "Clear Caches:".to_string(),
+                size_text,
+                size_style,
+                "Removes cached artwork and audio from /tmp".to_string(),
             ),
         ];
 
@@ -511,9 +530,9 @@ impl App {
 
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled(*name, name_style),
+                    Span::styled(name.as_str(), name_style),
                     Span::raw(" "),
-                    Span::styled(*value, value_style),
+                    Span::styled(value.as_str(), value_style),
                 ]))
                 .style(cell_style)
                 .alignment(Alignment::Right),
@@ -527,7 +546,7 @@ impl App {
             };
 
             frame.render_widget(
-                Paragraph::new(*description).style(description_style),
+                Paragraph::new(description.as_str()).style(description_style),
                 columns[2],
             );
         }

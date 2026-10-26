@@ -31,8 +31,14 @@ fn picker() -> Option<&'static Picker> {
     PICKER.get().and_then(|picker| picker.as_ref())
 }
 
-fn cache_dir() -> PathBuf {
+pub fn cache_dir() -> PathBuf {
     std::env::temp_dir().join("ansimuz-artwork")
+}
+
+pub fn clear_memory_cache() {
+    if let Ok(mut guard) = art_cache().lock() {
+        guard.clear();
+    }
 }
 
 fn cache_path(url: &str) -> PathBuf {
