@@ -9,6 +9,7 @@ use ratatui::{
 };
 
 use crate::art;
+use crate::settings::Settings;
 
 fn logo_bitmap() -> Vec<Vec<bool>> {
     let lines: Vec<&str> = include_str!("../ascii.art")
@@ -111,6 +112,8 @@ pub struct App {
     pub volume: u8,
     pub status: String,
     status_at: Option<Instant>,
+    pub settings: Settings,
+    pub settings_open: bool,
     pub should_quit: bool,
 }
 
@@ -128,6 +131,8 @@ impl App {
             volume: 70,
             status: String::new(),
             status_at: None,
+            settings: Settings::load(),
+            settings_open: false,
             should_quit: false,
         }
     }
@@ -165,6 +170,11 @@ impl App {
                 Paragraph::new("TERMINAL TOO SMALL").alignment(Alignment::Center),
                 area,
             );
+            return;
+        }
+
+        if self.settings_open {
+            self.render_settings(frame, area);
             return;
         }
 
@@ -353,7 +363,7 @@ impl App {
         );
 
         frame.render_widget(
-            Paragraph::new("↑↓ SELECT  ENTER PLAY  SPACE PAUSE  ←→ TRACK  Q QUIT")
+            Paragraph::new("↑↓ SELECT  ENTER PLAY  SPACE PAUSE  ←→ TRACK  S SETTINGS  Q QUIT")
                 .style(dim)
                 .alignment(Alignment::Center),
             rows[12],
@@ -369,6 +379,104 @@ impl App {
             Some(at) if at.elapsed() < Duration::from_secs(3) => self.status.as_str(),
             _ => "",
         }
+    }
+
+    fn render_settings(&self, frame: &mut Frame, area: Rect) {
+        let green = Style::default().fg(Color::Green);
+        let bold_green = green.add_modifier(Modifier::BOLD);
+        let dim = Style::default().fg(Color::DarkGray);
+
+        let state = if self.settings.audio_cache {
+            "ON"
+        } else {
+            "OFF"
+        };
+        let state_style = if self.settings.audio_cache {
+            bold_green
+        } else {
+            dim
+        };
+
+        let setting_rows = [(
+            "Audio Cache:",
+            state,
+            state_style,
+            "Save played songs to /tmp for instant replays",
+        )];
+
+        let block_height = setting_rows.len() as u16 + 4;
+        let top = area.y + (area.height - block_height) / 2;
+
+        let name_width = setting_rows
+            .iter()
+            .map(|(name, value, ..)| name.chars().count() + value.chars().count() + 1)
+            .max()
+            .unwrap_or(0) as u16;
+        let description_width = setting_rows
+            .iter()
+            .map(|(.., description)| description.chars().count())
+            .max()
+            .unwrap_or(0) as u16;
+
+        let table_width = (name_width + 2 + description_width).min(area.width);
+        let table_x = area.x + (area.width - table_width) / 2;
+
+        frame.render_widget(
+            Paragraph::new("SETTINGS")
+                .style(bold_green)
+                .alignment(Alignment::Center),
+            Rect {
+                x: area.x,
+                y: top,
+                width: area.width,
+                height: 1,
+            },
+        );
+
+        for (offset, (name, value, value_style, description)) in
+            setting_rows.iter().enumerate()
+        {
+            let row = Rect {
+                x: table_x,
+                y: top + 2 + offset as u16,
+                width: table_width,
+                height: 1,
+            };
+
+            let columns = Layout::horizontal([
+                Constraint::Length(name_width),
+                Constraint::Length(2),
+                Constraint::Min(description_width),
+            ])
+            .split(row);
+
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(*name, green),
+                    Span::raw(" "),
+                    Span::styled(*value, *value_style),
+                ]))
+                .alignment(Alignment::Right),
+                columns[0],
+            );
+
+            frame.render_widget(
+                Paragraph::new(*description).style(dim),
+                columns[2],
+            );
+        }
+
+        frame.render_widget(
+            Paragraph::new("SPACE TOGGLE   ESC BACK")
+                .style(dim)
+                .alignment(Alignment::Center),
+            Rect {
+                x: area.x,
+                y: top + block_height - 1,
+                width: area.width,
+                height: 1,
+            },
+        );
     }
 
     fn render_search_box(

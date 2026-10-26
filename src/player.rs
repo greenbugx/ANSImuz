@@ -12,6 +12,7 @@ use std::{
 };
 
 const MAX_DUMP_BYTES: u64 = 64 * 1024 * 1024;
+const MIN_DUMP_BYTES: u64 = 100 * 1024;
 
 pub enum PlayerEvent {
     Position {
@@ -51,7 +52,11 @@ impl AudioPlayer {
 
     pub fn cached_audio(url: &str) -> Option<PathBuf> {
         let path = audio_cache_dir().join(format!("{}.audio", audio_hash(url)));
-        path.exists().then_some(path)
+        path.metadata()
+            .map(|meta| meta.len() > 0)
+            .ok()
+            .filter(|ok| *ok)
+            .map(|_| path)
     }
 
     pub fn prefetch_later(&self, url: &str, delay_secs: u64) {
@@ -317,59 +322,80 @@ fn start_dump(url: String, dumping: Arc<Mutex<HashSet<String>>>) {
     let part = audio_cache_dir().join(format!("{}.part", audio_hash(&url)));
     let final_path = audio_cache_dir().join(format!("{}.audio", audio_hash(&url)));
 
-    let child = Command::new("mpv")
-        .arg("--no-video")
-        .arg("--no-audio")
-        .arg("--really-quiet")
-        .arg(format!("--stream-dump={}", part.display()))
-        .arg(&url)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-
-    let mut child = match child {
-        Ok(child) => child,
-        Err(_) => {
-            if let Ok(mut set) = dumping.lock() {
-                set.remove(&url);
-            }
-            return;
-        }
-    };
-
     thread::spawn(move || {
-        for _ in 0..600 {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    if status.success() && part.exists() {
-                        let _ = fs::rename(&part, &final_path);
-                    } else {
-                        let _ = fs::remove_file(&part);
-                    }
-                    break;
-                }
-                Ok(None) => {
-                    if part
-                        .metadata()
-                        .map(|meta| meta.len() > MAX_DUMP_BYTES)
-                        .unwrap_or(false)
-                    {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        let _ = fs::remove_file(&part);
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
+        let mut saved = false;
 
-            thread::sleep(Duration::from_secs(1));
+        if let Some(media) = resolve_stream(&url) {
+            let dump = Command::new("mpv")
+                .arg("--no-video")
+                .arg("--no-audio")
+                .arg("--really-quiet")
+                .arg(format!("--stream-dump={}", part.display()))
+                .arg(&media)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
+
+            if let Ok(mut child) = dump {
+                for _ in 0..600 {
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            saved = status.success()
+                                && part
+                                    .metadata()
+                                    .map(|meta| meta.len() >= MIN_DUMP_BYTES)
+                                    .unwrap_or(false);
+                            break;
+                        }
+                        Ok(None) => {
+                            if part
+                                .metadata()
+                                .map(|meta| meta.len() > MAX_DUMP_BYTES)
+                                .unwrap_or(false)
+                            {
+                                let _ = child.kill();
+                                let _ = child.wait();
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+
+                    thread::sleep(Duration::from_secs(1));
+                }
+            }
         }
 
-        let _ = fs::remove_file(&part);
+        if saved && part.exists() {
+            let _ = fs::rename(&part, &final_path);
+        } else {
+            let _ = fs::remove_file(&part);
+        }
 
         if let Ok(mut set) = dumping.lock() {
             set.remove(&url);
         }
     });
+}
+
+fn resolve_stream(url: &str) -> Option<String> {
+    let output = Command::new("yt-dlp")
+        .arg("-f")
+        .arg("bestaudio")
+        .arg("--get-url")
+        .arg(url)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let media = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()?
+        .trim()
+        .to_string();
+
+    (!media.is_empty()).then_some(media)
 }

@@ -17,6 +17,7 @@ use pyo3::types::{PyList, PyModule};
 mod app;
 mod art;
 mod player;
+mod settings;
 
 use player::{AudioPlayer, PlayerEvent};
 
@@ -153,6 +154,26 @@ fn handle_key(
     search_tx: &Sender<SearchResult>,
     player_tx: &Sender<PlayerEvent>,
 ) {
+    if app.settings_open {
+        match key.code {
+            KeyCode::Char(' ') | KeyCode::Enter => {
+                app.settings.audio_cache = !app.settings.audio_cache;
+                app.settings.save();
+            }
+            KeyCode::Char('/') => {
+                app.settings_open = false;
+                app.mode = Mode::Type;
+            }
+            KeyCode::Esc => {
+                app.settings_open = false;
+                app.mode = Mode::Nav;
+            }
+            _ => {}
+        }
+
+        return;
+    }
+
     match app.mode {
         Mode::Type => match key.code {
             KeyCode::Char('/') | KeyCode::Esc => app.mode = Mode::Nav,
@@ -231,6 +252,8 @@ fn handle_key(
 
             KeyCode::Char('/') => app.mode = Mode::Type,
 
+            KeyCode::Char('s') | KeyCode::Char('S') => app.settings_open = true,
+
             _ => {}
         },
     }
@@ -257,7 +280,9 @@ fn play_track(
             app.paused = false;
             app.set_status(format!("PLAYING: {} — {}", track.title, track.artist));
 
-            player.prefetch_later(&track.stream_url, 15);
+            if app.settings.audio_cache {
+                player.prefetch_later(&track.stream_url, 15);
+            }
 
             if app.tracks.len() > 1 {
                 let next = app
@@ -265,7 +290,9 @@ fn play_track(
                     .get((index + 1) % app.tracks.len())
                     .expect("index within tracks");
 
-                player.prefetch_later(&next.stream_url, 25);
+                if app.settings.audio_cache {
+                    player.prefetch_later(&next.stream_url, 25);
+                }
                 art::prefetch(&next.art_url);
             }
         }
