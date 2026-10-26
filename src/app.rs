@@ -336,29 +336,42 @@ impl App {
         };
 
         let width = bar_width;
-        let bar: Line = playback
-            .and_then(|(elapsed, duration)| duration.filter(|d| *d > 0.0).map(|d| (elapsed, d)))
-            .map(|(elapsed, duration)| {
-                let ratio = (elapsed / duration).clamp(0.0, 1.0);
-                let marker = ((width as f64) * ratio).round() as usize;
+        let song_loading = self.playing.is_some() && playback.is_none();
 
-                Line::from(
-                    (0..width)
-                        .map(|i| {
-                            if i == marker {
-                                Span::styled("█", bold_green)
-                            } else if i < marker {
-                                Span::styled("▄", bold_green)
-                            } else {
-                                Span::styled("▄", dim)
-                            }
-                        })
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .unwrap_or_else(|| Line::from(Span::styled("▄".repeat(width), dim)));
+        if song_loading {
+            frame.render_widget(
+                Paragraph::new(format!("LOADING {}", crate::art::loading_moons()))
+                    .style(bold_green)
+                    .alignment(Alignment::Center),
+                bar_area,
+            );
+        } else {
+            let bar: Line = playback
+                .and_then(|(elapsed, duration)| {
+                    duration.filter(|d| *d > 0.0).map(|d| (elapsed, d))
+                })
+                .map(|(elapsed, duration)| {
+                    let ratio = (elapsed / duration).clamp(0.0, 1.0);
+                    let marker = ((width as f64) * ratio).round() as usize;
 
-        frame.render_widget(Paragraph::new(bar), bar_area);
+                    Line::from(
+                        (0..width)
+                            .map(|i| {
+                                if i == marker {
+                                    Span::styled("█", bold_green)
+                                } else if i < marker {
+                                    Span::styled("▄", bold_green)
+                                } else {
+                                    Span::styled("▄", dim)
+                                }
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .unwrap_or_else(|| Line::from(Span::styled("▄".repeat(width), dim)));
+
+            frame.render_widget(Paragraph::new(bar), bar_area);
+        }
 
         let cluster = Rect {
             x: rows[10].x + rows[10].width.saturating_sub(45) / 2,
@@ -400,14 +413,14 @@ impl App {
         );
     }
 
-    fn visible_status(&self) -> &str {
+    fn visible_status(&self) -> String {
         if self.loading {
-            return "SEARCHING…";
+            return format!("SEARCHING {}", crate::art::loading_moons());
         }
 
         match self.status_at {
-            Some(at) if at.elapsed() < Duration::from_secs(3) => self.status.as_str(),
-            _ => "",
+            Some(at) if at.elapsed() < Duration::from_secs(3) => self.status.clone(),
+            _ => String::new(),
         }
     }
 

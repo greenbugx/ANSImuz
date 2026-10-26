@@ -4,13 +4,14 @@ use std::{
     path::PathBuf,
     sync::{Mutex, OnceLock},
     thread,
+    time::Instant,
 };
 
 use image::{
     imageops::FilterType, DynamicImage, GenericImage, GenericImageView, Rgba,
 };
 use ratatui::{
-    layout::{Rect, Size},
+    layout::{Alignment, Rect, Size},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
@@ -25,6 +26,21 @@ static PICKER: OnceLock<Option<Picker>> = OnceLock::new();
 
 pub fn init_picker() {
     let _ = PICKER.set(Picker::from_query_stdio().ok());
+}
+
+pub fn loading_moons() -> String {
+    static START: OnceLock<Instant> = OnceLock::new();
+
+    const FRAMES: [&str; 8] = [
+        "🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘",
+    ];
+    const INTERVAL_MS: usize = 80;
+
+    let elapsed = START.get_or_init(Instant::now).elapsed().as_millis() as usize;
+    let index = elapsed / INTERVAL_MS;
+
+    let moon = |phase: usize| FRAMES[phase % FRAMES.len()].to_string();
+    format!("{} {} {}", moon(index), moon(index + 1), moon(index + 2))
 }
 
 fn picker() -> Option<&'static Picker> {
@@ -221,9 +237,7 @@ pub fn render_art(frame: &mut Frame, area: Rect, url: &str, title: &str, artist:
                     render_pixels(frame, art_area, pixel_image, side);
                 }
             }
-            Err(message) if message == "loading" => {
-                render_message(frame, art_area, "LOADING ART…", Color::DarkGray)
-            }
+            Err(message) if message == "loading" => render_loading(frame, art_area),
             Err(_) => {
                 let fallback = fallback_image(side);
 
@@ -371,15 +385,31 @@ fn fallback_image(side: u32) -> DynamicImage {
     image
 }
 
-fn render_message(frame: &mut Frame, area: Rect, message: &str, color: Color) {
-    let y = area.y + area.height / 2;
+fn render_loading(frame: &mut Frame, area: Rect) {
+    let green = Style::default().fg(Color::Green);
+    let dim = Style::default().fg(Color::DarkGray);
+
+    let moons = Rect {
+        x: area.x,
+        y: area.y + area.height / 2,
+        width: area.width,
+        height: 1,
+    };
+
     frame.render_widget(
-        Paragraph::new(message)
-            .style(Style::default().fg(color))
-            .centered(),
+        Paragraph::new(loading_moons())
+            .style(green)
+            .alignment(Alignment::Center),
+        moons,
+    );
+
+    frame.render_widget(
+        Paragraph::new("LOADING ART")
+            .style(dim)
+            .alignment(Alignment::Center),
         Rect {
             x: area.x,
-            y,
+            y: moons.y + 1,
             width: area.width,
             height: 1,
         },
