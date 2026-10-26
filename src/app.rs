@@ -627,7 +627,7 @@ fn render_spectrum(
     }
 
     let count = BAND_COUNT.min((chart_width / 2).max(1));
-    let slot_width = (chart_width / count).max(1);
+    let slot_width = (chart_width.saturating_sub(count.saturating_sub(1)) / count).max(1);
     let chart_area = Rect {
         x: area.x,
         y: area.y + 1,
