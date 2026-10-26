@@ -340,7 +340,7 @@ impl App {
 
         if song_loading {
             frame.render_widget(
-                Paragraph::new(format!("LOADING {}", crate::art::loading_moons()))
+                Paragraph::new(format!(" {} ", crate::art::loading_moons()))
                     .style(bold_green)
                     .alignment(Alignment::Center),
                 bar_area,
@@ -415,7 +415,7 @@ impl App {
 
     fn visible_status(&self) -> String {
         if self.loading {
-            return format!("SEARCHING {}", crate::art::loading_moons());
+            return format!(" {} ", crate::art::loading_moons());
         }
 
         match self.status_at {

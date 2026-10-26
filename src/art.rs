@@ -65,6 +65,20 @@ fn cache_path(url: &str) -> PathBuf {
     cache_dir().join(format!("{hash:08x}.img"))
 }
 
+fn decode_artwork(bytes: &[u8]) -> Result<DynamicImage, String> {
+    let image = image::load_from_memory(bytes).map_err(|e| format!("Cannot decode artwork: {e}"))?;
+
+    let (width, height) = image.dimensions();
+    let image = if width > height {
+        let left = (width - height) / 2;
+        image.crop_imm(left, 0, height, height)
+    } else {
+        image
+    };
+
+    Ok(image)
+}
+
 fn load_image(url: &str) -> Result<DynamicImage, String> {
     if url.trim().is_empty() {
         return Err("No artwork URL".into());
@@ -74,7 +88,7 @@ fn load_image(url: &str) -> Result<DynamicImage, String> {
 
     if path.exists() {
         if let Ok(bytes) = fs::read(&path) {
-            if let Ok(image) = image::load_from_memory(&bytes) {
+            if let Ok(image) = decode_artwork(&bytes) {
                 return Ok(image);
             }
         }
@@ -120,16 +134,7 @@ fn load_image(url: &str) -> Result<DynamicImage, String> {
         return Err("Artwork image is too large".into());
     }
 
-    let image = image::load_from_memory(&bytes)
-        .map_err(|e| format!("Cannot decode artwork: {e}"))?;
-
-    let (width, height) = image.dimensions();
-    let image = if width > height {
-        let left = (width - height) / 2;
-        image.crop_imm(left, 0, height, height)
-    } else {
-        image
-    };
+    let image = decode_artwork(&bytes)?;
 
     let _ = fs::create_dir_all(cache_dir());
     let _ = fs::write(path, &bytes);
