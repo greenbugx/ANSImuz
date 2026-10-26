@@ -672,7 +672,7 @@ fn render_spectrum(
                 ));
             }
 
-            if column + 1 < count && slot_width > 2 {
+            if column + 1 < count {
                 spans.push(Span::raw(" "));
             }
         }
