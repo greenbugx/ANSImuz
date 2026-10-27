@@ -6,7 +6,17 @@ import requests
 from PIL import Image
 from ytmusicapi import YTMusic
 
-ARTWORK_CACHE_DIR = "/tmp/ansimuz-artwork"
+MIN_ARTWORK_SIDE = 200
+
+
+def _cache_base_dir():
+    return os.path.join(
+        os.environ.get("XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")),
+        "ansimuz",
+    )
+
+
+ARTWORK_CACHE_DIR = os.path.join(_cache_base_dir(), "artwork")
 
 
 def search(query):
@@ -52,6 +62,22 @@ def cache_path(url):
     return os.path.join(ARTWORK_CACHE_DIR, f"{h:08x}.img")
 
 
+def _is_gray_placeholder(img):
+    """Detect YouTube's uniformly-gray placeholder thumbnails by sampling an 8x8 grid."""
+    w, h = img.size
+    steps = 8
+    dx = max(w // steps, 1)
+    dy = max(h // steps, 1)
+    for sy in range(steps):
+        for sx in range(steps):
+            x = min(sx * dx, w - 1)
+            y = min(sy * dy, h - 1)
+            r, g, b = img.getpixel((x, y))[:3]
+            if r != g or g != b:
+                return False
+    return True
+
+
 def fetch_square_artwork(url):
     response = requests.get(url, timeout=8)
 
@@ -62,6 +88,12 @@ def fetch_square_artwork(url):
 
     img = Image.open(io.BytesIO(response.content))
     width, height = img.size
+
+    if width < MIN_ARTWORK_SIDE or height < MIN_ARTWORK_SIDE:
+        raise ValueError(f"Artwork too small ({width}x{height}), likely a placeholder")
+
+    if _is_gray_placeholder(img):
+        raise ValueError("Detected YouTube placeholder thumbnail")
 
     if width > height:
         left = (width - height) // 2

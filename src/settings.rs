@@ -1,5 +1,17 @@
 use std::{env, fs, path::PathBuf};
 
+// returns the base directory for cache files, following the XDG Base Directory Specification
+pub fn cache_base_dir() -> PathBuf {
+    env::var("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            env::var("HOME")
+                .map(|h| PathBuf::from(h).join(".cache"))
+                .unwrap_or_else(|_| env::temp_dir())
+        })
+        .join("ansimuz")
+}
+
 use crate::{art, player};
 
 #[derive(Clone, Copy, Debug)]

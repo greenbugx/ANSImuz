@@ -543,7 +543,7 @@ impl App {
                 "Clear Caches:".to_string(),
                 size_text,
                 size_style,
-                "Removes cached artwork and audio from /tmp".to_string(),
+                "Removes cached artwork and audio".to_string(),
             ),
         ];
 

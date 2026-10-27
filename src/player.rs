@@ -294,7 +294,7 @@ fn json_number(line: &str, key: &str) -> Option<f64> {
 }
 
 pub fn audio_cache_dir() -> PathBuf {
-    std::env::temp_dir().join("ansimuz-audio")
+    crate::settings::cache_base_dir().join("audio")
 }
 
 fn audio_hash(url: &str) -> String {
