@@ -1,25 +1,44 @@
 use std::path::PathBuf;
 
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PyModule};
+use pyo3::types::{PyDict, PyList, PyModule};
 
 use super::track::Track;
+use crate::config::Provider;
 
 pub type SearchResult = (String, Result<Vec<Track>, String>);
 
-pub fn search_music(query: String) -> SearchResult {
+fn ensure_backend_path(py: Python<'_>) -> PyResult<()> {
+    let sys = PyModule::import(py, "sys")?;
+    let path = sys.getattr("path")?.cast_into::<PyList>()?;
+    let backend_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("backend");
+    let backend_str = backend_path.to_string_lossy();
+
+    let mut found = false;
+    for item in path.iter() {
+        if let Ok(s) = item.extract::<String>() {
+            if s == backend_str.as_ref() {
+                found = true;
+                break;
+            }
+        }
+    }
+
+    if !found {
+        path.insert(0, backend_str.as_ref())?;
+    }
+
+    Ok(())
+}
+
+pub fn search_music(query: String, provider: Provider) -> SearchResult {
     let result = Python::attach(|py| -> PyResult<Vec<Track>> {
-        let sys = PyModule::import(py, "sys")?;
-        let path = sys.getattr("path")?.cast_into::<PyList>()?;
-
-        let backend_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("backend");
-
-        path.insert(0, backend_path.to_string_lossy().as_ref())?;
+        ensure_backend_path(py)?;
 
         let bridge = PyModule::import(py, "bridge")?;
         let results = bridge
             .getattr("search_music")?
-            .call1((query.clone(),))?
+            .call1((query.clone(), provider.as_str()))?
             .cast_into::<PyList>()?;
 
         let mut tracks = Vec::new();
@@ -27,17 +46,47 @@ pub fn search_music(query: String) -> SearchResult {
         for item in results.iter() {
             let title = item.get_item("title")?.extract::<String>()?;
             let artist = item.get_item("artist")?.extract::<String>()?;
-            let stream_url = item.get_item("stream_url")?.extract::<String>()?;
-            let art_url = item
-                .get_item("art_url")?
-                .extract::<String>()
+            let stream_url = item
+                .get_item("stream_url")
+                .and_then(|v| v.extract::<String>())
                 .unwrap_or_default();
+            let art_url = item
+                .get_item("art_url")
+                .and_then(|v| v.extract::<String>())
+                .unwrap_or_default();
+
+            let spotify_id = item
+                .get_item("spotify_id")
+                .ok()
+                .and_then(|v| v.extract::<String>().ok())
+                .filter(|s| !s.is_empty());
+
+            let artists = item
+                .get_item("artists")
+                .ok()
+                .and_then(|v| v.extract::<Vec<String>>().ok())
+                .unwrap_or_else(|| vec![artist.clone()]);
+
+            let album = item
+                .get_item("album")
+                .ok()
+                .and_then(|v| v.extract::<String>().ok())
+                .filter(|s| !s.is_empty());
+
+            let duration_ms = item
+                .get_item("duration_ms")
+                .ok()
+                .and_then(|v| v.extract::<u64>().ok());
 
             tracks.push(Track {
                 title,
                 artist,
                 stream_url,
                 art_url,
+                spotify_id,
+                artists,
+                album,
+                duration_ms,
             });
         }
 
@@ -46,4 +95,80 @@ pub fn search_music(query: String) -> SearchResult {
     .map_err(|error| error.to_string());
 
     (query, result)
+}
+
+pub fn resolve_playable(track: &Track) -> Result<Track, String> {
+    if !track.stream_url.is_empty() {
+        return Ok(track.clone());
+    }
+
+    Python::attach(|py| -> PyResult<Track> {
+        ensure_backend_path(py)?;
+
+        let bridge = PyModule::import(py, "bridge")?;
+
+        let dict = PyDict::new(py);
+        dict.set_item("title", &track.title)?;
+        dict.set_item("artist", &track.artist)?;
+        dict.set_item("stream_url", &track.stream_url)?;
+        dict.set_item("art_url", &track.art_url)?;
+        if let Some(id) = &track.spotify_id {
+            dict.set_item("spotify_id", id)?;
+        }
+        dict.set_item("artists", track.artists.clone())?;
+        if let Some(album) = &track.album {
+            dict.set_item("album", album)?;
+        }
+        if let Some(ms) = track.duration_ms {
+            dict.set_item("duration_ms", ms)?;
+        }
+        let resolved = bridge.getattr("resolve_playable")?.call1((dict,))?;
+
+        let title = resolved.get_item("title")?.extract::<String>()?;
+        let artist = resolved.get_item("artist")?.extract::<String>()?;
+        let stream_url = resolved
+            .get_item("stream_url")
+            .and_then(|v| v.extract::<String>())
+            .unwrap_or_default();
+        let art_url = resolved
+            .get_item("art_url")
+            .and_then(|v| v.extract::<String>())
+            .unwrap_or_else(|_| track.art_url.clone());
+
+        let spotify_id = resolved
+            .get_item("spotify_id")
+            .ok()
+            .and_then(|v| v.extract::<String>().ok())
+            .or_else(|| track.spotify_id.clone());
+
+        let artists = resolved
+            .get_item("artists")
+            .ok()
+            .and_then(|v| v.extract::<Vec<String>>().ok())
+            .unwrap_or_else(|| track.artists.clone());
+
+        let album = resolved
+            .get_item("album")
+            .ok()
+            .and_then(|v| v.extract::<String>().ok())
+            .or_else(|| track.album.clone());
+
+        let duration_ms = resolved
+            .get_item("duration_ms")
+            .ok()
+            .and_then(|v| v.extract::<u64>().ok())
+            .or(track.duration_ms);
+
+        Ok(Track {
+            title,
+            artist,
+            stream_url,
+            art_url,
+            spotify_id,
+            artists,
+            album,
+            duration_ms,
+        })
+    })
+    .map_err(|error| error.to_string())
 }

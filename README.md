@@ -1,10 +1,10 @@
 # ANSImuz
 
-A lightweight terminal music player with retro 8-bit ANSI vibes, built with Rust, Ratatui, Python, and [`ytmusicapi`](https://github.com/sigma67/ytmusicapi).
+A lightweight terminal music player with retro 8-bit ANSI vibes, built with Rust, Ratatui, Python, [`ytmusicapi`](https://github.com/sigma67/ytmusicapi) and [`spotifyscraper`](https://github.com/AliAkhtari78/SpotifyScraper)
 
 ## Features
 
-- Search and play music from YouTube Music
+- Search and play music from the selected provider (YT Music & Spotify)
 - Render album artwork directly in the terminal
 - Artwork caching and prewarming
 - Shuffle and repeat playback modes
@@ -60,7 +60,8 @@ cargo run
 | `X` | Toggle shuffle |
 | `R` | Cycle repeat mode |
 | `+` / `-` | Adjust volume |
-| `S` | Open settings |
+| `:` | Commands |
+| `?` | Help |
 | `Q` | Quit |
 
 ## License

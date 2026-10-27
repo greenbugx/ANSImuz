@@ -1,10 +1,40 @@
 use std::{env, fs, path::PathBuf};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Provider {
+    YtMusic,
+    Spotify,
+}
+
+impl Provider {
+    pub fn label(self) -> &'static str {
+        match self {
+            Provider::YtMusic => "YOUTUBE MUSIC",
+            Provider::Spotify => "SPOTIFY",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Provider::YtMusic => "ytmusic",
+            Provider::Spotify => "spotify",
+        }
+    }
+
+    pub fn toggle(self) -> Self {
+        match self {
+            Provider::YtMusic => Provider::Spotify,
+            Provider::Spotify => Provider::YtMusic,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Settings {
     pub audio_cache: bool,
     pub art_hq: bool,
     pub art_palette: bool,
+    pub provider: Provider,
 }
 
 impl Settings {
@@ -13,6 +43,7 @@ impl Settings {
             audio_cache: false,
             art_hq: true,
             art_palette: false,
+            provider: Provider::YtMusic,
         };
 
         let Ok(content) = fs::read_to_string(config_path()) else {
@@ -31,10 +62,15 @@ impl Settings {
                 "audio_cache" => settings.audio_cache = value.trim() == "true",
                 "art_hq" => settings.art_hq = value.trim() == "true",
                 "art_palette" => settings.art_palette = value.trim() == "true",
+                "provider" => {
+                    settings.provider = match value.trim().to_lowercase().as_str() {
+                        "spotify" => Provider::Spotify,
+                        _ => Provider::YtMusic,
+                    };
+                }
                 _ => {}
             }
         }
-
         settings
     }
 
@@ -48,8 +84,11 @@ impl Settings {
         let _ = fs::write(
             path,
             format!(
-                "audio_cache={}\nart_hq={}\nart_palette={}\n",
-                self.audio_cache, self.art_hq, self.art_palette
+                "audio_cache={}\nart_hq={}\nart_palette={}\nprovider={}\n",
+                self.audio_cache,
+                self.art_hq,
+                self.art_palette,
+                self.provider.as_str()
             ),
         );
     }

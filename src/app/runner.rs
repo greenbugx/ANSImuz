@@ -138,9 +138,25 @@ pub fn play_track(
     events: Sender<PlayerEvent>,
     index: usize,
 ) {
-    let Some(track) = app.tracks.get(index).cloned() else {
+    let Some(mut track) = app.tracks.get(index).cloned() else {
         return;
     };
+
+    if track.stream_url.is_empty() {
+        app.set_status(format!("RESOLVING: {} — {}", track.title, track.artist));
+        match crate::music::resolve_playable(&track) {
+            Ok(resolved) => {
+                track = resolved.clone();
+                if let Some(slot) = app.tracks.get_mut(index) {
+                    *slot = resolved;
+                }
+            }
+            Err(error) => {
+                app.set_status(format!("RESOLVE ERROR: {}", error));
+                return;
+            }
+        }
+    }
 
     let source = AudioPlayer::cached_audio(&track.stream_url)
         .map(|path| path.to_string_lossy().into_owned())

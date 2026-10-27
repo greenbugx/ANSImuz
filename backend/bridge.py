@@ -1,8 +1,19 @@
-from providers import yt_music
+from providers import spotify, ytmusic
 
-def search_music(query):
+
+def search_music(query, provider="ytmusic"):
     """
     Main bridge function invoked directly by Rust via PyO3.
     """
-    # for now pull directly from YT Music
-    return yt_music.search(query)
+    if provider == "spotify":
+        return spotify.search(query)
+    return ytmusic.search(query)
+
+
+def resolve_playable(track):
+    """
+    Resolves lazy playback URL for Spotify tracks.
+    """
+    if track.get("stream_url"):
+        return track
+    return spotify.resolve_playable(track)

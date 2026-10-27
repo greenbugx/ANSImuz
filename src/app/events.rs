@@ -74,7 +74,7 @@ pub fn handle_key(
     if app.settings_open {
         match key.code {
             KeyCode::Up => app.settings_cursor = app.settings_cursor.saturating_sub(1),
-            KeyCode::Down => app.settings_cursor = (app.settings_cursor + 1).min(3),
+            KeyCode::Down => app.settings_cursor = (app.settings_cursor + 1).min(4),
             KeyCode::Char(' ') | KeyCode::Enter => app.apply_setting(),
             KeyCode::Char('/') => {
                 app.settings_open = false;
@@ -102,6 +102,7 @@ pub fn handle_key(
 
             KeyCode::Enter if !app.loading => {
                 let query = app.query.trim().to_string();
+                let provider = app.settings.provider;
 
                 if !query.is_empty() && query != app.last_query {
                     app.loading = true;
@@ -110,7 +111,7 @@ pub fn handle_key(
                     let tx = search_tx.clone();
 
                     std::thread::spawn(move || {
-                        let _ = tx.send(search_music(query));
+                        let _ = tx.send(search_music(query, provider));
                     });
                 } else {
                     play_track(app, player, player_tx.clone(), app.selected);

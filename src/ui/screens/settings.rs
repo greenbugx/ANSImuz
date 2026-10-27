@@ -6,7 +6,7 @@ use ratatui::{
     widgets::Paragraph,
 };
 
-use crate::config::Settings;
+use crate::config::{Provider, Settings};
 
 pub fn render_settings(frame: &mut Frame, area: Rect, settings: &Settings, cursor: usize) {
     let green = Style::default().fg(Color::Green);
@@ -38,12 +38,23 @@ pub fn render_settings(frame: &mut Frame, area: Rect, settings: &Settings, curso
     };
     let size_style = if cache_size > 0 { bold_green } else { dim };
 
+    let provider_desc = match settings.provider {
+        Provider::YtMusic => "Stream directly from YouTube Music".to_string(),
+        Provider::Spotify => "Search Spotify with lazy YouTube resolution".to_string(),
+    };
+
     let setting_rows = vec![
+        (
+            "Provider:".to_string(),
+            settings.provider.label().to_string(),
+            bold_green,
+            provider_desc,
+        ),
         (
             "Audio Cache:".to_string(),
             cache_state.to_string(),
             cache_style,
-            "Save played songs to /tmp for instant replays".to_string(),
+            "Save played songs to cache for instant replays".to_string(),
         ),
         (
             "Art Mode:".to_string(),

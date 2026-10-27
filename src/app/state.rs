@@ -93,9 +93,10 @@ impl App {
 
     pub fn apply_setting(&mut self) {
         match self.settings_cursor {
-            0 => self.settings.audio_cache = !self.settings.audio_cache,
-            1 => self.settings.art_hq = !self.settings.art_hq,
-            2 => self.settings.art_palette = !self.settings.art_palette,
+            0 => self.settings.provider = self.settings.provider.toggle(),
+            1 => self.settings.audio_cache = !self.settings.audio_cache,
+            2 => self.settings.art_hq = !self.settings.art_hq,
+            3 => self.settings.art_palette = !self.settings.art_palette,
             _ => {
                 crate::config::clear_caches();
                 self.set_status("CACHES CLEARED");
