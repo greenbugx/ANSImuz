@@ -2,6 +2,7 @@ use ratatui::{
     Frame,
     layout::{Alignment, Rect},
     style::Style,
+    text::{Line, Span},
     widgets::Paragraph,
 };
 
@@ -12,7 +13,8 @@ pub fn render_header(
     area: Rect,
     volume: u8,
     playback: Option<(f64, Option<f64>)>,
-    green: Style,
+    primary: Style,
+    bold_primary: Style,
 ) {
     let filled = (volume as usize).min(100) / 10;
     let bars = format!("{}{}", "█".repeat(filled), "░".repeat(10 - filled));
@@ -20,10 +22,10 @@ pub fn render_header(
         .map(|(elapsed, _)| format_time(elapsed))
         .unwrap_or_else(|| "--:--".into());
 
-    frame.render_widget(
-        Paragraph::new(format!("VOL {} {}", bars, clock))
-            .style(green)
-            .alignment(Alignment::Right),
-        area,
-    );
+    let line = Line::from(vec![
+        Span::styled(format!("VOL {bars} "), primary),
+        Span::styled(clock, bold_primary),
+    ]);
+
+    frame.render_widget(Paragraph::new(line).alignment(Alignment::Right), area);
 }

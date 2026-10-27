@@ -1,14 +1,13 @@
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
-    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
 };
 
-use crate::ui::theme::{bold_green, dim, green};
+use crate::ui::theme::Theme;
 
-pub fn render_help(frame: &mut Frame, area: Rect) {
+pub fn render_help(frame: &mut Frame, area: Rect, theme: &Theme) {
     let popup_width = 58.min(area.width.saturating_sub(4));
     let popup_height = 20.min(area.height.saturating_sub(2));
 
@@ -21,17 +20,13 @@ pub fn render_help(frame: &mut Frame, area: Rect) {
 
     frame.render_widget(Clear, rect);
 
-    let green_style = green();
-    let bold_green_style = bold_green();
-    let dim_style = dim();
-
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(green_style)
+        .border_style(theme.primary)
         .title(
             Line::from(vec![Span::styled(
                 " HELP — KEYBOARD SHORTCUTS ",
-                bold_green_style,
+                theme.bold_primary,
             )])
             .centered(),
         );
@@ -75,21 +70,14 @@ pub fn render_help(frame: &mut Frame, area: Rect) {
     for (cat_name, items) in sections {
         lines.push(Line::from(vec![Span::styled(
             format!(" [{cat_name}]"),
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
+            theme.bold_primary,
         )]));
 
         for (shortcut, desc) in *items {
             lines.push(Line::from(vec![
                 Span::raw("   "),
-                Span::styled(
-                    format!("{shortcut:<12}"),
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(*desc, dim_style),
+                Span::styled(format!("{shortcut:<12}"), theme.bold_primary),
+                Span::styled(*desc, theme.dim),
             ]));
         }
 
@@ -98,7 +86,7 @@ pub fn render_help(frame: &mut Frame, area: Rect) {
 
     lines.push(Line::from(vec![Span::styled(
         "Press ESC, ?, or Q to close",
-        dim_style,
+        theme.dim,
     )]));
 
     let content_layout = Layout::vertical([Constraint::Min(1)]).split(inner);

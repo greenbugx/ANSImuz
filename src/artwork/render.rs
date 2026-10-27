@@ -37,7 +37,15 @@ fn picker() -> Option<&'static Picker> {
     PICKER.get().and_then(|picker| picker.as_ref())
 }
 
-pub fn render_art(frame: &mut Frame, area: Rect, url: &str, title: &str, artist: &str, hq: bool) {
+pub fn render_art(
+    frame: &mut Frame,
+    area: Rect,
+    url: &str,
+    title: &str,
+    artist: &str,
+    hq: bool,
+    accent: Option<Color>,
+) {
     if area.width < 4 || area.height < 3 {
         return;
     }
@@ -81,7 +89,9 @@ pub fn render_art(frame: &mut Frame, area: Rect, url: &str, title: &str, artist:
                     render_pixels(frame, art_area, pixel_image, side);
                 }
             }
-            Err(message) if message == "loading" => render_loading(frame, art_area),
+            Err(message) if message == "loading" => {
+                render_loading(frame, art_area, accent.unwrap_or(Color::Green))
+            }
             Err(_) => {
                 let fallback = fallback_image(side);
 
@@ -93,7 +103,7 @@ pub fn render_art(frame: &mut Frame, area: Rect, url: &str, title: &str, artist:
     }
 
     if area.height > 3 {
-        render_details(frame, area, title, artist);
+        render_details(frame, area, title, artist, accent.unwrap_or(Color::Green));
     }
 }
 
@@ -169,10 +179,9 @@ fn fallback_image(side: u32) -> DynamicImage {
     image
 }
 
-fn render_loading(frame: &mut Frame, area: Rect) {
-    let green = Style::default().fg(Color::Green);
+fn render_loading(frame: &mut Frame, area: Rect, accent: Color) {
+    let accent_style = Style::default().fg(accent);
     let dim = Style::default().fg(Color::DarkGray);
-
     let moons = Rect {
         x: area.x,
         y: area.y + area.height / 2,
@@ -182,7 +191,7 @@ fn render_loading(frame: &mut Frame, area: Rect) {
 
     frame.render_widget(
         Paragraph::new(loading_moons())
-            .style(green)
+            .style(accent_style)
             .alignment(Alignment::Center),
         moons,
     );
@@ -200,13 +209,11 @@ fn render_loading(frame: &mut Frame, area: Rect) {
     );
 }
 
-fn render_details(frame: &mut Frame, area: Rect, title: &str, artist: &str) {
+fn render_details(frame: &mut Frame, area: Rect, title: &str, artist: &str, accent: Color) {
     let rows = [
         (
             title,
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
         ),
         (artist, Style::default().fg(Color::DarkGray)),
     ];

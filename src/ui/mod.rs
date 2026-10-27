@@ -10,6 +10,19 @@ use screens::{
     settings::render_settings,
 };
 
+fn current_palette_color(app: &App) -> Option<(u8, u8, u8)> {
+    if !app.settings.art_palette {
+        return None;
+    }
+
+    let current = app
+        .now_playing
+        .as_ref()
+        .or_else(|| app.tracks.get(app.selected));
+
+    current.and_then(|track| crate::artwork::dominant_color(&track.art_url))
+}
+
 pub fn render(app: &App, frame: &mut Frame, playback: Option<(f64, Option<f64>)>) {
     let area = frame.area();
 
@@ -21,20 +34,24 @@ pub fn render(app: &App, frame: &mut Frame, playback: Option<(f64, Option<f64>)>
         return;
     }
 
+    let palette = current_palette_color(app);
+    let theme = theme::Theme::new(palette);
+
     if app.settings_open {
-        render_settings(frame, area, &app.settings, app.settings_cursor);
+        render_settings(frame, area, &app.settings, app.settings_cursor, &theme);
     } else {
-        render_player(frame, area, app, playback);
+        render_player(frame, area, app, playback, &theme);
     }
 
     if app.help_open {
-        render_help(frame, area);
+        render_help(frame, area, &theme);
     } else if app.command_palette_open {
         render_command_palette(
             frame,
             area,
             &app.command_palette_query,
             app.command_palette_cursor,
+            &theme,
         );
     }
 }

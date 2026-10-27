@@ -1,15 +1,37 @@
 use ratatui::style::{Color, Modifier, Style};
 
-pub fn green() -> Style {
-    Style::default().fg(Color::Green)
+#[derive(Clone, Copy, Debug)]
+pub struct Theme {
+    pub accent: Color,
+    pub primary: Style,
+    pub bold_primary: Style,
+    pub dim: Style,
+    pub highlight: Style,
 }
 
-pub fn bold_green() -> Style {
-    green().add_modifier(Modifier::BOLD)
-}
+impl Theme {
+    pub fn new(palette_color: Option<(u8, u8, u8)>) -> Self {
+        let accent = match palette_color {
+            Some((r, g, b)) => Color::Rgb(r, g, b),
+            None => Color::Green,
+        };
 
-pub fn dim() -> Style {
-    Style::default().fg(Color::DarkGray)
+        let primary = Style::default().fg(accent);
+        let bold_primary = primary.add_modifier(Modifier::BOLD);
+        let dim = Style::default().fg(Color::DarkGray);
+        let highlight = Style::default()
+            .fg(Color::Black)
+            .bg(accent)
+            .add_modifier(Modifier::BOLD);
+
+        Self {
+            accent,
+            primary,
+            bold_primary,
+            dim,
+            highlight,
+        }
+    }
 }
 
 pub fn format_time(seconds: f64) -> String {

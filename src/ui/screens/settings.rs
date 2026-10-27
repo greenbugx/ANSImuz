@@ -7,28 +7,35 @@ use ratatui::{
 };
 
 use crate::config::{Provider, Settings};
+use crate::ui::theme::Theme;
 
-pub fn render_settings(frame: &mut Frame, area: Rect, settings: &Settings, cursor: usize) {
-    let green = Style::default().fg(Color::Green);
-    let bold_green = green.add_modifier(Modifier::BOLD);
-    let dim = Style::default().fg(Color::DarkGray);
+pub fn render_settings(
+    frame: &mut Frame,
+    area: Rect,
+    settings: &Settings,
+    cursor: usize,
+    theme: &Theme,
+) {
+    let primary = theme.primary;
+    let bold_primary = theme.bold_primary;
+    let dim = theme.dim;
 
     let cache_state = if settings.audio_cache { "ON" } else { "OFF" };
     let cache_style = if settings.audio_cache {
-        bold_green
+        bold_primary
     } else {
         dim
     };
 
     let palette_state = if settings.art_palette { "ON" } else { "OFF" };
     let palette_style = if settings.art_palette {
-        bold_green
+        bold_primary
     } else {
         dim
     };
 
     let mode = if settings.art_hq { "HQ" } else { "PIXEL" };
-    let mode_style = if settings.art_hq { bold_green } else { dim };
+    let mode_style = if settings.art_hq { bold_primary } else { dim };
 
     let cache_size = crate::config::cache_bytes();
     let size_text = if cache_size > 0 {
@@ -36,7 +43,7 @@ pub fn render_settings(frame: &mut Frame, area: Rect, settings: &Settings, curso
     } else {
         "EMPTY".to_string()
     };
-    let size_style = if cache_size > 0 { bold_green } else { dim };
+    let size_style = if cache_size > 0 { bold_primary } else { dim };
 
     let provider_desc = match settings.provider {
         Provider::YtMusic => "Stream directly from YouTube Music".to_string(),
@@ -47,7 +54,7 @@ pub fn render_settings(frame: &mut Frame, area: Rect, settings: &Settings, curso
         (
             "Provider:".to_string(),
             settings.provider.label().to_string(),
-            bold_green,
+            bold_primary,
             provider_desc,
         ),
         (
@@ -96,7 +103,7 @@ pub fn render_settings(frame: &mut Frame, area: Rect, settings: &Settings, curso
 
     frame.render_widget(
         Paragraph::new("SETTINGS")
-            .style(bold_green)
+            .style(bold_primary)
             .alignment(Alignment::Center),
         Rect {
             x: area.x,
@@ -123,7 +130,7 @@ pub fn render_settings(frame: &mut Frame, area: Rect, settings: &Settings, curso
         .split(row);
 
         let cell_style = if active {
-            Style::default().bg(Color::Green)
+            Style::default().bg(theme.accent)
         } else {
             Style::default()
         };
@@ -131,7 +138,7 @@ pub fn render_settings(frame: &mut Frame, area: Rect, settings: &Settings, curso
         let name_style = if active {
             Style::default().fg(Color::Black)
         } else {
-            green
+            primary
         };
 
         let value_style = if active {
