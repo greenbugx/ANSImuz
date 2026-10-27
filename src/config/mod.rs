@@ -1,19 +1,5 @@
 use std::{env, fs, path::PathBuf};
 
-// returns the base directory for cache files, following the XDG Base Directory Specification
-pub fn cache_base_dir() -> PathBuf {
-    env::var("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            env::var("HOME")
-                .map(|h| PathBuf::from(h).join(".cache"))
-                .unwrap_or_else(|_| env::temp_dir())
-        })
-        .join("ansimuz")
-}
-
-use crate::{art, player};
-
 #[derive(Clone, Copy, Debug)]
 pub struct Settings {
     pub audio_cache: bool,
@@ -69,20 +55,39 @@ impl Settings {
     }
 }
 
-fn config_path() -> PathBuf {
+pub fn config_path() -> PathBuf {
     env::var("HOME")
         .map(|home| PathBuf::from(home).join(".config/ansimuz/settings.conf"))
         .unwrap_or_else(|_| PathBuf::from(".ansimuz-settings"))
 }
 
+pub fn cache_base_dir() -> PathBuf {
+    env::var("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            env::var("HOME")
+                .map(|h| PathBuf::from(h).join(".cache"))
+                .unwrap_or_else(|_| env::temp_dir())
+        })
+        .join("ansimuz")
+}
+
+pub fn artwork_cache_dir() -> PathBuf {
+    cache_base_dir().join("artwork")
+}
+
+pub fn audio_cache_dir() -> PathBuf {
+    cache_base_dir().join("audio")
+}
+
 pub fn cache_bytes() -> u64 {
-    dir_size(&art::cache_dir()) + dir_size(&player::audio_cache_dir())
+    dir_size(&artwork_cache_dir()) + dir_size(&audio_cache_dir())
 }
 
 pub fn clear_caches() {
-    let _ = fs::remove_dir_all(art::cache_dir());
-    let _ = fs::remove_dir_all(player::audio_cache_dir());
-    art::clear_memory_cache();
+    let _ = fs::remove_dir_all(artwork_cache_dir());
+    let _ = fs::remove_dir_all(audio_cache_dir());
+    crate::artwork::clear_memory_cache();
 }
 
 pub fn human_size(bytes: u64) -> String {
@@ -97,7 +102,7 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
-fn dir_size(path: &PathBuf) -> u64 {
+pub fn dir_size(path: &PathBuf) -> u64 {
     let Ok(entries) = fs::read_dir(path) else {
         return 0;
     };

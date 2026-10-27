@@ -5,26 +5,15 @@ use std::{
     os::unix::net::UnixStream,
     path::PathBuf,
     process::{Child, Command, Stdio},
-    sync::{Arc, Mutex},
-    sync::mpsc::Sender,
+    sync::{Arc, Mutex, mpsc::Sender},
     thread,
     time::Duration,
 };
 
+use super::events::PlayerEvent;
+
 const MAX_DUMP_BYTES: u64 = 64 * 1024 * 1024;
 const MIN_DUMP_BYTES: u64 = 100 * 1024;
-
-pub enum PlayerEvent {
-    Position {
-        generation: u64,
-        elapsed: f64,
-        duration: Option<f64>,
-    },
-    Failed {
-        generation: u64,
-        message: String,
-    },
-}
 
 pub struct AudioPlayer {
     child: Option<Child>,
@@ -37,8 +26,8 @@ pub struct AudioPlayer {
 
 impl AudioPlayer {
     pub fn new() -> Self {
-        let socket_path = std::env::temp_dir()
-            .join(format!("ansimuz-mpv-{}.sock", std::process::id()));
+        let socket_path =
+            std::env::temp_dir().join(format!("ansimuz-mpv-{}.sock", std::process::id()));
 
         Self {
             child: None,
@@ -75,7 +64,11 @@ impl AudioPlayer {
                 .map(|set| set.contains(&owned))
                 .unwrap_or(true);
 
-            if already_dumping || audio_cache_dir().join(format!("{}.audio", audio_hash(&owned))).exists() {
+            if already_dumping
+                || audio_cache_dir()
+                    .join(format!("{}.audio", audio_hash(&owned)))
+                    .exists()
+            {
                 return;
             }
 
@@ -294,7 +287,7 @@ fn json_number(line: &str, key: &str) -> Option<f64> {
 }
 
 pub fn audio_cache_dir() -> PathBuf {
-    crate::settings::cache_base_dir().join("audio")
+    crate::config::audio_cache_dir()
 }
 
 fn audio_hash(url: &str) -> String {
