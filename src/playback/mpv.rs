@@ -83,7 +83,12 @@ impl AudioPlayer {
     pub fn is_playing(&mut self) -> bool {
         if let Some(child) = self.child.as_mut() {
             match child.try_wait() {
-                Ok(Some(_)) => self.child = None,
+                Ok(Some(status)) => {
+                    self.child = None;
+                    if !status.success() {
+                        self.last_error = Some(format!("mpv exited with {status}"));
+                    }
+                }
                 Ok(None) => return true,
                 Err(e) => self.last_error = Some(e.to_string()),
             }
@@ -118,8 +123,11 @@ impl AudioPlayer {
             .arg("--no-video")
             .arg("--idle=no")
             .arg("--force-window=no")
+            .arg("--really-quiet")
             .arg(format!("--input-ipc-server={}", self.socket_path.display()))
+            .arg("--ytdl-raw-options-append=extractor-args=youtube:player_client=visionos,default")
             .arg(url)
+            .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -323,8 +331,10 @@ fn start_dump(url: String, dumping: Arc<Mutex<HashSet<String>>>) {
                 .arg("--no-video")
                 .arg("--no-audio")
                 .arg("--really-quiet")
+                .arg("--ytdl-raw-options-append=extractor-args=youtube:player_client=visionos,default")
                 .arg(format!("--stream-dump={}", part.display()))
                 .arg(&media)
+                .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn();
@@ -373,6 +383,8 @@ fn start_dump(url: String, dumping: Arc<Mutex<HashSet<String>>>) {
 
 fn resolve_stream(url: &str) -> Option<String> {
     let output = Command::new("yt-dlp")
+        .arg("--extractor-args")
+        .arg("youtube:player_client=visionos,default")
         .arg("-f")
         .arg("bestaudio")
         .arg("--get-url")
