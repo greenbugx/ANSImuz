@@ -21,6 +21,7 @@ pub enum Action {
     OpenSettings,
     ToggleHelp,
     OpenCommandPalette,
+    ToggleProvider,
     ClearCache,
     Quit,
 }
@@ -119,6 +120,13 @@ pub const COMMANDS: &[CommandInfo] = &[
         category: "System",
     },
     CommandInfo {
+        id: Action::ToggleProvider,
+        name: "Toggle Provider",
+        description: "Switch music provider (YouTube Music / Spotify)",
+        shortcut: "",
+        category: "System",
+    },
+    CommandInfo {
         id: Action::Quit,
         name: "Quit",
         description: "Exit ANSImuz",
@@ -174,6 +182,7 @@ pub fn dispatch_action(
     app: &mut App,
     player: &mut AudioPlayer,
     player_tx: &Sender<PlayerEvent>,
+    search_tx: &Sender<crate::music::SearchResult>,
 ) {
     match action {
         Action::PlayPause => {
@@ -268,6 +277,12 @@ pub fn dispatch_action(
             app.open_command_palette();
         }
 
+        Action::ToggleProvider => {
+            app.settings.provider = app.settings.provider.toggle();
+            app.settings.save();
+            app.set_status(format!("PROVIDER: {}", app.settings.provider.label()));
+            crate::app::runner::refetch_if_needed(app, search_tx);
+        }
         Action::ClearCache => {
             crate::config::clear_caches();
             app.set_status("CACHES CLEARED");

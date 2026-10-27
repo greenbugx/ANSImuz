@@ -37,7 +37,7 @@ pub fn handle_key(
                 if let Some(cmd) = commands.get(app.command_palette_cursor) {
                     let action = cmd.id;
                     app.close_command_palette();
-                    dispatch_action(action, app, player, player_tx);
+                    dispatch_action(action, app, player, player_tx, search_tx);
                 }
             }
 
@@ -75,7 +75,13 @@ pub fn handle_key(
         match key.code {
             KeyCode::Up => app.settings_cursor = app.settings_cursor.saturating_sub(1),
             KeyCode::Down => app.settings_cursor = (app.settings_cursor + 1).min(4),
-            KeyCode::Char(' ') | KeyCode::Enter => app.apply_setting(),
+            KeyCode::Char(' ') | KeyCode::Enter => {
+                let old_provider = app.settings.provider;
+                app.apply_setting();
+                if app.settings.provider != old_provider {
+                    super::runner::refetch_if_needed(app, search_tx);
+                }
+            }
             KeyCode::Char('/') => {
                 app.settings_open = false;
                 app.mode = Mode::Type;
@@ -134,7 +140,7 @@ pub fn handle_key(
 
         Mode::Nav => {
             if let Some(action) = action_for_nav_key(key) {
-                dispatch_action(action, app, player, player_tx);
+                dispatch_action(action, app, player, player_tx, search_tx);
                 return;
             }
 

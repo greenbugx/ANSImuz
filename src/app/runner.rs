@@ -32,13 +32,24 @@ pub fn run(
                 Ok(tracks) => {
                     let count = tracks.len();
                     app.tracks = tracks;
-                    app.selected = 0;
                     app.last_query = query;
                     app.mode = Mode::Nav;
+
+                    if let Some(now) = &app.now_playing {
+                        app.playing = app.tracks.iter().position(|t| {
+                            (!now.stream_url.is_empty() && t.stream_url == now.stream_url)
+                                || (now.spotify_id.is_some() && t.spotify_id == now.spotify_id)
+                                || (t.title.eq_ignore_ascii_case(&now.title)
+                                    && t.artist.eq_ignore_ascii_case(&now.artist))
+                        });
+                    }
+
+                    app.selected = app.playing.unwrap_or(0);
+
                     app.set_status(if count == 0 {
                         "NO RESULTS".into()
                     } else {
-                        format!("{} RESULTS", count)
+                        format!("{} RESULTS ({})", count, app.settings.provider.label())
                     });
                 }
                 Err(error) => {
@@ -47,7 +58,7 @@ pub fn run(
             }
         }
 
-        if app.playing.is_some() && !player.is_playing() {
+        if app.now_playing.is_some() && !player.is_playing() {
             let ended = app.playing;
 
             let next = match app.repeat {
@@ -101,7 +112,7 @@ pub fn run(
             }
         }
 
-        if app.playing.is_none() {
+        if app.now_playing.is_none() {
             playback = None;
         }
 
@@ -196,4 +207,22 @@ pub fn now_playing(app: &App) -> String {
         .as_ref()
         .map(|t| format!("PLAYING: {} — {}", t.title, t.artist))
         .unwrap_or_else(|| "PLAYING".into())
+}
+
+pub fn refetch_if_needed(app: &mut App, search_tx: &Sender<SearchResult>) {
+    let query = if !app.last_query.is_empty() {
+        app.last_query.clone()
+    } else {
+        app.query.trim().to_string()
+    };
+
+    if !query.is_empty() {
+        app.loading = true;
+        let provider = app.settings.provider;
+        app.set_status(format!("REFETCHING ({})…", provider.label()));
+        let tx = search_tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::music::search_music(query, provider));
+        });
+    }
 }
