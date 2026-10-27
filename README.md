@@ -1,5 +1,8 @@
 # ANSImuz
 
+> [!IMPORTANT]
+> **Disclaimer:** This project is not affiliated with, endorsed by, or in any way officially connected to Youtube or Spotify. It is intended solely for educational purposes only.
+
 A lightweight terminal music player with retro 8-bit ANSI vibes, built with Rust, Ratatui, Python, [`ytmusicapi`](https://github.com/sigma67/ytmusicapi) and [`spotifyscraper`](https://github.com/AliAkhtari78/SpotifyScraper)
 
 ## Features
