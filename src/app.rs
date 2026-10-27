@@ -116,6 +116,7 @@ pub struct App {
     pub tracks: Vec<Track>,
     pub selected: usize,
     pub playing: Option<usize>,
+    pub now_playing: Option<Track>,
     pub played_once: bool,
     pub shuffle: bool,
     pub repeat: Repeat,
@@ -140,6 +141,7 @@ impl App {
             tracks: Vec::new(),
             selected: 0,
             playing: None,
+            now_playing: None,
             played_once: false,
             shuffle: false,
             repeat: Repeat::Off,
@@ -284,8 +286,8 @@ impl App {
         let dim = Style::default().fg(Color::DarkGray);
 
         let current = self
-            .playing
-            .and_then(|index| self.tracks.get(index))
+            .now_playing
+            .as_ref()
             .or_else(|| self.tracks.get(self.selected));
 
         let selected = match self

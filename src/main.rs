@@ -113,6 +113,7 @@ fn run_app(
                 Some(index) => play_track(&mut app, &mut player, player_tx.clone(), index),
                 None => {
                     app.playing = None;
+                    app.now_playing = None;
                     app.paused = false;
 
                     app.set_status(match player.error() {
@@ -337,6 +338,7 @@ fn play_track(
     match player.play(&source, app.volume, events) {
         Ok(()) => {
             app.playing = Some(index);
+            app.now_playing = Some(track.clone());
             app.selected = index;
             app.paused = false;
             app.played_once = false;
@@ -363,8 +365,8 @@ fn play_track(
 }
 
 fn now_playing(app: &App) -> String {
-    app.playing
-        .and_then(|i| app.tracks.get(i))
+    app.now_playing
+        .as_ref()
         .map(|t| format!("PLAYING: {} — {}", t.title, t.artist))
         .unwrap_or_else(|| "PLAYING".into())
 }
