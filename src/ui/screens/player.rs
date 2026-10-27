@@ -184,7 +184,7 @@ pub fn render_player(
 
     frame.render_widget(
         Paragraph::new(
-            "↑↓ SELECT  ENTER PLAY  SPACE PAUSE  ←→ TRACK  X SHUFFLE  R REPEAT  S SETTINGS  Q QUIT",
+            "↑↓ SELECT  ENTER PLAY  SPACE PAUSE  ←→ TRACK  X SHUFFLE  R REPEAT  : COMMANDS  ? HELP  Q QUIT",
         )
         .style(dim_style)
         .alignment(Alignment::Center),

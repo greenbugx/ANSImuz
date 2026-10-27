@@ -3,11 +3,12 @@ use std::sync::mpsc::Sender;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{
-    runner::{now_playing, play_track},
+    commands::{action_for_nav_key, dispatch_action, filtered_commands},
+    runner::play_track,
     state::{App, Mode},
 };
 use crate::music::{SearchResult, search_music};
-use crate::playback::{AudioPlayer, PlayerEvent, Repeat};
+use crate::playback::{AudioPlayer, PlayerEvent};
 
 pub fn handle_key(
     app: &mut App,
@@ -16,6 +17,60 @@ pub fn handle_key(
     search_tx: &Sender<SearchResult>,
     player_tx: &Sender<PlayerEvent>,
 ) {
+    if app.command_palette_open {
+        match key.code {
+            KeyCode::Esc => app.close_command_palette(),
+
+            KeyCode::Up => {
+                app.command_palette_cursor = app.command_palette_cursor.saturating_sub(1);
+            }
+
+            KeyCode::Down => {
+                let count = filtered_commands(&app.command_palette_query).len();
+                if count > 0 {
+                    app.command_palette_cursor = (app.command_palette_cursor + 1).min(count - 1);
+                }
+            }
+
+            KeyCode::Enter => {
+                let commands = filtered_commands(&app.command_palette_query);
+                if let Some(cmd) = commands.get(app.command_palette_cursor) {
+                    let action = cmd.id;
+                    app.close_command_palette();
+                    dispatch_action(action, app, player, player_tx);
+                }
+            }
+
+            KeyCode::Backspace => {
+                app.command_palette_query.pop();
+                app.command_palette_cursor = 0;
+            }
+
+            KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.command_palette_query.push(ch);
+                app.command_palette_cursor = 0;
+            }
+
+            _ => {}
+        }
+        return;
+    }
+
+    if app.help_open {
+        match key.code {
+            KeyCode::Esc
+            | KeyCode::Char('?')
+            | KeyCode::Char('q')
+            | KeyCode::Char('Q')
+            | KeyCode::Enter
+            | KeyCode::Char(' ') => {
+                app.help_open = false;
+            }
+            _ => {}
+        }
+        return;
+    }
+
     if app.settings_open {
         match key.code {
             KeyCode::Up => app.settings_cursor = app.settings_cursor.saturating_sub(1),
@@ -28,6 +83,12 @@ pub fn handle_key(
             KeyCode::Esc => {
                 app.settings_open = false;
                 app.mode = Mode::Nav;
+            }
+            KeyCode::Char('?') => {
+                app.toggle_help();
+            }
+            KeyCode::Char(':') => {
+                app.open_command_palette();
             }
             _ => {}
         }
@@ -70,90 +131,19 @@ pub fn handle_key(
             _ => {}
         },
 
-        Mode::Nav => match key.code {
-            KeyCode::Char('q') | KeyCode::Char('Q') => app.should_quit = true,
-
-            KeyCode::Esc => app.query.clear(),
-
-            KeyCode::Up => app.move_selection(-1),
-            KeyCode::Down => app.move_selection(1),
-
-            KeyCode::Enter => play_track(app, player, player_tx.clone(), app.selected),
-
-            KeyCode::Char(' ') => {
-                if app.playing.is_some() {
-                    match player.toggle_pause() {
-                        Ok(()) => {
-                            app.paused = !app.paused;
-                            app.set_status(if app.paused {
-                                "PAUSED".to_string()
-                            } else {
-                                now_playing(app)
-                            });
-                        }
-                        Err(error) => app.set_status(format!("PLAYER ERROR: {}", error)),
-                    }
-                }
+        Mode::Nav => {
+            if let Some(action) = action_for_nav_key(key) {
+                dispatch_action(action, app, player, player_tx);
+                return;
             }
 
-            KeyCode::Left => {
-                if let Some(index) = app.next_index(-1) {
-                    play_track(app, player, player_tx.clone(), index);
-                }
+            match key.code {
+                KeyCode::Esc => app.query.clear(),
+                KeyCode::Up => app.move_selection(-1),
+                KeyCode::Down => app.move_selection(1),
+                KeyCode::Enter => play_track(app, player, player_tx.clone(), app.selected),
+                _ => {}
             }
-
-            KeyCode::Right => {
-                let next = if app.shuffle {
-                    app.shuffled_next()
-                } else {
-                    app.next_index(1)
-                };
-
-                if let Some(index) = next {
-                    play_track(app, player, player_tx.clone(), index);
-                }
-            }
-
-            KeyCode::Char('x') | KeyCode::Char('X') => {
-                app.shuffle = !app.shuffle;
-                app.set_status(if app.shuffle {
-                    "SHUFFLE ON"
-                } else {
-                    "SHUFFLE OFF"
-                });
-            }
-
-            KeyCode::Char('r') | KeyCode::Char('R') => {
-                app.repeat = match app.repeat {
-                    Repeat::Off => Repeat::All,
-                    Repeat::All => Repeat::One,
-                    Repeat::One => Repeat::Off,
-                };
-
-                app.set_status(match app.repeat {
-                    Repeat::All => "REPEAT ALL",
-                    Repeat::One => "REPEAT ONE",
-                    Repeat::Off => "REPEAT OFF",
-                });
-            }
-
-            KeyCode::Char('+') | KeyCode::Char('=') => {
-                app.volume = app.volume.saturating_add(5).min(100);
-                let _ = player.set_volume(app.volume);
-                app.set_status(format!("VOLUME {}", app.volume));
-            }
-
-            KeyCode::Char('-') => {
-                app.volume = app.volume.saturating_sub(5);
-                let _ = player.set_volume(app.volume);
-                app.set_status(format!("VOLUME {}", app.volume));
-            }
-
-            KeyCode::Char('/') => app.mode = Mode::Type,
-
-            KeyCode::Char('s') | KeyCode::Char('S') => app.settings_open = true,
-
-            _ => {}
-        },
+        }
     }
 }
