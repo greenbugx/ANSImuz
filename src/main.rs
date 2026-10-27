@@ -1,4 +1,4 @@
-use app::{App, Mode, Track};
+use app::{App, Mode, Repeat, Track};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
@@ -93,13 +93,34 @@ fn run_app(
         }
 
         if app.playing.is_some() && !player.is_playing() {
-            app.playing = None;
-            app.paused = false;
+            let ended = app.playing;
 
-            app.set_status(match player.error() {
-                Some(error) => format!("PLAYER ERROR: {}", error),
-                None => "PLAYBACK ENDED".to_string(),
-            });
+            let next = match app.repeat {
+                Repeat::One if app.played_once => ended,
+                Repeat::All if app.played_once => ended.and_then(|index| {
+                    if app.shuffle {
+                        app.shuffled_next()
+                    } else if app.tracks.is_empty() {
+                        None
+                    } else {
+                        Some((index + 1) % app.tracks.len())
+                    }
+                }),
+                _ => None,
+            };
+
+            match next {
+                Some(index) => play_track(&mut app, &mut player, player_tx.clone(), index),
+                None => {
+                    app.playing = None;
+                    app.paused = false;
+
+                    app.set_status(match player.error() {
+                        Some(error) => format!("PLAYER ERROR: {}", error),
+                        None => "PLAYBACK ENDED".to_string(),
+                    });
+                }
+            }
         }
 
         let current = player.generation();
@@ -108,6 +129,7 @@ fn run_app(
             match event {
                 PlayerEvent::Position { generation, elapsed, duration } if generation == current => {
                     playback = Some((elapsed, duration));
+                    app.played_once = true;
                 }
                 PlayerEvent::Failed { generation, message } if generation == current => {
                     app.set_status(format!("PLAYER ERROR: {}", message));
@@ -236,8 +258,46 @@ fn handle_key(
                 }
             }
 
-            KeyCode::Left => skip_track(app, player, player_tx.clone(), -1),
-            KeyCode::Right => skip_track(app, player, player_tx.clone(), 1),
+            KeyCode::Left => {
+                if let Some(index) = app.next_index(-1) {
+                    play_track(app, player, player_tx.clone(), index);
+                }
+            }
+
+            KeyCode::Right => {
+                let next = if app.shuffle {
+                    app.shuffled_next()
+                } else {
+                    app.next_index(1)
+                };
+
+                if let Some(index) = next {
+                    play_track(app, player, player_tx.clone(), index);
+                }
+            }
+
+            KeyCode::Char('x') | KeyCode::Char('X') => {
+                app.shuffle = !app.shuffle;
+                app.set_status(if app.shuffle {
+                    "SHUFFLE ON"
+                } else {
+                    "SHUFFLE OFF"
+                });
+            }
+
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                app.repeat = match app.repeat {
+                    Repeat::Off => Repeat::All,
+                    Repeat::All => Repeat::One,
+                    Repeat::One => Repeat::Off,
+                };
+
+                app.set_status(match app.repeat {
+                    Repeat::All => "REPEAT ALL",
+                    Repeat::One => "REPEAT ONE",
+                    Repeat::Off => "REPEAT OFF",
+                });
+            }
 
             KeyCode::Char('+') | KeyCode::Char('=') => {
                 app.volume = app.volume.saturating_add(5).min(100);
@@ -279,6 +339,7 @@ fn play_track(
             app.playing = Some(index);
             app.selected = index;
             app.paused = false;
+            app.played_once = false;
             app.set_status(format!("PLAYING: {} — {}", track.title, track.artist));
 
             if app.settings.audio_cache {
@@ -298,17 +359,6 @@ fn play_track(
             }
         }
         Err(error) => app.set_status(format!("PLAYER ERROR: {}", error)),
-    }
-}
-
-fn skip_track(
-    app: &mut App,
-    player: &mut AudioPlayer,
-    events: Sender<PlayerEvent>,
-    delta: isize,
-) {
-    if let Some(index) = app.next_index(delta) {
-        play_track(app, player, events, index);
     }
 }
 

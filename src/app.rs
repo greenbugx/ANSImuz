@@ -1,4 +1,6 @@
-use std::time::{Duration, Instant};
+use std::{
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
@@ -10,6 +12,13 @@ use ratatui::{
 
 use crate::art;
 use crate::settings::Settings;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Repeat {
+    Off,
+    All,
+    One,
+}
 
 fn logo_bitmap() -> Vec<Vec<bool>> {
     let lines: Vec<&str> = include_str!("../ascii.art")
@@ -107,6 +116,10 @@ pub struct App {
     pub tracks: Vec<Track>,
     pub selected: usize,
     pub playing: Option<usize>,
+    pub played_once: bool,
+    pub shuffle: bool,
+    pub repeat: Repeat,
+    rng_state: u64,
     pub loading: bool,
     pub paused: bool,
     pub volume: u8,
@@ -127,6 +140,14 @@ impl App {
             tracks: Vec::new(),
             selected: 0,
             playing: None,
+            played_once: false,
+            shuffle: false,
+            repeat: Repeat::Off,
+            rng_state: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0x9E3779B97F4A7C15)
+                | 1,
             loading: false,
             paused: false,
             volume: 70,
@@ -177,6 +198,33 @@ impl App {
         let len = self.tracks.len() as isize;
         let base = self.playing.unwrap_or(self.selected) as isize;
         Some((base + delta).rem_euclid(len) as usize)
+    }
+
+    /// random track strictly after the current one; wraps when at the end
+    pub fn shuffled_next(&mut self) -> Option<usize> {
+        let len = self.tracks.len();
+        if len < 2 {
+            return None;
+        }
+
+        let current = self.playing.unwrap_or(self.selected);
+        let after = len.saturating_sub(current + 1);
+
+        let index = if after > 0 {
+            current + 1 + self.next_random(after)
+        } else {
+            self.next_random(len)
+        };
+
+        Some(index)
+    }
+
+    fn next_random(&mut self, bound: usize) -> usize {
+        self.rng_state ^= self.rng_state << 13;
+        self.rng_state ^= self.rng_state >> 7;
+        self.rng_state ^= self.rng_state << 17;
+
+        (self.rng_state % bound as u64) as usize
     }
 
     pub fn render(&self, frame: &mut Frame, playback: Option<(f64, Option<f64>)>) {
@@ -380,16 +428,30 @@ impl App {
             height: rows[10].height,
         };
 
-        let thirds = Layout::horizontal([
-            Constraint::Length(15),
-            Constraint::Length(15),
-            Constraint::Length(15),
+        let slots = Layout::horizontal([
+            Constraint::Length(9),
+            Constraint::Length(9),
+            Constraint::Length(9),
+            Constraint::Length(9),
+            Constraint::Length(9),
         ])
         .split(cluster);
 
+        let shuffle_icon = if self.shuffle {
+            ("><", bold_green)
+        } else {
+            ("><", dim)
+        };
+        frame.render_widget(
+            Paragraph::new(shuffle_icon.0)
+                .style(shuffle_icon.1)
+                .alignment(Alignment::Center),
+            slots[0],
+        );
+
         frame.render_widget(
             Paragraph::new("|◀").style(bold_green).alignment(Alignment::Center),
-            thirds[0],
+            slots[1],
         );
 
         let play_icon = if self.paused { "▶" } else { "▮▮" };
@@ -397,16 +459,28 @@ impl App {
             Paragraph::new(play_icon)
                 .style(bold_green)
                 .alignment(Alignment::Center),
-            thirds[1],
+            slots[2],
         );
 
         frame.render_widget(
             Paragraph::new("▶|").style(bold_green).alignment(Alignment::Center),
-            thirds[2],
+            slots[3],
+        );
+
+        let repeat_icon = match self.repeat {
+            Repeat::One => ("R1", bold_green),
+            Repeat::All => ("RA", bold_green),
+            Repeat::Off => ("R", dim),
+        };
+        frame.render_widget(
+            Paragraph::new(repeat_icon.0)
+                .style(repeat_icon.1)
+                .alignment(Alignment::Center),
+            slots[4],
         );
 
         frame.render_widget(
-            Paragraph::new("↑↓ SELECT  ENTER PLAY  SPACE PAUSE  ←→ TRACK  S SETTINGS  Q QUIT")
+            Paragraph::new("↑↓ SELECT  ENTER PLAY  SPACE PAUSE  ←→ TRACK  X SHUFFLE  R REPEAT  S SETTINGS  Q QUIT")
                 .style(dim)
                 .alignment(Alignment::Center),
             rows[12],
