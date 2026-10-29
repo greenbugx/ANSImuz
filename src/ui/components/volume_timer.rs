@@ -1,6 +1,6 @@
 use ratatui::{
     Frame,
-    layout::{Alignment, Rect},
+    layout::{Alignment, Constraint, Layout, Rect},
     style::Style,
     text::{Line, Span},
     widgets::Paragraph,
@@ -26,8 +26,15 @@ pub fn render_volume_timer(
         Span::styled("VOL ", primary),
         Span::styled(bars, bold_primary),
     ]);
-    frame.render_widget(Paragraph::new(vol_line).alignment(Alignment::Left), area);
+    let clock_width = (clock.chars().count() as u16 + 1).max(6);
+    let cols =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(clock_width)]).split(area);
+
+    frame.render_widget(Paragraph::new(vol_line).alignment(Alignment::Left), cols[0]);
 
     let time_line = Line::from(Span::styled(clock, bold_primary));
-    frame.render_widget(Paragraph::new(time_line).alignment(Alignment::Right), area);
+    frame.render_widget(
+        Paragraph::new(time_line).alignment(Alignment::Right),
+        cols[1],
+    );
 }
