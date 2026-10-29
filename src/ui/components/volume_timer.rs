@@ -8,7 +8,7 @@ use ratatui::{
 
 use crate::ui::theme::format_time;
 
-pub fn render_header(
+pub fn render_volume_timer(
     frame: &mut Frame,
     area: Rect,
     volume: u8,

@@ -135,6 +135,49 @@ pub const COMMANDS: &[CommandInfo] = &[
     },
 ];
 
+pub const PANEL_KEYBINDS: &[(&str, &str)] = &[
+    ("↑↓", "SELECT"),
+    ("ENTER", "PLAY"),
+    ("SPACE", "PAUSE"),
+    ("←→", "TRACK"),
+    ("X", "SHUFFLE"),
+    ("R", "REPEAT"),
+    (":", "COMMANDS"),
+    ("?", "HELP"),
+    ("Q", "QUIT"),
+];
+
+pub const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "PLAYBACK",
+        &[
+            ("Space", "Play / Pause playback"),
+            ("← / →", "Previous / Next track"),
+            ("X", "Toggle shuffle mode"),
+            ("R", "Cycle repeat (Off / All / One)"),
+            ("+ / -", "Volume up / down (±5%)"),
+        ],
+    ),
+    (
+        "NAVIGATION",
+        &[
+            ("↑ / ↓", "Select track in list"),
+            ("Enter", "Play selected track"),
+            ("/", "Focus song search input"),
+            ("Esc", "Clear search query / Close dialog"),
+        ],
+    ),
+    (
+        "SYSTEM",
+        &[
+            (": / Ctrl+P", "Open command palette"),
+            ("S", "Open settings screen"),
+            ("?", "Toggle this help overlay"),
+            ("Q / Ctrl+C", "Quit ANSImuz"),
+        ],
+    ),
+];
+
 pub fn filtered_commands(query: &str) -> Vec<&'static CommandInfo> {
     let q = query.trim().to_lowercase();
     if q.is_empty() {
