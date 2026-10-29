@@ -46,17 +46,9 @@ pub fn layout_player(area: Rect) -> PlayerLayout {
         .split(area);
         (cols[0], cols[1], cols[2])
     } else {
-        let middle_w = 50.min(area.width);
-        let remaining = area.width.saturating_sub(middle_w);
-        let left_w = remaining * 3 / 5;
-        let right_w = remaining.saturating_sub(left_w);
-        let cols = Layout::horizontal([
-            Constraint::Length(left_w),
-            Constraint::Length(middle_w),
-            Constraint::Length(right_w),
-        ])
-        .split(area);
-        (cols[0], cols[1], cols[2])
+        let cols = Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)])
+            .split(area);
+        (cols[0], cols[1], Rect::default())
     };
 
     let keybinds_height = (crate::app::commands::PANEL_KEYBINDS.len() as u16 + 2)
@@ -317,23 +309,26 @@ pub fn render_player(
     );
 
     // RIGHT SECTION: Queue
-    // TODO: add a persistent playback queue
-    let queue_block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(theme.primary)
-        .title(Line::from(vec![Span::styled(
-            " QUEUE ",
-            theme.bold_primary,
-        )]));
-    let queue_inner = queue_block.inner(layout.col_queue);
-    frame.render_widget(queue_block, layout.col_queue);
+    // only rendered when wide enough for 3-panel layout
+    if layout.col_queue.width > 0 {
+        // TODO: add a persistent playback queue
+        let queue_block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.primary)
+            .title(Line::from(vec![Span::styled(
+                " QUEUE ",
+                theme.bold_primary,
+            )]));
+        let queue_inner = queue_block.inner(layout.col_queue);
+        frame.render_widget(queue_block, layout.col_queue);
 
-    frame.render_widget(
-        Paragraph::new("Yet to be in service :)")
-            .style(theme.dim)
-            .alignment(Alignment::Center),
-        queue_inner,
-    );
+        frame.render_widget(
+            Paragraph::new("Yet to be in service :)")
+                .style(theme.dim)
+                .alignment(Alignment::Center),
+            queue_inner,
+        );
+    }
 }
 
 #[cfg(test)]
@@ -361,11 +356,33 @@ mod tests {
         let layout = layout_player(area);
 
         assert!(area.width < 100);
-        assert_eq!(layout.col_player.width, 50);
-        assert_eq!(
-            layout.col_left.width + layout.col_player.width + layout.col_queue.width,
-            area.width
-        );
+        assert_eq!(layout.col_queue.width, 0);
+        assert!(layout.col_left.width > 0);
+        assert!(layout.col_player.width > 0);
+        assert_eq!(layout.col_left.width + layout.col_player.width, area.width);
+    }
+
+    #[test]
+    fn test_layout_player_narrow_boundary_cases() {
+        for width in [40, 45, 50, 51, 60, 75, 99] {
+            let area = Rect::new(0, 0, width, 24);
+            let layout = layout_player(area);
+
+            assert!(
+                layout.col_left.width > 0,
+                "Left panel width must be > 0 at width {width}"
+            );
+            assert!(
+                layout.col_player.width > 0,
+                "Player panel width must be > 0 at width {width}"
+            );
+            assert_eq!(layout.col_queue.width, 0);
+            assert_eq!(
+                layout.col_left.width + layout.col_player.width,
+                width,
+                "Sum of panels must equal total width at {width}"
+            );
+        }
     }
 
     #[test]
@@ -385,5 +402,12 @@ mod tests {
 
         assert!(layout.col_left.x + layout.col_left.width <= layout.col_player.x);
         assert!(layout.col_player.x + layout.col_player.width <= layout.col_queue.x);
+
+        let area_narrow = Rect::new(0, 0, 60, 30);
+        let layout_narrow = layout_player(area_narrow);
+        assert!(
+            layout_narrow.col_left.x + layout_narrow.col_left.width <= layout_narrow.col_player.x
+        );
+        assert_eq!(layout_narrow.col_queue.width, 0);
     }
 }
