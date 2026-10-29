@@ -37,6 +37,15 @@ Create a python virtual environment:
 
 ```bash
 python -m venv .venv
+
+# macOS/Linux
+source .venv/bin/activate
+
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
+
+# Windows Command Prompt
+.venv\Scripts\activate.bat
 ```
 
 Install the Python dependencies:
