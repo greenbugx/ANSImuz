@@ -64,6 +64,8 @@ pub fn cache_resolved_track(track: &Track) {
     }
 }
 
+static PYTHON_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
 fn ensure_backend_path(py: Python<'_>) -> PyResult<()> {
     let sys = PyModule::import(py, "sys")?;
     let path = sys.getattr("path")?.cast_into::<PyList>()?;
@@ -88,6 +90,7 @@ fn ensure_backend_path(py: Python<'_>) -> PyResult<()> {
 }
 
 pub fn search_music(query: String, provider: Provider) -> SearchResult {
+    let _guard = PYTHON_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let result = Python::attach(|py| -> PyResult<Vec<Track>> {
         ensure_backend_path(py)?;
 
@@ -157,7 +160,7 @@ pub fn resolve_playable(track: &Track) -> Result<Track, String> {
     if let Some(cached) = get_cached_track(track) {
         return Ok(cached);
     }
-
+    let _guard = PYTHON_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let resolved_track = Python::attach(|py| -> PyResult<Track> {
         ensure_backend_path(py)?;
 

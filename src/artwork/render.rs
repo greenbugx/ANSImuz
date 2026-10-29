@@ -147,15 +147,25 @@ fn fallback_image(side: u32) -> DynamicImage {
             image.put_pixel(x, y, pixel);
         }
     }
+    if side < 12 {
+        return image;
+    }
 
     const NOTE: [&str; 12] = [
         "....###.", "....####", "....##.#", "....##..", "....##..", "....##..", "....##..",
         "....##..", ".####...", "######..", "######..", ".####...",
     ];
 
-    let scale = (side / 16).max(2);
-    let origin_x = (side - 8 * scale) / 2;
-    let origin_y = (side - 12 * scale) / 2;
+    let scale = (side / 16).max(1);
+    let note_w = 8 * scale;
+    let note_h = 12 * scale;
+
+    if side < note_w || side < note_h {
+        return image;
+    }
+
+    let origin_x = (side - note_w) / 2;
+    let origin_y = (side - note_h) / 2;
     let note = Rgba([130, 255, 150, 255]);
 
     for (row, pattern) in NOTE.iter().enumerate() {
