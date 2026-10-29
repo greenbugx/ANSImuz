@@ -29,6 +29,7 @@ pub fn run(
     loop {
         while let Ok((query, result)) = search_rx.try_recv() {
             app.loading = false;
+            app.cancel_pending_resolution();
 
             match result {
                 Ok(tracks) => {
@@ -66,13 +67,23 @@ pub fn run(
             }
 
             app.is_resolving = false;
+            app.pending_track = None;
 
             match response.result {
                 Ok(resolved) => {
                     crate::music::cache_resolved_track(&resolved);
 
                     if let Some(slot) = app.tracks.get_mut(response.index) {
-                        *slot = resolved.clone();
+                        let is_same = match (&slot.spotify_id, &response.spotify_id) {
+                            (Some(a), Some(b)) => a == b,
+                            _ => {
+                                slot.title.eq_ignore_ascii_case(&response.title)
+                                    && slot.artist.eq_ignore_ascii_case(&response.artist)
+                            }
+                        };
+                        if is_same {
+                            *slot = resolved.clone();
+                        }
                     }
 
                     start_playback(
@@ -84,8 +95,6 @@ pub fn run(
                     );
                 }
                 Err(error) => {
-                    app.playing = None;
-                    app.now_playing = None;
                     app.set_status(format!("RESOLVE ERROR: {}", error));
                 }
             }
@@ -208,30 +217,37 @@ pub fn play_track(
     }
 
     if track.stream_url.is_empty() {
-        app.resolve_generation += 1;
+        app.cancel_pending_resolution();
         let generation = app.resolve_generation;
         app.is_resolving = true;
-        app.playing = Some(index);
-        app.now_playing = Some(track.clone());
+        app.pending_track = Some(track.clone());
+        if !player.is_playing() {
+            app.now_playing = None;
+            app.playing = None;
+        }
         app.selected = index;
-        app.paused = false;
-        app.played_once = false;
         app.set_status(format!("RESOLVING: {} — {}…", track.title, track.artist));
 
         let track_to_resolve = track;
+        let spotify_id = track_to_resolve.spotify_id.clone();
+        let title = track_to_resolve.title.clone();
+        let artist = track_to_resolve.artist.clone();
+
         std::thread::spawn(move || {
             let result = crate::music::resolve_playable(&track_to_resolve);
             let _ = resolve_tx.send(ResolveResponse {
                 generation,
                 index,
+                spotify_id,
+                title,
+                artist,
                 result,
             });
         });
         return;
     }
 
-    app.resolve_generation += 1;
-    app.is_resolving = false;
+    app.cancel_pending_resolution();
     start_playback(app, player, player_tx, index, track);
 }
 
@@ -248,6 +264,8 @@ pub fn start_playback(
 
     match player.play(&source, app.volume, events) {
         Ok(()) => {
+            app.is_resolving = false;
+            app.pending_track = None;
             app.playing = Some(index);
             app.now_playing = Some(track.clone());
             app.selected = index;
@@ -294,6 +312,7 @@ pub fn refetch_if_needed(app: &mut App, search_tx: &Sender<SearchResult>) {
     };
 
     if !query.is_empty() {
+        app.cancel_pending_resolution();
         app.loading = true;
         let provider = app.settings.provider;
         app.set_status(format!("REFETCHING ({})…", provider.label()));

@@ -35,6 +35,7 @@ pub struct App {
     pub command_palette_open: bool,
     pub command_palette_query: String,
     pub command_palette_cursor: usize,
+    pub pending_track: Option<Track>,
     pub is_resolving: bool,
     pub resolve_generation: u64,
 }
@@ -70,6 +71,7 @@ impl App {
             command_palette_open: false,
             command_palette_query: String::new(),
             command_palette_cursor: 0,
+            pending_track: None,
             is_resolving: false,
             resolve_generation: 0,
         }
@@ -86,6 +88,12 @@ impl App {
         self.command_palette_open = false;
         self.command_palette_query.clear();
         self.command_palette_cursor = 0;
+    }
+
+    pub fn cancel_pending_resolution(&mut self) {
+        self.resolve_generation = self.resolve_generation.wrapping_add(1);
+        self.is_resolving = false;
+        self.pending_track = None;
     }
 
     pub fn toggle_help(&mut self) {
@@ -171,5 +179,35 @@ impl App {
         self.rng_state ^= self.rng_state << 17;
 
         (self.rng_state % bound as u64) as usize
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cancel_pending_resolution_invalidates_generation() {
+        let mut app = App::new();
+        assert_eq!(app.resolve_generation, 0);
+        assert!(!app.is_resolving);
+        assert!(app.pending_track.is_none());
+
+        app.is_resolving = true;
+        app.pending_track = Some(Track {
+            title: "Test Track".into(),
+            artist: "Test Artist".into(),
+            stream_url: String::new(),
+            art_url: String::new(),
+            spotify_id: Some("spotify123".into()),
+            artists: vec!["Test Artist".into()],
+            album: Some("Test Album".into()),
+            duration_ms: Some(180_000),
+        });
+
+        app.cancel_pending_resolution();
+        assert_eq!(app.resolve_generation, 1);
+        assert!(!app.is_resolving);
+        assert!(app.pending_track.is_none());
     }
 }

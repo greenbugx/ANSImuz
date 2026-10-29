@@ -16,6 +16,9 @@ pub type SearchResult = (String, Result<Vec<Track>, String>);
 pub struct ResolveResponse {
     pub generation: u64,
     pub index: usize,
+    pub spotify_id: Option<String>,
+    pub title: String,
+    pub artist: String,
     pub result: Result<Track, String>,
 }
 

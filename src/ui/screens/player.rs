@@ -65,6 +65,7 @@ pub fn render_player(
     let current = app
         .now_playing
         .as_ref()
+        .or_else(|| app.pending_track.as_ref())
         .or_else(|| app.tracks.get(app.selected));
 
     render_header(

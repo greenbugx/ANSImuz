@@ -188,10 +188,7 @@ pub fn dispatch_action(
     match action {
         Action::PlayPause => {
             if app.is_resolving {
-                app.resolve_generation += 1;
-                app.is_resolving = false;
-                app.playing = None;
-                app.now_playing = None;
+                app.cancel_pending_resolution();
                 app.set_status("RESOLVE CANCELLED");
                 return;
             }
@@ -294,6 +291,7 @@ pub fn dispatch_action(
         }
 
         Action::ToggleProvider => {
+            app.cancel_pending_resolution();
             app.settings.provider = app.settings.provider.toggle();
             app.settings.save();
             app.set_status(format!("PROVIDER: {}", app.settings.provider.label()));

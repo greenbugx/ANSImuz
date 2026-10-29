@@ -80,6 +80,7 @@ pub fn handle_key(
                 let old_provider = app.settings.provider;
                 app.apply_setting();
                 if app.settings.provider != old_provider {
+                    app.cancel_pending_resolution();
                     super::runner::refetch_if_needed(app, search_tx);
                 }
             }
@@ -112,6 +113,7 @@ pub fn handle_key(
                 let provider = app.settings.provider;
 
                 if !query.is_empty() && query != app.last_query {
+                    app.cancel_pending_resolution();
                     app.loading = true;
                     app.set_status("SEARCHING…");
 
@@ -152,7 +154,14 @@ pub fn handle_key(
             }
 
             match key.code {
-                KeyCode::Esc => app.query.clear(),
+                KeyCode::Esc => {
+                    if app.is_resolving {
+                        app.cancel_pending_resolution();
+                        app.set_status("RESOLVE CANCELLED");
+                    } else {
+                        app.query.clear();
+                    }
+                }
                 KeyCode::Up => app.move_selection(-1),
                 KeyCode::Down => app.move_selection(1),
                 KeyCode::Enter => play_track(
