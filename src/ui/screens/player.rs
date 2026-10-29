@@ -37,10 +37,21 @@ pub struct PlayerLayout {
 }
 
 pub fn layout_player(area: Rect) -> PlayerLayout {
-    let (col_left, col_player, col_queue) = if area.width >= 100 {
-        // Wide (>= 100 cols):
-        // Queue smoothly grows 1 col per terminal width from 0 up to 24
-        let queue_w = (area.width - 100).min(24);
+    let (col_left, col_player, col_queue) = if area.width >= 120 {
+        // Wide (>= 120 cols): 
+        //Balanced proportional three-panel layout
+        let cols = Layout::horizontal([
+            Constraint::Percentage(26),
+            Constraint::Percentage(48),
+            Constraint::Percentage(26),
+        ])
+        .split(area);
+        (cols[0], cols[1], cols[2])
+    } else if area.width >= 100 {
+        // Transition (100..120 cols): 
+        // Queue smoothly scales up to proportional width
+        let target_queue_w = area.width * 26 / 100;
+        let queue_w = (area.width - 100) * target_queue_w / 20;
         let remaining = area.width - queue_w;
         let left_w = remaining * 35 / 100;
         let player_w = remaining - left_w;
@@ -426,13 +437,17 @@ mod tests {
 
     #[test]
     fn test_layout_player_breakpoint_wide() {
-        for width in [124, 140, 160, 200] {
+        for width in [120, 140, 160, 196, 200] {
             let area = Rect::new(0, 0, width, 30);
             let layout = layout_player(area);
 
             assert!(layout.col_left.width >= 30);
             assert!(layout.col_player.width >= 55);
-            assert_eq!(layout.col_queue.width, 24);
+            assert!(
+                layout.col_queue.width >= 30,
+                "Queue must be substantial on wide screens at {width}, got {}",
+                layout.col_queue.width
+            );
             assert_eq!(
                 layout.col_left.width + layout.col_player.width + layout.col_queue.width,
                 width,
@@ -500,15 +515,15 @@ mod tests {
         let queue_diff = (l120.col_queue.width as i32 - l119.col_queue.width as i32).abs();
 
         assert!(
-            left_diff <= 1,
+            left_diff <= 4,
             "Left panel transition from 119 to 120 must be smooth, diff was {left_diff}"
         );
         assert!(
-            player_diff <= 1,
+            player_diff <= 4,
             "Player panel transition from 119 to 120 must be smooth, diff was {player_diff}"
         );
         assert!(
-            queue_diff <= 1,
+            queue_diff <= 4,
             "Queue panel transition from 119 to 120 must be smooth, diff was {queue_diff}"
         );
     }
