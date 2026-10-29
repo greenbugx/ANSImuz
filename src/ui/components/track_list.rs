@@ -29,13 +29,21 @@ pub fn render_track_list(
             .into_iter()
             .collect()
     } else {
+        let available = (area.width as usize).saturating_sub(6);
+        let title_w = (available * 3 / 5).max(10);
+        let artist_w = available.saturating_sub(title_w + 3).max(4);
+
         tracks
             .iter()
             .enumerate()
             .map(|(i, track)| {
-                let title = truncate(&track.title, 26).to_uppercase();
-                let artist = truncate(&track.artist, 14).to_uppercase();
-                let label = format!(" {:>2}. {} | {}", i + 1, title, artist);
+                let title = truncate(&track.title, title_w).to_uppercase();
+                let artist = truncate(&track.artist, artist_w).to_uppercase();
+                let label = if available > 18 && !artist.is_empty() {
+                    format!(" {:>2}. {} | {}", i + 1, title, artist)
+                } else {
+                    format!(" {:>2}. {}", i + 1, title)
+                };
 
                 ListItem::new(label).style(if i == selected_idx {
                     theme.highlight

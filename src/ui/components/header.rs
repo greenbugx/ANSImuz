@@ -22,10 +22,12 @@ pub fn render_header(
         .map(|(elapsed, _)| format_time(elapsed))
         .unwrap_or_else(|| "--:--".into());
 
-    let line = Line::from(vec![
-        Span::styled(format!("VOL {bars} "), primary),
-        Span::styled(clock, bold_primary),
+    let vol_line = Line::from(vec![
+        Span::styled("VOL ", primary),
+        Span::styled(bars, bold_primary),
     ]);
+    frame.render_widget(Paragraph::new(vol_line).alignment(Alignment::Left), area);
 
-    frame.render_widget(Paragraph::new(line).alignment(Alignment::Right), area);
+    let time_line = Line::from(Span::styled(clock, bold_primary));
+    frame.render_widget(Paragraph::new(time_line).alignment(Alignment::Right), area);
 }
