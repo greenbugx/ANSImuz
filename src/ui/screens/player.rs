@@ -2,7 +2,7 @@ use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Wrap},
 };
 
 use crate::app::{App, Mode};
@@ -37,22 +37,54 @@ pub struct PlayerLayout {
 }
 
 pub fn layout_player(area: Rect) -> PlayerLayout {
-    let (col_left, col_player, col_queue) = if area.width >= 100 {
+    let (col_left, col_player, col_queue) = if area.width >= 120 {
+        // Wide (>= 120 cols):
+        // Three-panel layout (Search/Keybinds | Player | Queue)
+        let queue_w = 24.min(area.width * 22 / 100);
+        let remaining = area.width.saturating_sub(queue_w);
+        let left_w = remaining * 35 / 100;
+        let player_w = remaining.saturating_sub(left_w);
+
         let cols = Layout::horizontal([
-            Constraint::Percentage(28),
-            Constraint::Percentage(50),
-            Constraint::Percentage(22),
+            Constraint::Length(left_w),
+            Constraint::Length(player_w),
+            Constraint::Length(queue_w),
         ])
         .split(area);
         (cols[0], cols[1], cols[2])
-    } else {
-        let cols = Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)])
+    } else if area.width >= 75 {
+        // Medium (75..120 cols):
+        // Two-panel layout (Search/Keybinds | Player)
+        // Queue hidden
+        let left_w = area.width * 35 / 100;
+        let player_w = area.width.saturating_sub(left_w);
+
+        let cols = Layout::horizontal([Constraint::Length(left_w), Constraint::Length(player_w)])
             .split(area);
         (cols[0], cols[1], Rect::default())
+    } else {
+        // Compact (< 75 cols): 
+        // Stacked vertical layout (Player on top, Search below)
+        // Queue hidden
+        let player_h = (area.height * 60 / 100)
+            .max(14)
+            .min(area.height.saturating_sub(7));
+        let search_h = area.height.saturating_sub(player_h);
+
+        let rows = Layout::vertical([Constraint::Length(player_h), Constraint::Length(search_h)])
+            .split(area);
+        (rows[1], rows[0], Rect::default())
     };
 
-    let keybinds_height = (crate::app::commands::PANEL_KEYBINDS.len() as u16 + 2)
-        .min(col_left.height.saturating_sub(6));
+    let keybinds_height = if col_left.height >= 16 {
+        (crate::app::commands::PANEL_KEYBINDS.len() as u16 + 2)
+            .min(col_left.height.saturating_sub(6))
+    } else if col_left.height >= 10 {
+        3
+    } else {
+        0
+    };
+
     let left_sections =
         Layout::vertical([Constraint::Min(6), Constraint::Length(keybinds_height)]).split(col_left);
     let search_area = left_sections[0];
@@ -88,7 +120,7 @@ pub fn layout_player(area: Rect) -> PlayerLayout {
         Constraint::Length(if show_logo { logo_height } else { 0 }), // 0: Logo at top
         Constraint::Length(3),                                       // 1: Search box
         Constraint::Length(1),                                       // 2: Status
-        Constraint::Min(6),                                          // 3: Artwork + Title + Artist
+        Constraint::Min(5),                                          // 3: Artwork + Title + Artist
         Constraint::Length(1), // 4: Volume (left) & Timer (right)
         Constraint::Length(1), // 5: Spacer gap
         Constraint::Length(1), // 6: Progress bar
@@ -202,27 +234,53 @@ pub fn render_player(
         theme,
     );
 
-    let keybinds_block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(theme.primary)
-        .title(Line::from(vec![Span::styled(
-            " KEYBINDS ",
-            theme.bold_primary,
-        )]));
-    let keybinds_inner = keybinds_block.inner(layout.keybinds_area);
-    frame.render_widget(keybinds_block, layout.keybinds_area);
+    if layout.keybinds_area.height >= 3 {
+        let keybinds_block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.primary)
+            .title(Line::from(vec![Span::styled(
+                " KEYBINDS ",
+                theme.bold_primary,
+            )]));
+        let keybinds_inner = keybinds_block.inner(layout.keybinds_area);
+        frame.render_widget(keybinds_block, layout.keybinds_area);
 
-    let keybind_lines: Vec<Line> = crate::app::commands::PANEL_KEYBINDS
-        .iter()
-        .map(|(key, action)| {
-            Line::from(vec![
-                Span::styled(format!(" {:<7}", key), theme.bold_primary),
-                Span::styled(*action, theme.dim),
-            ])
-        })
-        .collect();
-
-    frame.render_widget(Paragraph::new(keybind_lines), keybinds_inner);
+        if keybinds_inner.height >= 9 {
+            let keybind_lines: Vec<Line> = crate::app::commands::PANEL_KEYBINDS
+                .iter()
+                .map(|(key, action)| {
+                    Line::from(vec![
+                        Span::styled(format!(" {:<7}", key), theme.bold_primary),
+                        Span::styled(*action, theme.dim),
+                    ])
+                })
+                .collect();
+            frame.render_widget(Paragraph::new(keybind_lines), keybinds_inner);
+        } else {
+            let keybind_spans = vec![
+                Span::styled("↑↓ ", theme.bold_primary),
+                Span::styled("SELECT  ", theme.dim),
+                Span::styled("ENTER ", theme.bold_primary),
+                Span::styled("PLAY  ", theme.dim),
+                Span::styled("SPACE ", theme.bold_primary),
+                Span::styled("PAUSE  ", theme.dim),
+                Span::styled("←→ ", theme.bold_primary),
+                Span::styled("TRACK  ", theme.dim),
+                Span::styled(": ", theme.bold_primary),
+                Span::styled("CMD  ", theme.dim),
+                Span::styled("? ", theme.bold_primary),
+                Span::styled("HELP  ", theme.dim),
+                Span::styled("Q ", theme.bold_primary),
+                Span::styled("QUIT", theme.dim),
+            ];
+            frame.render_widget(
+                Paragraph::new(Line::from(keybind_spans))
+                    .alignment(Alignment::Center)
+                    .wrap(Wrap { trim: true }),
+                keybinds_inner,
+            );
+        }
+    }
 
     // MIDDLE SECTION: Player
     let player_block = Block::default()
@@ -278,9 +336,16 @@ pub fn render_player(
         Some(theme.accent),
     );
 
+    let vol_timer_area = Rect {
+        x: layout.bar_area.x,
+        y: layout.vol_timer_area.y,
+        width: layout.bar_area.width,
+        height: 1,
+    };
+
     render_volume_timer(
         frame,
-        layout.vol_timer_area,
+        vol_timer_area,
         app.volume,
         playback,
         theme.primary,
@@ -337,50 +402,96 @@ mod tests {
 
     #[test]
     fn test_layout_player_breakpoint_wide() {
-        let area = Rect::new(0, 0, 120, 30);
-        let layout = layout_player(area);
+        for width in [120, 140, 160, 200] {
+            let area = Rect::new(0, 0, width, 30);
+            let layout = layout_player(area);
 
-        assert!(area.width >= 100);
-        assert!(layout.col_left.width > 0);
-        assert!(layout.col_player.width >= 50);
-        assert!(layout.col_queue.width > 0);
-        assert_eq!(
-            layout.col_left.width + layout.col_player.width + layout.col_queue.width,
-            area.width
+            assert!(layout.col_left.width >= 30);
+            assert!(layout.col_player.width >= 55);
+            assert!(layout.col_queue.width >= 20);
+            assert_eq!(
+                layout.col_left.width + layout.col_player.width + layout.col_queue.width,
+                width,
+                "Three panels must sum to total width at {width}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_layout_player_breakpoint_medium() {
+        for width in [75, 80, 90, 99, 100, 110, 119] {
+            let area = Rect::new(0, 0, width, 30);
+            let layout = layout_player(area);
+
+            assert_eq!(
+                layout.col_queue.width, 0,
+                "Queue must be hidden under 120 cols"
+            );
+            assert!(
+                layout.col_left.width >= 26,
+                "Left panel must be >= 26 cols at {width}, got {}",
+                layout.col_left.width
+            );
+            assert!(
+                layout.col_player.width >= 48,
+                "Player panel must be >= 48 cols at {width}, got {}",
+                layout.col_player.width
+            );
+            assert_eq!(
+                layout.col_left.width + layout.col_player.width,
+                width,
+                "Two panels must sum to total width at {width}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_layout_player_seamless_breakpoint_99_to_100() {
+        let l99 = layout_player(Rect::new(0, 0, 99, 30));
+        let l100 = layout_player(Rect::new(0, 0, 100, 30));
+
+        assert_eq!(l99.col_queue.width, 0);
+        assert_eq!(l100.col_queue.width, 0);
+
+        let left_diff = (l100.col_left.width as i32 - l99.col_left.width as i32).abs();
+        let player_diff = (l100.col_player.width as i32 - l99.col_player.width as i32).abs();
+
+        assert!(
+            left_diff <= 1,
+            "Left panel transition from 99 to 100 must be smooth, diff was {left_diff}"
+        );
+        assert!(
+            player_diff <= 1,
+            "Player panel transition from 99 to 100 must be smooth, diff was {player_diff}"
         );
     }
 
     #[test]
-    fn test_layout_player_breakpoint_narrow() {
-        let area = Rect::new(0, 0, 80, 30);
-        let layout = layout_player(area);
-
-        assert!(area.width < 100);
-        assert_eq!(layout.col_queue.width, 0);
-        assert!(layout.col_left.width > 0);
-        assert!(layout.col_player.width > 0);
-        assert_eq!(layout.col_left.width + layout.col_player.width, area.width);
-    }
-
-    #[test]
-    fn test_layout_player_narrow_boundary_cases() {
-        for width in [40, 45, 50, 51, 60, 75, 99] {
+    fn test_layout_player_compact_mode_narrow() {
+        for width in [40, 45, 50, 51, 60, 70, 74] {
             let area = Rect::new(0, 0, width, 24);
             let layout = layout_player(area);
 
-            assert!(
-                layout.col_left.width > 0,
-                "Left panel width must be > 0 at width {width}"
-            );
-            assert!(
-                layout.col_player.width > 0,
-                "Player panel width must be > 0 at width {width}"
-            );
-            assert_eq!(layout.col_queue.width, 0);
             assert_eq!(
-                layout.col_left.width + layout.col_player.width,
-                width,
-                "Sum of panels must equal total width at {width}"
+                layout.col_queue.width, 0,
+                "Queue must be hidden in compact mode"
+            );
+            assert_eq!(
+                layout.col_player.width, width,
+                "Player panel must have full width in compact mode at {width}"
+            );
+            assert_eq!(
+                layout.col_left.width, width,
+                "Search panel must have full width in compact mode at {width}"
+            );
+            assert!(
+                layout.col_player.y + layout.col_player.height <= layout.col_left.y,
+                "Player must be stacked above search at {width}"
+            );
+            assert_eq!(
+                layout.col_player.height + layout.col_left.height,
+                area.height,
+                "Stacked heights must sum to area height at {width}"
             );
         }
     }
@@ -397,17 +508,25 @@ mod tests {
 
     #[test]
     fn test_layout_player_non_overlapping_columns() {
-        let area = Rect::new(0, 0, 120, 30);
-        let layout = layout_player(area);
+        // Wide (3 panels side-by-side)
+        let area_wide = Rect::new(0, 0, 120, 30);
+        let layout_wide = layout_player(area_wide);
+        assert!(layout_wide.col_left.x + layout_wide.col_left.width <= layout_wide.col_player.x);
+        assert!(layout_wide.col_player.x + layout_wide.col_player.width <= layout_wide.col_queue.x);
 
-        assert!(layout.col_left.x + layout.col_left.width <= layout.col_player.x);
-        assert!(layout.col_player.x + layout.col_player.width <= layout.col_queue.x);
+        // Medium (2 panels side-by-side)
+        let area_med = Rect::new(0, 0, 90, 30);
+        let layout_med = layout_player(area_med);
+        assert!(layout_med.col_left.x + layout_med.col_left.width <= layout_med.col_player.x);
+        assert_eq!(layout_med.col_queue.width, 0);
 
-        let area_narrow = Rect::new(0, 0, 60, 30);
-        let layout_narrow = layout_player(area_narrow);
+        // Compact (stacked vertically)
+        let area_compact = Rect::new(0, 0, 60, 30);
+        let layout_compact = layout_player(area_compact);
         assert!(
-            layout_narrow.col_left.x + layout_narrow.col_left.width <= layout_narrow.col_player.x
+            layout_compact.col_player.y + layout_compact.col_player.height
+                <= layout_compact.col_left.y
         );
-        assert_eq!(layout_narrow.col_queue.width, 0);
+        assert_eq!(layout_compact.col_queue.width, 0);
     }
 }
