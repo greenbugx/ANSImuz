@@ -48,7 +48,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -63,6 +63,9 @@ jobs:
 
       - name: Cargo check
         run: cargo check --all-targets
+
+      - name: Clippy check
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Cargo build
         run: cargo build --verbose
