@@ -1,6 +1,7 @@
 # ANSImuz
 
 [![XERJ Corpus Hub contributor](https://hub.xerj.org/contributors/greenbugx/badge.svg)](https://hub.xerj.org/contributors/greenbugx)
+[![CI](https://github.com/greenbugx/ANSImuz/actions/workflows/ci.yml/badge.svg)](https://github.com/greenbugx/ANSImuz/actions/workflows/ci.yml)
 
 > [!IMPORTANT]
 > **Disclaimer:** This project is not affiliated with, endorsed by, or in any way officially connected to Youtube or Spotify. It is intended solely for educational purposes only.
@@ -49,6 +50,7 @@ Build and run:
 ```bash
 cargo fmt --check
 cargo check
+cargo clippy --all-targets -- -D warnings
 cargo test
 cargo run
 ```
