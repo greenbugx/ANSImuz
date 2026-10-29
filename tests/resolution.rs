@@ -338,3 +338,31 @@ fn test_stale_response_rejected_on_slot_mismatch() {
         "Slot must not be overwritten by mismatched track"
     );
 }
+
+#[test]
+fn test_concurrent_search_and_resolve_non_blocking() {
+    use ansimuz::config::Provider;
+    use ansimuz::music::{resolve_playable, search_music};
+
+    let sample = Track {
+        title: "Creep".to_string(),
+        artist: "Radiohead".to_string(),
+        stream_url: String::new(),
+        art_url: String::new(),
+        spotify_id: Some("70LcF31zb1H0PyZ1yR09AV".to_string()),
+        artists: vec!["Radiohead".to_string()],
+        album: Some("Pablo Honey".to_string()),
+        duration_ms: Some(238_640),
+    };
+
+    let t_search = std::thread::spawn(|| search_music("radiohead".into(), Provider::Spotify));
+    let sample_clone = sample.clone();
+    let t_resolve = std::thread::spawn(move || resolve_playable(&sample_clone));
+
+    let search_res = t_search.join().expect("search thread must not panic");
+    let resolve_res = t_resolve.join().expect("resolve thread must not panic");
+
+    assert_eq!(search_res.0, "radiohead");
+    assert!(search_res.1.is_ok(), "Search must succeed concurrently");
+    assert!(resolve_res.is_ok(), "Resolution must succeed concurrently");
+}

@@ -64,33 +64,19 @@ pub fn cache_resolved_track(track: &Track) {
     }
 }
 
-static PYTHON_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
 fn ensure_backend_path(py: Python<'_>) -> PyResult<()> {
-    let sys = PyModule::import(py, "sys")?;
-    let path = sys.getattr("path")?.cast_into::<PyList>()?;
-    let backend_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("backend");
-    let backend_str = backend_path.to_string_lossy();
-
-    let mut found = false;
-    for item in path.iter() {
-        if let Ok(s) = item.extract::<String>()
-            && s == backend_str.as_ref()
-        {
-            found = true;
-            break;
-        }
+    static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if INIT.get().is_none() {
+        let sys = PyModule::import(py, "sys")?;
+        let path = sys.getattr("path")?.cast_into::<PyList>()?;
+        let backend_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("backend");
+        path.insert(0, backend_path.to_string_lossy().as_ref())?;
+        let _ = INIT.set(());
     }
-
-    if !found {
-        path.insert(0, backend_str.as_ref())?;
-    }
-
     Ok(())
 }
 
 pub fn search_music(query: String, provider: Provider) -> SearchResult {
-    let _guard = PYTHON_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let result = Python::attach(|py| -> PyResult<Vec<Track>> {
         ensure_backend_path(py)?;
 
@@ -160,7 +146,6 @@ pub fn resolve_playable(track: &Track) -> Result<Track, String> {
     if let Some(cached) = get_cached_track(track) {
         return Ok(cached);
     }
-    let _guard = PYTHON_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let resolved_track = Python::attach(|py| -> PyResult<Track> {
         ensure_backend_path(py)?;
 

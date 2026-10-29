@@ -12,6 +12,7 @@ YTMUSIC_LIMIT = 10
 MIN_MATCH_SCORE = 0.68 # higher the better, but may reduce matches
 
 _ytmusic = YTMusic()
+_ytmusic_lock = threading.Lock()
 _resolved_cache: dict[str, dict[str, Any]] = {}
 _cache_lock = threading.Lock()
 
@@ -293,11 +294,12 @@ def resolve_playable(track: dict[str, Any]) -> dict[str, Any]:
 
     for query in queries:
         try:
-            candidates = _ytmusic.search(
-                query,
-                filter="songs",
-                limit=YTMUSIC_LIMIT,
-            )
+            with _ytmusic_lock:
+                candidates = _ytmusic.search(
+                    query,
+                    filter="songs",
+                    limit=YTMUSIC_LIMIT,
+                )
         except Exception as exc:
             errors.append(f"{query!r}: {exc}")
             continue
