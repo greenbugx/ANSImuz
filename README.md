@@ -11,12 +11,13 @@ A lightweight terminal music player with retro 8-bit ANSI vibes, built with Rust
 ## Features
 
 - Search and play music from the selected provider (YT Music & Spotify)
-- Render album artwork directly in the terminal
-- Artwork caching and prewarming
+- Responsive multi-panel layout (Search Results, Player, and Queue)
+- Searchable Command Palette (`:`) and Keybinds Help Overlay (`?`)
+- Render album artwork directly in the terminal (with Kitty, Sixel, iTerm2, and Unicode half-blocks)
+- Artwork caching and background prewarming
 - Shuffle and repeat playback modes
 - Playback controls and volume adjustment
-- Configurable artwork rendering and color palette
-
+- Dynamic artwork color palette theming across the entire interface
 ## Requirements
 
 - Rust toolchain (made in `rustc 1.99.1`)
@@ -65,10 +66,9 @@ cargo run
 ```
 
 ## Controls
-
 | Key | Action |
 |---|---|
-| `/` | Search |
+| `/` | Focus search bar |
 | `↑` / `↓` | Select track |
 | `Enter` | Play selected track |
 | `Space` | Pause / resume |
@@ -76,10 +76,10 @@ cargo run
 | `X` | Toggle shuffle |
 | `R` | Cycle repeat mode |
 | `+` / `-` | Adjust volume |
+| `S` | Open settings |
 | `:` | Commands |
 | `?` | Help |
 | `Q` | Quit |
-
 ## License
 
 See [LICENSE](LICENSE) for license information.
