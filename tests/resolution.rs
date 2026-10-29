@@ -29,7 +29,7 @@ fn make_resolved_track(id: &str, title: &str, artist: &str, youtube_id: &str) ->
 #[test]
 fn test_rapid_track_switching_ignores_stale_responses() {
     let mut app = App::new();
-    let mut player = AudioPlayer::new();
+    let mut player = AudioPlayer::new_mock();
     let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
     let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
 
@@ -144,7 +144,7 @@ fn test_rapid_track_switching_ignores_stale_responses() {
 #[test]
 fn test_cancelling_while_old_track_is_playing_preserves_playback() {
     let mut app = App::new();
-    let mut player = AudioPlayer::new();
+    let mut player = AudioPlayer::new_mock();
     let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
     let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
 
@@ -213,7 +213,7 @@ fn test_cancelling_while_old_track_is_playing_preserves_playback() {
 #[test]
 fn test_resolution_failure_preserves_playing_track() {
     let mut app = App::new();
-    let mut player = AudioPlayer::new();
+    let mut player = AudioPlayer::new_mock();
     let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
     let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
 
@@ -266,7 +266,7 @@ fn test_resolution_failure_preserves_playing_track() {
 #[test]
 fn test_resolution_failure_when_idle_cleans_up() {
     let mut app = App::new();
-    let mut player = AudioPlayer::new();
+    let mut player = AudioPlayer::new_mock();
     let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
     let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
 
@@ -304,7 +304,7 @@ fn test_resolution_failure_when_idle_cleans_up() {
 #[test]
 fn test_stale_response_rejected_on_slot_mismatch() {
     let mut app = App::new();
-    let mut player = AudioPlayer::new();
+    let mut player = AudioPlayer::new_mock();
     let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
 
     // Search results replaced while resolution was in-flight
@@ -342,7 +342,7 @@ fn test_stale_response_rejected_on_slot_mismatch() {
 #[test]
 fn test_queue_track_resolution_plays_directly_without_touching_search_results() {
     let mut app = App::new();
-    let mut player = AudioPlayer::new();
+    let mut player = AudioPlayer::new_mock();
     let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
     let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
 
