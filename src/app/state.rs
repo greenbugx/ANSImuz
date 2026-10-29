@@ -48,6 +48,7 @@ pub struct App {
     pub queue_selected: usize,
     pub next_queue_id: u64,
     pub search_resume_index: Option<usize>,
+    pub pending_queue_entry_id: Option<u64>,
 }
 
 impl App {
@@ -88,6 +89,7 @@ impl App {
             queue_selected: 0,
             next_queue_id: 1,
             search_resume_index: None,
+            pending_queue_entry_id: None,
         }
     }
 
@@ -108,6 +110,7 @@ impl App {
         self.resolve_generation = self.resolve_generation.wrapping_add(1);
         self.is_resolving = false;
         self.pending_track = None;
+        self.pending_queue_entry_id = None;
     }
 
     pub fn toggle_help(&mut self) {
@@ -165,7 +168,10 @@ impl App {
         }
 
         let len = self.tracks.len() as isize;
-        let base = self.playing.unwrap_or(self.selected) as isize;
+        let base = self
+            .playing
+            .or(self.search_resume_index)
+            .unwrap_or(self.selected) as isize;
         Some((base + delta).rem_euclid(len) as usize)
     }
 
@@ -175,7 +181,10 @@ impl App {
             return None;
         }
 
-        let current = self.playing.unwrap_or(self.selected);
+        let current = self
+            .playing
+            .or(self.search_resume_index)
+            .unwrap_or(self.selected);
         let after = len.saturating_sub(current + 1);
 
         let index = if after > 0 {
@@ -217,6 +226,11 @@ impl App {
             self.queue_selected = self.queue.len() - 1;
         }
 
+        if self.is_resolving && self.pending_queue_entry_id == Some(entry.id) {
+            self.cancel_pending_resolution();
+            self.set_status("RESOLVE CANCELLED");
+        }
+
         Some(entry)
     }
 
@@ -242,20 +256,12 @@ impl App {
         true
     }
 
+    pub fn pop_next_queue_entry(&mut self) -> Option<QueueEntry> {
+        self.remove_queue_item(0)
+    }
+
     pub fn pop_next_queued(&mut self) -> Option<Track> {
-        if self.queue.is_empty() {
-            return None;
-        }
-
-        let entry = self.queue.remove(0);
-
-        if self.queue.is_empty() {
-            self.queue_selected = 0;
-        } else if self.queue_selected > 0 {
-            self.queue_selected -= 1;
-        }
-
-        Some(entry.track)
+        self.pop_next_queue_entry().map(|e| e.track)
     }
 
     pub fn clear_queue(&mut self) {

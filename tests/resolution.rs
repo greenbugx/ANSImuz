@@ -96,7 +96,8 @@ fn test_rapid_track_switching_ignores_stale_responses() {
             "yt0",
         )),
     };
-    let handled_0 = handle_resolve_response(&mut app, &mut player, &player_tx, stale_resp_0);
+    let handled_0 =
+        handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, stale_resp_0);
     assert!(!handled_0, "Stale generation 1 response must be ignored");
     assert!(app.is_resolving, "Track 2 must still be resolving");
     assert_eq!(
@@ -117,7 +118,8 @@ fn test_rapid_track_switching_ignores_stale_responses() {
         artist: "Artist One".into(),
         result: Ok(make_resolved_track("sp1", "Track One", "Artist One", "yt1")),
     };
-    let handled_1 = handle_resolve_response(&mut app, &mut player, &player_tx, stale_resp_1);
+    let handled_1 =
+        handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, stale_resp_1);
     assert!(!handled_1, "Stale generation 2 response must be ignored");
     assert!(app.is_resolving);
 
@@ -130,7 +132,8 @@ fn test_rapid_track_switching_ignores_stale_responses() {
         artist: "Artist Two".into(),
         result: Ok(make_resolved_track("sp2", "Track Two", "Artist Two", "yt2")),
     };
-    let handled_2 = handle_resolve_response(&mut app, &mut player, &player_tx, fresh_resp_2);
+    let handled_2 =
+        handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, fresh_resp_2);
     assert!(handled_2, "Fresh generation 3 response must be accepted");
     assert!(!app.is_resolving);
     assert!(app.pending_track.is_none());
@@ -202,7 +205,8 @@ fn test_cancelling_while_old_track_is_playing_preserves_playback() {
         artist: "New Artist".into(),
         result: Ok(make_resolved_track("sp1", "New Track", "New Artist", "yt1")),
     };
-    let handled = handle_resolve_response(&mut app, &mut player, &player_tx, stale_resp);
+    let handled =
+        handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, stale_resp);
     assert!(!handled, "Stale response after cancel must be discarded");
     assert_eq!(
         app.now_playing.as_ref().map(|t| t.title.as_str()),
@@ -246,7 +250,8 @@ fn test_resolution_failure_preserves_playing_track() {
         result: Err("No matching YouTube video found".into()),
     };
 
-    let handled = handle_resolve_response(&mut app, &mut player, &player_tx, fail_resp);
+    let handled =
+        handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, fail_resp);
     assert!(!handled, "Failed resolution must return false");
     assert!(!app.is_resolving);
     assert!(app.pending_track.is_none());
@@ -292,7 +297,8 @@ fn test_resolution_failure_when_idle_cleans_up() {
         result: Err("Network timeout".into()),
     };
 
-    let handled = handle_resolve_response(&mut app, &mut player, &player_tx, fail_resp);
+    let handled =
+        handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, fail_resp);
     assert!(!handled);
     assert!(!app.is_resolving);
     assert!(app.pending_track.is_none());
@@ -306,6 +312,7 @@ fn test_stale_response_rejected_on_slot_mismatch() {
     let mut app = App::new();
     let mut player = AudioPlayer::new_mock();
     let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
 
     // Search results replaced while resolution was in-flight
     app.tracks = vec![make_spotify_track(
@@ -331,7 +338,7 @@ fn test_stale_response_rejected_on_slot_mismatch() {
         )),
     };
 
-    let handled = handle_resolve_response(&mut app, &mut player, &player_tx, response);
+    let handled = handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, response);
     assert!(!handled, "Mismatched slot identity must reject playback");
     assert_eq!(
         app.tracks[0].title, "Different Track",
@@ -383,7 +390,7 @@ fn test_queue_track_resolution_plays_directly_without_touching_search_results() 
         result: Ok(resolved_queue_track),
     };
 
-    let handled = handle_resolve_response(&mut app, &mut player, &player_tx, response);
+    let handled = handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, response);
     assert!(handled, "Queue resolution must be accepted");
     assert!(!app.is_resolving);
 

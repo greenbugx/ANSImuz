@@ -3,7 +3,7 @@ use std::sync::mpsc::Sender;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{
-    runner::{now_playing, play_search_result},
+    runner::{now_playing, play_next, play_search_result},
     state::{App, Mode},
 };
 use crate::playback::{AudioPlayer, PlayerEvent, Repeat};
@@ -260,15 +260,7 @@ pub fn dispatch_action(
         }
 
         Action::NextTrack => {
-            let next = if app.shuffle {
-                app.shuffled_next()
-            } else {
-                app.next_index(1)
-            };
-
-            if let Some(index) = next {
-                play_search_result(app, player, player_tx.clone(), resolve_tx.clone(), index);
-            }
+            play_next(app, player, player_tx.clone(), resolve_tx.clone());
         }
 
         Action::PreviousTrack => {

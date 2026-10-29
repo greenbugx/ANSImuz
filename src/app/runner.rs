@@ -62,45 +62,18 @@ pub fn run(
         }
 
         while let Ok(response) = resolve_rx.try_recv() {
-            handle_resolve_response(&mut app, &mut player, &player_tx, response);
+            handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, response);
         }
 
-        if !app.is_resolving && app.now_playing.is_some() && !player.is_playing() {
-            let ended = app.playing;
-
-            let next = match app.repeat {
-                Repeat::One if app.played_once => ended,
-                Repeat::All if app.played_once => ended.and_then(|index| {
-                    if app.shuffle {
-                        app.shuffled_next()
-                    } else if app.tracks.is_empty() {
-                        None
-                    } else {
-                        Some((index + 1) % app.tracks.len())
-                    }
-                }),
-                _ => None,
-            };
-
-            match next {
-                Some(index) => play_search_result(
-                    &mut app,
-                    &mut player,
-                    player_tx.clone(),
-                    resolve_tx.clone(),
-                    index,
-                ),
-                None => {
-                    app.playing = None;
-                    app.now_playing = None;
-                    app.paused = false;
-
-                    app.set_status(match player.error() {
-                        Some(error) => format!("PLAYER ERROR: {}", error),
-                        None => "PLAYBACK ENDED".to_string(),
-                    });
-                }
-            }
+        if !app.is_resolving
+            && app.now_playing.is_some()
+            && !player.is_playing()
+            && !advance_playback(&mut app, &mut player, player_tx.clone(), resolve_tx.clone())
+        {
+            app.set_status(match player.error() {
+                Some(error) => format!("PLAYER ERROR: {}", error),
+                None => "PLAYBACK ENDED".to_string(),
+            });
         }
 
         let current = player.generation();
@@ -191,6 +164,111 @@ pub fn play_search_result(
     );
 }
 
+pub fn play_queue_item(
+    app: &mut App,
+    player: &mut AudioPlayer,
+    player_tx: Sender<PlayerEvent>,
+    resolve_tx: Sender<ResolveResponse>,
+    index: usize,
+) -> bool {
+    let Some(entry) = app.remove_queue_item(index) else {
+        return false;
+    };
+
+    play_track(
+        app,
+        player,
+        player_tx,
+        resolve_tx,
+        entry.track,
+        PlaybackSource::Queue { entry_id: entry.id },
+    );
+    true
+}
+
+pub fn play_next(
+    app: &mut App,
+    player: &mut AudioPlayer,
+    player_tx: Sender<PlayerEvent>,
+    resolve_tx: Sender<ResolveResponse>,
+) -> bool {
+    if !app.queue.is_empty() {
+        return play_queue_item(app, player, player_tx, resolve_tx, 0);
+    }
+
+    let next = if app.shuffle {
+        app.shuffled_next()
+    } else {
+        app.next_index(1)
+    };
+
+    if let Some(index) = next {
+        play_search_result(app, player, player_tx, resolve_tx, index);
+        true
+    } else {
+        false
+    }
+}
+
+pub fn advance_playback(
+    app: &mut App,
+    player: &mut AudioPlayer,
+    player_tx: Sender<PlayerEvent>,
+    resolve_tx: Sender<ResolveResponse>,
+) -> bool {
+    if app.repeat == Repeat::One && app.played_once {
+        if let Some(index) = app.playing {
+            play_search_result(app, player, player_tx, resolve_tx, index);
+            return true;
+        } else if let Some(track) = app.now_playing.clone() {
+            play_track(
+                app,
+                player,
+                player_tx,
+                resolve_tx,
+                track,
+                PlaybackSource::Queue { entry_id: 0 },
+            );
+            return true;
+        }
+    }
+
+    if !app.queue.is_empty() {
+        return play_queue_item(app, player, player_tx, resolve_tx, 0);
+    }
+
+    let next_search = if app.tracks.is_empty() {
+        None
+    } else if app.shuffle {
+        app.shuffled_next()
+    } else if app.repeat == Repeat::All {
+        let base = app
+            .playing
+            .or(app.search_resume_index)
+            .unwrap_or(app.selected);
+        Some((base + 1) % app.tracks.len())
+    } else {
+        let base = app.playing.or(app.search_resume_index);
+        base.and_then(|i| {
+            if i + 1 < app.tracks.len() {
+                Some(i + 1)
+            } else {
+                None
+            }
+        })
+    };
+
+    if let Some(index) = next_search {
+        play_search_result(app, player, player_tx, resolve_tx, index);
+        true
+    } else {
+        app.playing = None;
+        app.now_playing = None;
+        app.paused = false;
+        false
+    }
+}
+
 pub fn play_track(
     app: &mut App,
     player: &mut AudioPlayer,
@@ -213,8 +291,14 @@ pub fn play_track(
         let generation = app.resolve_generation;
         app.is_resolving = true;
         app.pending_track = Some(track.clone());
-        if let PlaybackSource::SearchResult { index } = source {
-            app.selected = index;
+        match source {
+            PlaybackSource::SearchResult { index } => {
+                app.selected = index;
+                app.pending_queue_entry_id = None;
+            }
+            PlaybackSource::Queue { entry_id } => {
+                app.pending_queue_entry_id = Some(entry_id);
+            }
         }
         app.set_status(format!("RESOLVING: {} — {}…", track.title, track.artist));
 
@@ -256,6 +340,7 @@ pub fn start_playback(
         Ok(()) => {
             app.is_resolving = false;
             app.pending_track = None;
+            app.pending_queue_entry_id = None;
             app.now_playing = Some(track.clone());
             app.paused = false;
             app.played_once = false;
@@ -326,6 +411,7 @@ pub fn handle_resolve_response(
     app: &mut App,
     player: &mut AudioPlayer,
     player_tx: &Sender<PlayerEvent>,
+    resolve_tx: &Sender<ResolveResponse>,
     response: ResolveResponse,
 ) -> bool {
     if response.generation != app.resolve_generation {
@@ -379,6 +465,13 @@ pub fn handle_resolve_response(
                     true
                 }
                 PlaybackSource::Queue { entry_id } => {
+                    if app.pending_queue_entry_id.is_some()
+                        && app.pending_queue_entry_id != Some(entry_id)
+                    {
+                        return false;
+                    }
+                    app.pending_queue_entry_id = None;
+
                     start_playback(
                         app,
                         player,
@@ -392,6 +485,12 @@ pub fn handle_resolve_response(
         }
         Err(error) => {
             app.set_status(format!("RESOLVE ERROR: {}", error));
+            app.pending_queue_entry_id = None;
+
+            if let PlaybackSource::Queue { .. } = response.source {
+                advance_playback(app, player, player_tx.clone(), resolve_tx.clone());
+            }
+
             false
         }
     }
