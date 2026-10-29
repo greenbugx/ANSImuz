@@ -382,7 +382,7 @@ pub fn render_player(
     // only rendered when wide enough for 3-panel layout
     if layout.col_queue.width >= 8 {
         // TODO: add a persistent playback queue
-        let queue_title = if layout.col_queue.width >= 9 {
+        let queue_title = if layout.col_queue.width >= 10 {
             " QUEUE "
         } else {
             " Q "
@@ -398,12 +398,12 @@ pub fn render_player(
         let queue_inner = queue_block.inner(layout.col_queue);
         frame.render_widget(queue_block, layout.col_queue);
 
-        let placeholder = if queue_inner.width >= 22 {
+        let placeholder = if queue_inner.width >= 24 {
             "Yet to be in service :)"
-        } else if queue_inner.width >= 14 {
-            "Soon in\nservice :)"
-        } else if queue_inner.width >= 8 {
-            "Soon\n:)"
+        } else if queue_inner.width >= 16 {
+            "Coming soon :)"
+        } else if queue_inner.width >= 9 {
+            "Soon :)"
         } else {
             ":)"
         };
@@ -678,7 +678,7 @@ mod tests {
             let title_row = (layout.col_queue.x..layout.col_queue.x + layout.col_queue.width)
                 .map(|x| buffer[(x, layout.col_queue.y)].symbol())
                 .collect::<String>();
-            if layout.col_queue.width >= 9 {
+            if layout.col_queue.width >= 10 {
                 assert!(
                     title_row.contains("QUEUE"),
                     "Must contain QUEUE title at width {width}"
