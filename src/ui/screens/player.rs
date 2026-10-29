@@ -38,7 +38,7 @@ pub struct PlayerLayout {
 
 pub fn layout_player(area: Rect) -> PlayerLayout {
     let (col_left, col_player, col_queue) = if area.width >= 120 {
-        // Wide (>= 120 cols): 
+        // Wide (>= 120 cols):
         //Balanced proportional three-panel layout
         let cols = Layout::horizontal([
             Constraint::Percentage(26),
@@ -48,7 +48,7 @@ pub fn layout_player(area: Rect) -> PlayerLayout {
         .split(area);
         (cols[0], cols[1], cols[2])
     } else if area.width >= 100 {
-        // Transition (100..120 cols): 
+        // Transition (100..120 cols):
         // Queue smoothly scales up to proportional width
         let target_queue_w = area.width * 26 / 100;
         let queue_w = (area.width - 100) * target_queue_w / 20;
