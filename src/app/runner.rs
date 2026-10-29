@@ -74,6 +74,11 @@ pub fn run(
                     crate::music::cache_resolved_track(&resolved);
 
                     let Some(slot) = app.tracks.get_mut(response.index) else {
+                        app.set_status(if app.now_playing.is_some() && player.is_playing() {
+                            now_playing(&app)
+                        } else {
+                            "RESOLVE CANCELLED".to_string()
+                        });
                         continue;
                     };
 
@@ -86,6 +91,11 @@ pub fn run(
                     };
 
                     if !is_same {
+                        app.set_status(if app.now_playing.is_some() && player.is_playing() {
+                            now_playing(&app)
+                        } else {
+                            "RESOLVE CANCELLED".to_string()
+                        });
                         continue;
                     }
 
