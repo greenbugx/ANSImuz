@@ -242,7 +242,7 @@ pub fn render_player(
 
     if layout.show_logo {
         let bitmap = logo_bitmap();
-        let scaled = scale_bitmap(&bitmap, layout.logo_width, layout.logo_px);
+        let scaled = scale_bitmap(bitmap, layout.logo_width, layout.logo_px);
         frame.render_widget(
             Paragraph::new(bitmap_lines(&scaled))
                 .style(theme.bold_primary)

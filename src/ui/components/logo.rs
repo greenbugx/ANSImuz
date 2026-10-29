@@ -1,6 +1,14 @@
+use std::sync::LazyLock;
+
 use ratatui::text::Line;
 
-pub fn logo_bitmap() -> Vec<Vec<bool>> {
+static LOGO_BITMAP: LazyLock<Vec<Vec<bool>>> = LazyLock::new(init_logo_bitmap);
+
+pub fn logo_bitmap() -> &'static [Vec<bool>] {
+    &LOGO_BITMAP
+}
+
+fn init_logo_bitmap() -> Vec<Vec<bool>> {
     let lines: Vec<&str> = include_str!("../../../ascii.art")
         .lines()
         .filter(|line| !line.trim().is_empty())
