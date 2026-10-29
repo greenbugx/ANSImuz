@@ -40,6 +40,9 @@ pub fn format_time(seconds: f64) -> String {
 }
 
 pub fn truncate(text: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
     if text.chars().count() <= max {
         return text.to_string();
     }
