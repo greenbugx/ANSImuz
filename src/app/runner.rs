@@ -73,18 +73,23 @@ pub fn run(
                 Ok(resolved) => {
                     crate::music::cache_resolved_track(&resolved);
 
-                    if let Some(slot) = app.tracks.get_mut(response.index) {
-                        let is_same = match (&slot.spotify_id, &response.spotify_id) {
-                            (Some(a), Some(b)) => a == b,
-                            _ => {
-                                slot.title.eq_ignore_ascii_case(&response.title)
-                                    && slot.artist.eq_ignore_ascii_case(&response.artist)
-                            }
-                        };
-                        if is_same {
-                            *slot = resolved.clone();
+                    let Some(slot) = app.tracks.get_mut(response.index) else {
+                        continue;
+                    };
+
+                    let is_same = match (&slot.spotify_id, &response.spotify_id) {
+                        (Some(a), Some(b)) => a == b,
+                        _ => {
+                            slot.title.eq_ignore_ascii_case(&response.title)
+                                && slot.artist.eq_ignore_ascii_case(&response.artist)
                         }
+                    };
+
+                    if !is_same {
+                        continue;
                     }
+
+                    *slot = resolved.clone();
 
                     start_playback(
                         &mut app,
