@@ -338,3 +338,119 @@ fn test_stale_response_rejected_on_slot_mismatch() {
         "Slot must not be overwritten by mismatched track"
     );
 }
+
+#[test]
+fn test_concurrent_search_and_resolve_non_blocking() {
+    use ansimuz::config::Provider;
+    use ansimuz::music::{resolve_playable, search_music};
+    use pyo3::prelude::*;
+    use pyo3::types::PyDict;
+    use std::ffi::CString;
+
+    // Install mock bridge functions with a synchronization barrier in Python
+    Python::attach(|py| -> PyResult<()> {
+        let sys = PyModule::import(py, "sys")?;
+        let path = sys.getattr("path")?.cast_into::<pyo3::types::PyList>()?;
+        let backend_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("backend");
+        path.insert(0, backend_path.to_string_lossy().as_ref())?;
+
+        let bridge = PyModule::import(py, "bridge")?;
+        let locals = PyDict::new(py);
+        locals.set_item("bridge", bridge)?;
+        let code = CString::new(
+            r#"
+import bridge
+import threading
+
+bridge.orig_search = getattr(bridge, "orig_search", bridge.search_music)
+bridge.orig_resolve = getattr(bridge, "orig_resolve", bridge.resolve_playable)
+bridge.barrier = threading.Barrier(2)
+
+def mock_search(query, provider="ytmusic"):
+    import bridge
+    if query == "deterministic_mock_query_for_concurrency":
+        bridge.barrier.wait(timeout=3)
+        return [{
+            "title": f"Mock for {query}",
+            "artist": "Mock Artist",
+            "stream_url": "https://youtube.com/watch?v=mock_search",
+            "art_url": "",
+            "source": provider,
+        }]
+    return bridge.orig_search(query, provider)
+
+def mock_resolve(track):
+    import bridge
+    if track.get("spotify_id") == "mock_spotify_id_barrier_test":
+        bridge.barrier.wait(timeout=3)
+        resolved = dict(track)
+        resolved["stream_url"] = "https://music.youtube.com/watch?v=mock_resolved"
+        resolved["resolved"] = True
+        return resolved
+    return bridge.orig_resolve(track)
+
+bridge.search_music = mock_search
+bridge.resolve_playable = mock_resolve
+"#,
+        )
+        .unwrap();
+        py.run(code.as_c_str(), None, Some(&locals))?;
+        Ok(())
+    })
+    .expect("Failed to install mock bridge functions with barrier");
+
+    let sample = Track {
+        title: "Mock Title".to_string(),
+        artist: "Mock Artist".to_string(),
+        stream_url: String::new(),
+        art_url: String::new(),
+        spotify_id: Some("mock_spotify_id_barrier_test".to_string()),
+        artists: vec!["Mock Artist".to_string()],
+        album: Some("Mock Album".to_string()),
+        duration_ms: Some(180_000),
+    };
+
+    let t_search = std::thread::spawn(|| {
+        search_music(
+            "deterministic_mock_query_for_concurrency".into(),
+            Provider::Spotify,
+        )
+    });
+    let sample_clone = sample.clone();
+    let t_resolve = std::thread::spawn(move || resolve_playable(&sample_clone));
+
+    let search_res = t_search.join().expect("search thread must not panic");
+    let resolve_res = t_resolve.join().expect("resolve thread must not panic");
+
+    // Restore original bridge functions
+    let _ = Python::attach(|py| -> PyResult<()> {
+        let bridge = PyModule::import(py, "bridge")?;
+        let locals = PyDict::new(py);
+        locals.set_item("bridge", bridge)?;
+        let code = CString::new(
+            r#"
+if hasattr(bridge, "orig_search"):
+    bridge.search_music = bridge.orig_search
+if hasattr(bridge, "orig_resolve"):
+    bridge.resolve_playable = bridge.orig_resolve
+"#,
+        )
+        .unwrap();
+        py.run(code.as_c_str(), None, Some(&locals))?;
+        Ok(())
+    });
+
+    assert_eq!(search_res.0, "deterministic_mock_query_for_concurrency");
+    let tracks = search_res.1.expect("Search must succeed concurrently");
+    assert_eq!(tracks.len(), 1);
+    assert_eq!(
+        tracks[0].title,
+        "Mock for deterministic_mock_query_for_concurrency"
+    );
+
+    let resolved = resolve_res.expect("Resolution must succeed concurrently");
+    assert_eq!(
+        resolved.stream_url,
+        "https://music.youtube.com/watch?v=mock_resolved"
+    );
+}

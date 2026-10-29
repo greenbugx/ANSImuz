@@ -34,36 +34,7 @@ pub fn render_help(frame: &mut Frame, area: Rect, theme: &Theme) {
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
-    let sections: &[(&str, &[(&str, &str)])] = &[
-        (
-            "PLAYBACK",
-            &[
-                ("Space", "Play / Pause playback"),
-                ("← / →", "Previous / Next track"),
-                ("x", "Toggle shuffle mode"),
-                ("r", "Cycle repeat (Off / All / One)"),
-                ("+ / -", "Volume up / down (±5%)"),
-            ],
-        ),
-        (
-            "NAVIGATION",
-            &[
-                ("↑ / ↓", "Select track in list"),
-                ("Enter", "Play selected track"),
-                ("/", "Focus song search input"),
-                ("Esc", "Clear search query / Close dialog"),
-            ],
-        ),
-        (
-            "SYSTEM",
-            &[
-                (": / Ctrl+P", "Open command palette"),
-                ("s", "Open settings screen"),
-                ("?", "Toggle this help overlay"),
-                ("q / Ctrl+C", "Quit ANSImuz"),
-            ],
-        ),
-    ];
+    let sections = crate::app::commands::HELP_SECTIONS;
 
     let mut lines = Vec::new();
 
