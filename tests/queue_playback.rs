@@ -342,3 +342,116 @@ fn test_failed_queue_resolution_skips_to_next_queued_item() {
     );
     assert_eq!(app.queue.len(), 0);
 }
+
+#[test]
+fn test_repeat_one_does_not_interfere_with_failed_queue_resolution() {
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    // Song A is playing with Repeat::One enabled and played_once = true
+    app.tracks = vec![make_test_track("Song A", "Artist", "http://stream/a")];
+    app.repeat = Repeat::One;
+    play_search_result(
+        &mut app,
+        &mut player,
+        player_tx.clone(),
+        resolve_tx.clone(),
+        0,
+    );
+    app.played_once = true;
+
+    // Queue: [Q_fail (unresolved), Q_good (resolved)]
+    let fail_track = make_test_track("Q Fail", "Artist", "");
+    let fail_id = app.enqueue(fail_track.clone());
+    let good_track = make_test_track("Q Good", "Artist", "http://stream/good");
+    app.enqueue(good_track);
+
+    // Manual Next: plays Q_fail
+    play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert!(app.is_resolving);
+    let generation = app.resolve_generation;
+
+    // Resolution fails for Q_fail
+    let fail_resp = ResolveResponse {
+        generation,
+        source: PlaybackSource::Queue { entry_id: fail_id },
+        spotify_id: Some("sp_Q Fail".to_string()),
+        title: "Q Fail".to_string(),
+        artist: "Artist".to_string(),
+        result: Err("Audio stream unavailable".to_string()),
+    };
+
+    handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, fail_resp);
+
+    // Must NOT restart Song A! Must advance to Q_good!
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Q Good"),
+        "Repeat::One on previous song must not restart previous song when a queued track fails"
+    );
+}
+
+#[test]
+fn test_new_search_synchronizes_resume_position_and_falls_back() {
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    // Old search: 3 tracks [T0, T1, T2]
+    app.tracks = vec![
+        make_test_track("T0", "Artist", "http://stream/t0"),
+        make_test_track("T1", "Artist", "http://stream/t1"),
+        make_test_track("T2", "Artist", "http://stream/t2"),
+    ];
+
+    // User played T2
+    play_search_result(
+        &mut app,
+        &mut player,
+        player_tx.clone(),
+        resolve_tx.clone(),
+        2,
+    );
+    assert_eq!(app.search_resume_index, Some(2));
+
+    // User enqueues Q0
+    app.enqueue(make_test_track("Q0", "Artist", "http://stream/q0"));
+
+    // Q0 starts playing
+    play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Q0")
+    );
+    assert_eq!(app.search_resume_index, Some(2));
+
+    // While Q0 is playing, a new search finishes with only 2 results [New0, New1]
+    // Simulate new search result handling
+    let new_tracks = vec![
+        make_test_track("New 0", "Artist", "http://stream/new0"),
+        make_test_track("New 1", "Artist", "http://stream/new1"),
+    ];
+    app.tracks = new_tracks;
+    // Synchronize resume position as runner.rs does:
+    app.playing = None; // Q0 is not in the new search results
+    app.search_resume_index = app.playing;
+
+    assert_eq!(app.search_resume_index, None);
+
+    // Now Q0 finishes playing and the queue empties.
+    // Playback must NOT stop; it must fall back to New 0!
+    let advanced = advance_playback(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert!(
+        advanced,
+        "Must fall back and advance through new search results"
+    );
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("New 0")
+    );
+    assert_eq!(app.playing, Some(0));
+    assert_eq!(app.search_resume_index, Some(0));
+}

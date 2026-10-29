@@ -45,8 +45,12 @@ pub fn run(
                                 || (t.title.eq_ignore_ascii_case(&now.title)
                                     && t.artist.eq_ignore_ascii_case(&now.artist))
                         });
+                    } else {
+                        app.playing = None;
                     }
 
+                    // Synchronize resume position with the new list
+                    app.search_resume_index = app.playing;
                     app.selected = app.playing.unwrap_or(0);
 
                     app.set_status(if count == 0 {
@@ -210,6 +214,47 @@ pub fn play_next(
     }
 }
 
+pub fn advance_after_queue_failure(
+    app: &mut App,
+    player: &mut AudioPlayer,
+    player_tx: Sender<PlayerEvent>,
+    resolve_tx: Sender<ResolveResponse>,
+) -> bool {
+    if !app.queue.is_empty() {
+        return play_queue_item(app, player, player_tx, resolve_tx, 0);
+    }
+
+    let next_search = if app.tracks.is_empty() {
+        None
+    } else if app.shuffle {
+        app.shuffled_next()
+    } else if app.repeat == Repeat::All {
+        let base = app
+            .playing
+            .or(app.search_resume_index)
+            .unwrap_or(app.selected);
+        Some((base + 1) % app.tracks.len())
+    } else if let Some(base) = app.playing.or(app.search_resume_index) {
+        if base + 1 < app.tracks.len() {
+            Some(base + 1)
+        } else {
+            None
+        }
+    } else {
+        Some(0)
+    };
+
+    if let Some(index) = next_search {
+        play_search_result(app, player, player_tx, resolve_tx, index);
+        true
+    } else {
+        app.playing = None;
+        app.now_playing = None;
+        app.paused = false;
+        false
+    }
+}
+
 pub fn advance_playback(
     app: &mut App,
     player: &mut AudioPlayer,
@@ -233,40 +278,7 @@ pub fn advance_playback(
         }
     }
 
-    if !app.queue.is_empty() {
-        return play_queue_item(app, player, player_tx, resolve_tx, 0);
-    }
-
-    let next_search = if app.tracks.is_empty() {
-        None
-    } else if app.shuffle {
-        app.shuffled_next()
-    } else if app.repeat == Repeat::All {
-        let base = app
-            .playing
-            .or(app.search_resume_index)
-            .unwrap_or(app.selected);
-        Some((base + 1) % app.tracks.len())
-    } else {
-        let base = app.playing.or(app.search_resume_index);
-        base.and_then(|i| {
-            if i + 1 < app.tracks.len() {
-                Some(i + 1)
-            } else {
-                None
-            }
-        })
-    };
-
-    if let Some(index) = next_search {
-        play_search_result(app, player, player_tx, resolve_tx, index);
-        true
-    } else {
-        app.playing = None;
-        app.now_playing = None;
-        app.paused = false;
-        false
-    }
+    advance_after_queue_failure(app, player, player_tx, resolve_tx)
 }
 
 pub fn play_track(
@@ -322,7 +334,12 @@ pub fn play_track(
     }
 
     app.cancel_pending_resolution();
-    start_playback(app, player, player_tx, track, source);
+    if let Err(error) = start_playback(app, player, player_tx.clone(), track, source)
+        && let PlaybackSource::Queue { .. } = source
+    {
+        app.set_status(format!("PLAYER ERROR: {error}"));
+        advance_after_queue_failure(app, player, player_tx, resolve_tx);
+    }
 }
 
 pub fn start_playback(
@@ -331,7 +348,7 @@ pub fn start_playback(
     events: Sender<PlayerEvent>,
     track: Track,
     source: PlaybackSource,
-) {
+) -> Result<(), String> {
     let audio_source = AudioPlayer::cached_audio(&track.stream_url)
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_else(|| track.stream_url.clone());
@@ -372,11 +389,13 @@ pub fn start_playback(
             if app.settings.audio_cache {
                 player.prefetch_later(&track.stream_url, 15);
             }
+            Ok(())
         }
         Err(error) => {
             app.playing = None;
             app.now_playing = None;
             app.set_status(format!("PLAYER ERROR: {}", error));
+            Err(error)
         }
     }
 }
@@ -455,13 +474,16 @@ pub fn handle_resolve_response(
 
                     *slot = resolved.clone();
 
-                    start_playback(
+                    if let Err(error) = start_playback(
                         app,
                         player,
                         player_tx.clone(),
                         resolved,
                         PlaybackSource::SearchResult { index },
-                    );
+                    ) {
+                        app.set_status(format!("PLAYER ERROR: {error}"));
+                        return false;
+                    }
                     true
                 }
                 PlaybackSource::Queue { entry_id } => {
@@ -472,13 +494,22 @@ pub fn handle_resolve_response(
                     }
                     app.pending_queue_entry_id = None;
 
-                    start_playback(
+                    if let Err(error) = start_playback(
                         app,
                         player,
                         player_tx.clone(),
                         resolved,
                         PlaybackSource::Queue { entry_id },
-                    );
+                    ) {
+                        app.set_status(format!("PLAYER ERROR: {error}"));
+                        advance_after_queue_failure(
+                            app,
+                            player,
+                            player_tx.clone(),
+                            resolve_tx.clone(),
+                        );
+                        return false;
+                    }
                     true
                 }
             }
@@ -488,7 +519,7 @@ pub fn handle_resolve_response(
             app.pending_queue_entry_id = None;
 
             if let PlaybackSource::Queue { .. } = response.source {
-                advance_playback(app, player, player_tx.clone(), resolve_tx.clone());
+                advance_after_queue_failure(app, player, player_tx.clone(), resolve_tx.clone());
             }
 
             false
