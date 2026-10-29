@@ -9,3 +9,9 @@ pub struct Track {
     pub album: Option<String>,
     pub duration_ms: Option<u64>,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlaybackSource {
+    SearchResult { index: usize },
+    Queue { entry_id: u64 },
+}

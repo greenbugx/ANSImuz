@@ -3,7 +3,7 @@ use std::sync::mpsc::Sender;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{
-    runner::{now_playing, play_track},
+    runner::{now_playing, play_search_result},
     state::{App, Mode},
 };
 use crate::playback::{AudioPlayer, PlayerEvent, Repeat};
@@ -236,7 +236,7 @@ pub fn dispatch_action(
                 return;
             }
 
-            if app.playing.is_some() {
+            if app.playing.is_some() || app.now_playing.is_some() {
                 match player.toggle_pause() {
                     Ok(()) => {
                         app.paused = !app.paused;
@@ -249,7 +249,7 @@ pub fn dispatch_action(
                     Err(error) => app.set_status(format!("PLAYER ERROR: {error}")),
                 }
             } else if !app.tracks.is_empty() {
-                play_track(
+                play_search_result(
                     app,
                     player,
                     player_tx.clone(),
@@ -267,13 +267,13 @@ pub fn dispatch_action(
             };
 
             if let Some(index) = next {
-                play_track(app, player, player_tx.clone(), resolve_tx.clone(), index);
+                play_search_result(app, player, player_tx.clone(), resolve_tx.clone(), index);
             }
         }
 
         Action::PreviousTrack => {
             if let Some(index) = app.next_index(-1) {
-                play_track(app, player, player_tx.clone(), resolve_tx.clone(), index);
+                play_search_result(app, player, player_tx.clone(), resolve_tx.clone(), index);
             }
         }
 

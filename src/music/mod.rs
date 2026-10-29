@@ -5,4 +5,4 @@ pub use search::{
     ResolveResponse, SearchResult, cache_resolved_track, get_cached_track, resolve_playable,
     search_music,
 };
-pub use track::Track;
+pub use track::{PlaybackSource, Track};

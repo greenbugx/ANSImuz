@@ -7,7 +7,7 @@ use std::{
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyModule};
 
-use super::track::Track;
+use super::track::{PlaybackSource, Track};
 use crate::config::Provider;
 
 pub type SearchResult = (String, Result<Vec<Track>, String>);
@@ -15,7 +15,7 @@ pub type SearchResult = (String, Result<Vec<Track>, String>);
 #[derive(Debug)]
 pub struct ResolveResponse {
     pub generation: u64,
-    pub index: usize,
+    pub source: PlaybackSource,
     pub spotify_id: Option<String>,
     pub title: String,
     pub artist: String,

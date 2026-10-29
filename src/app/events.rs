@@ -4,7 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{
     commands::{action_for_nav_key, dispatch_action, filtered_commands},
-    runner::play_track,
+    runner::play_search_result,
     state::{App, Mode},
 };
 use crate::music::{SearchResult, search_music};
@@ -123,7 +123,7 @@ pub fn handle_key(
                         let _ = tx.send(search_music(query, provider));
                     });
                 } else {
-                    play_track(
+                    play_search_result(
                         app,
                         player,
                         player_tx.clone(),
@@ -164,7 +164,7 @@ pub fn handle_key(
                 }
                 KeyCode::Up => app.move_selection(-1),
                 KeyCode::Down => app.move_selection(1),
-                KeyCode::Enter => play_track(
+                KeyCode::Enter => play_search_result(
                     app,
                     player,
                     player_tx.clone(),

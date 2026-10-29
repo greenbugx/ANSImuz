@@ -10,7 +10,7 @@ use super::{
     events::handle_key,
     state::{App, Mode},
 };
-use crate::music::{ResolveResponse, SearchResult, Track};
+use crate::music::{PlaybackSource, ResolveResponse, SearchResult, Track};
 use crate::playback::{AudioPlayer, PlayerEvent, Repeat};
 
 pub fn run(
@@ -83,7 +83,7 @@ pub fn run(
             };
 
             match next {
-                Some(index) => play_track(
+                Some(index) => play_search_result(
                     &mut app,
                     &mut player,
                     player_tx.clone(),
@@ -163,7 +163,7 @@ pub fn run(
     Ok(())
 }
 
-pub fn play_track(
+pub fn play_search_result(
     app: &mut App,
     player: &mut AudioPlayer,
     player_tx: Sender<PlayerEvent>,
@@ -181,12 +181,41 @@ pub fn play_track(
         }
     }
 
+    play_track(
+        app,
+        player,
+        player_tx,
+        resolve_tx,
+        track,
+        PlaybackSource::SearchResult { index },
+    );
+}
+
+pub fn play_track(
+    app: &mut App,
+    player: &mut AudioPlayer,
+    player_tx: Sender<PlayerEvent>,
+    resolve_tx: Sender<ResolveResponse>,
+    mut track: Track,
+    source: PlaybackSource,
+) {
+    if let Some(cached) = crate::music::get_cached_track(&track) {
+        track = cached.clone();
+        if let PlaybackSource::SearchResult { index } = source
+            && let Some(slot) = app.tracks.get_mut(index)
+        {
+            *slot = cached;
+        }
+    }
+
     if track.stream_url.is_empty() {
         app.cancel_pending_resolution();
         let generation = app.resolve_generation;
         app.is_resolving = true;
         app.pending_track = Some(track.clone());
-        app.selected = index;
+        if let PlaybackSource::SearchResult { index } = source {
+            app.selected = index;
+        }
         app.set_status(format!("RESOLVING: {} — {}…", track.title, track.artist));
 
         let track_to_resolve = track;
@@ -198,7 +227,7 @@ pub fn play_track(
             let result = crate::music::resolve_playable(&track_to_resolve);
             let _ = resolve_tx.send(ResolveResponse {
                 generation,
-                index,
+                source,
                 spotify_id,
                 title,
                 artist,
@@ -209,45 +238,54 @@ pub fn play_track(
     }
 
     app.cancel_pending_resolution();
-    start_playback(app, player, player_tx, index, track);
+    start_playback(app, player, player_tx, track, source);
 }
 
 pub fn start_playback(
     app: &mut App,
     player: &mut AudioPlayer,
     events: Sender<PlayerEvent>,
-    index: usize,
     track: Track,
+    source: PlaybackSource,
 ) {
-    let source = AudioPlayer::cached_audio(&track.stream_url)
+    let audio_source = AudioPlayer::cached_audio(&track.stream_url)
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_else(|| track.stream_url.clone());
 
-    match player.play(&source, app.volume, events) {
+    match player.play(&audio_source, app.volume, events) {
         Ok(()) => {
             app.is_resolving = false;
             app.pending_track = None;
-            app.playing = Some(index);
             app.now_playing = Some(track.clone());
-            app.selected = index;
             app.paused = false;
             app.played_once = false;
             app.set_status(format!("PLAYING: {} — {}", track.title, track.artist));
 
-            if app.settings.audio_cache {
-                player.prefetch_later(&track.stream_url, 15);
+            match source {
+                PlaybackSource::SearchResult { index } => {
+                    app.playing = Some(index);
+                    app.search_resume_index = Some(index);
+                    app.selected = index;
+
+                    if app.tracks.len() > 1 {
+                        let next = app
+                            .tracks
+                            .get((index + 1) % app.tracks.len())
+                            .expect("index within tracks");
+
+                        if app.settings.audio_cache {
+                            player.prefetch_later(&next.stream_url, 25);
+                        }
+                        crate::artwork::prefetch(&next.art_url);
+                    }
+                }
+                PlaybackSource::Queue { .. } => {
+                    app.playing = None;
+                }
             }
 
-            if app.tracks.len() > 1 {
-                let next = app
-                    .tracks
-                    .get((index + 1) % app.tracks.len())
-                    .expect("index within tracks");
-
-                if app.settings.audio_cache {
-                    player.prefetch_later(&next.stream_url, 25);
-                }
-                crate::artwork::prefetch(&next.art_url);
+            if app.settings.audio_cache {
+                player.prefetch_later(&track.stream_url, 15);
             }
         }
         Err(error) => {
@@ -301,36 +339,56 @@ pub fn handle_resolve_response(
         Ok(resolved) => {
             crate::music::cache_resolved_track(&resolved);
 
-            let Some(slot) = app.tracks.get_mut(response.index) else {
-                app.set_status(if app.now_playing.is_some() && player.is_playing() {
-                    now_playing(app)
-                } else {
-                    "RESOLVE CANCELLED".to_string()
-                });
-                return false;
-            };
+            match response.source {
+                PlaybackSource::SearchResult { index } => {
+                    let Some(slot) = app.tracks.get_mut(index) else {
+                        app.set_status(if app.now_playing.is_some() && player.is_playing() {
+                            now_playing(app)
+                        } else {
+                            "RESOLVE CANCELLED".to_string()
+                        });
+                        return false;
+                    };
 
-            let is_same = match (&slot.spotify_id, &response.spotify_id) {
-                (Some(a), Some(b)) => a == b,
-                _ => {
-                    slot.title.eq_ignore_ascii_case(&response.title)
-                        && slot.artist.eq_ignore_ascii_case(&response.artist)
+                    let is_same = match (&slot.spotify_id, &response.spotify_id) {
+                        (Some(a), Some(b)) => a == b,
+                        _ => {
+                            slot.title.eq_ignore_ascii_case(&response.title)
+                                && slot.artist.eq_ignore_ascii_case(&response.artist)
+                        }
+                    };
+
+                    if !is_same {
+                        app.set_status(if app.now_playing.is_some() && player.is_playing() {
+                            now_playing(app)
+                        } else {
+                            "RESOLVE CANCELLED".to_string()
+                        });
+                        return false;
+                    }
+
+                    *slot = resolved.clone();
+
+                    start_playback(
+                        app,
+                        player,
+                        player_tx.clone(),
+                        resolved,
+                        PlaybackSource::SearchResult { index },
+                    );
+                    true
                 }
-            };
-
-            if !is_same {
-                app.set_status(if app.now_playing.is_some() && player.is_playing() {
-                    now_playing(app)
-                } else {
-                    "RESOLVE CANCELLED".to_string()
-                });
-                return false;
+                PlaybackSource::Queue { entry_id } => {
+                    start_playback(
+                        app,
+                        player,
+                        player_tx.clone(),
+                        resolved,
+                        PlaybackSource::Queue { entry_id },
+                    );
+                    true
+                }
             }
-
-            *slot = resolved.clone();
-
-            start_playback(app, player, player_tx.clone(), response.index, resolved);
-            true
         }
         Err(error) => {
             app.set_status(format!("RESOLVE ERROR: {}", error));

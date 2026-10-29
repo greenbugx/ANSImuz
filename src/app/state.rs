@@ -47,6 +47,7 @@ pub struct App {
     pub queue: Vec<QueueEntry>,
     pub queue_selected: usize,
     pub next_queue_id: u64,
+    pub search_resume_index: Option<usize>,
 }
 
 impl App {
@@ -86,6 +87,7 @@ impl App {
             queue: Vec::new(),
             queue_selected: 0,
             next_queue_id: 1,
+            search_resume_index: None,
         }
     }
 
