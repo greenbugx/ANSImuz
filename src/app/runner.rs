@@ -62,57 +62,7 @@ pub fn run(
         }
 
         while let Ok(response) = resolve_rx.try_recv() {
-            if response.generation != app.resolve_generation {
-                continue;
-            }
-
-            app.is_resolving = false;
-            app.pending_track = None;
-
-            match response.result {
-                Ok(resolved) => {
-                    crate::music::cache_resolved_track(&resolved);
-
-                    let Some(slot) = app.tracks.get_mut(response.index) else {
-                        app.set_status(if app.now_playing.is_some() && player.is_playing() {
-                            now_playing(&app)
-                        } else {
-                            "RESOLVE CANCELLED".to_string()
-                        });
-                        continue;
-                    };
-
-                    let is_same = match (&slot.spotify_id, &response.spotify_id) {
-                        (Some(a), Some(b)) => a == b,
-                        _ => {
-                            slot.title.eq_ignore_ascii_case(&response.title)
-                                && slot.artist.eq_ignore_ascii_case(&response.artist)
-                        }
-                    };
-
-                    if !is_same {
-                        app.set_status(if app.now_playing.is_some() && player.is_playing() {
-                            now_playing(&app)
-                        } else {
-                            "RESOLVE CANCELLED".to_string()
-                        });
-                        continue;
-                    }
-
-                    *slot = resolved.clone();
-
-                    start_playback(
-                        &mut app,
-                        &mut player,
-                        player_tx.clone(),
-                        response.index,
-                        resolved,
-                    );
-                }
-                Err(error) => {
-                    app.set_status(format!("RESOLVE ERROR: {}", error));
-                }
-            }
+            handle_resolve_response(&mut app, &mut player, &player_tx, response);
         }
 
         if !app.is_resolving && app.now_playing.is_some() && !player.is_playing() {
@@ -236,10 +186,6 @@ pub fn play_track(
         let generation = app.resolve_generation;
         app.is_resolving = true;
         app.pending_track = Some(track.clone());
-        if !player.is_playing() {
-            app.now_playing = None;
-            app.playing = None;
-        }
         app.selected = index;
         app.set_status(format!("RESOLVING: {} — {}…", track.title, track.artist));
 
@@ -335,5 +281,60 @@ pub fn refetch_if_needed(app: &mut App, search_tx: &Sender<SearchResult>) {
         std::thread::spawn(move || {
             let _ = tx.send(crate::music::search_music(query, provider));
         });
+    }
+}
+
+pub fn handle_resolve_response(
+    app: &mut App,
+    player: &mut AudioPlayer,
+    player_tx: &Sender<PlayerEvent>,
+    response: ResolveResponse,
+) -> bool {
+    if response.generation != app.resolve_generation {
+        return false;
+    }
+
+    app.is_resolving = false;
+    app.pending_track = None;
+
+    match response.result {
+        Ok(resolved) => {
+            crate::music::cache_resolved_track(&resolved);
+
+            let Some(slot) = app.tracks.get_mut(response.index) else {
+                app.set_status(if app.now_playing.is_some() && player.is_playing() {
+                    now_playing(app)
+                } else {
+                    "RESOLVE CANCELLED".to_string()
+                });
+                return false;
+            };
+
+            let is_same = match (&slot.spotify_id, &response.spotify_id) {
+                (Some(a), Some(b)) => a == b,
+                _ => {
+                    slot.title.eq_ignore_ascii_case(&response.title)
+                        && slot.artist.eq_ignore_ascii_case(&response.artist)
+                }
+            };
+
+            if !is_same {
+                app.set_status(if app.now_playing.is_some() && player.is_playing() {
+                    now_playing(app)
+                } else {
+                    "RESOLVE CANCELLED".to_string()
+                });
+                return false;
+            }
+
+            *slot = resolved.clone();
+
+            start_playback(app, player, player_tx.clone(), response.index, resolved);
+            true
+        }
+        Err(error) => {
+            app.set_status(format!("RESOLVE ERROR: {}", error));
+            false
+        }
     }
 }

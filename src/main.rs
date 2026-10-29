@@ -1,10 +1,4 @@
-mod app;
-mod artwork;
-mod config;
-mod music;
-mod playback;
-mod terminal;
-mod ui;
+use ansimuz::{app, artwork, terminal};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     artwork::init_picker();
