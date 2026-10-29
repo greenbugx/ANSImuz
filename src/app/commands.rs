@@ -183,9 +183,19 @@ pub fn dispatch_action(
     player: &mut AudioPlayer,
     player_tx: &Sender<PlayerEvent>,
     search_tx: &Sender<crate::music::SearchResult>,
+    resolve_tx: &Sender<crate::music::ResolveResponse>,
 ) {
     match action {
         Action::PlayPause => {
+            if app.is_resolving {
+                app.resolve_generation += 1;
+                app.is_resolving = false;
+                app.playing = None;
+                app.now_playing = None;
+                app.set_status("RESOLVE CANCELLED");
+                return;
+            }
+
             if app.playing.is_some() {
                 match player.toggle_pause() {
                     Ok(()) => {
@@ -199,7 +209,13 @@ pub fn dispatch_action(
                     Err(error) => app.set_status(format!("PLAYER ERROR: {error}")),
                 }
             } else if !app.tracks.is_empty() {
-                play_track(app, player, player_tx.clone(), app.selected);
+                play_track(
+                    app,
+                    player,
+                    player_tx.clone(),
+                    resolve_tx.clone(),
+                    app.selected,
+                );
             }
         }
 
@@ -211,13 +227,13 @@ pub fn dispatch_action(
             };
 
             if let Some(index) = next {
-                play_track(app, player, player_tx.clone(), index);
+                play_track(app, player, player_tx.clone(), resolve_tx.clone(), index);
             }
         }
 
         Action::PreviousTrack => {
             if let Some(index) = app.next_index(-1) {
-                play_track(app, player, player_tx.clone(), index);
+                play_track(app, player, player_tx.clone(), resolve_tx.clone(), index);
             }
         }
 

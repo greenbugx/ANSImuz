@@ -1,4 +1,8 @@
-use std::path::PathBuf;
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{LazyLock, Mutex},
+};
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyModule};
@@ -7,6 +11,55 @@ use super::track::Track;
 use crate::config::Provider;
 
 pub type SearchResult = (String, Result<Vec<Track>, String>);
+
+#[derive(Debug)]
+pub struct ResolveResponse {
+    pub generation: u64,
+    pub index: usize,
+    pub result: Result<Track, String>,
+}
+
+static RESOLVED_CACHE: LazyLock<Mutex<HashMap<String, Track>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub fn get_cached_track(track: &Track) -> Option<Track> {
+    if !track.stream_url.is_empty() {
+        return Some(track.clone());
+    }
+
+    let guard = RESOLVED_CACHE.lock().ok()?;
+
+    if let Some(id) = &track.spotify_id {
+        if let Some(cached) = guard.get(id) {
+            return Some(cached.clone());
+        }
+    }
+
+    let key = format!(
+        "{}—{}",
+        track.title.to_lowercase().trim(),
+        track.artist.to_lowercase().trim()
+    );
+    guard.get(&key).cloned()
+}
+
+pub fn cache_resolved_track(track: &Track) {
+    if track.stream_url.is_empty() {
+        return;
+    }
+
+    if let Ok(mut guard) = RESOLVED_CACHE.lock() {
+        if let Some(id) = &track.spotify_id {
+            guard.insert(id.clone(), track.clone());
+        }
+        let key = format!(
+            "{}—{}",
+            track.title.to_lowercase().trim(),
+            track.artist.to_lowercase().trim()
+        );
+        guard.insert(key, track.clone());
+    }
+}
 
 fn ensure_backend_path(py: Python<'_>) -> PyResult<()> {
     let sys = PyModule::import(py, "sys")?;
@@ -98,11 +151,11 @@ pub fn search_music(query: String, provider: Provider) -> SearchResult {
 }
 
 pub fn resolve_playable(track: &Track) -> Result<Track, String> {
-    if !track.stream_url.is_empty() {
-        return Ok(track.clone());
+    if let Some(cached) = get_cached_track(track) {
+        return Ok(cached);
     }
 
-    Python::attach(|py| -> PyResult<Track> {
+    let resolved_track = Python::attach(|py| -> PyResult<Track> {
         ensure_backend_path(py)?;
 
         let bridge = PyModule::import(py, "bridge")?;
@@ -170,5 +223,8 @@ pub fn resolve_playable(track: &Track) -> Result<Track, String> {
             duration_ms,
         })
     })
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?;
+
+    cache_resolved_track(&resolved_track);
+    Ok(resolved_track)
 }

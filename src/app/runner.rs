@@ -10,7 +10,7 @@ use super::{
     events::handle_key,
     state::{App, Mode},
 };
-use crate::music::SearchResult;
+use crate::music::{ResolveResponse, SearchResult, Track};
 use crate::playback::{AudioPlayer, PlayerEvent, Repeat};
 
 pub fn run(
@@ -21,6 +21,8 @@ pub fn run(
 
     let (search_tx, search_rx): (Sender<SearchResult>, Receiver<SearchResult>) = mpsc::channel();
     let (player_tx, player_rx): (Sender<PlayerEvent>, Receiver<PlayerEvent>) = mpsc::channel();
+    let (resolve_tx, resolve_rx): (Sender<ResolveResponse>, Receiver<ResolveResponse>) =
+        mpsc::channel();
 
     let mut playback: Option<(f64, Option<f64>)> = None;
 
@@ -58,7 +60,38 @@ pub fn run(
             }
         }
 
-        if app.now_playing.is_some() && !player.is_playing() {
+        while let Ok(response) = resolve_rx.try_recv() {
+            if response.generation != app.resolve_generation {
+                continue;
+            }
+
+            app.is_resolving = false;
+
+            match response.result {
+                Ok(resolved) => {
+                    crate::music::cache_resolved_track(&resolved);
+
+                    if let Some(slot) = app.tracks.get_mut(response.index) {
+                        *slot = resolved.clone();
+                    }
+
+                    start_playback(
+                        &mut app,
+                        &mut player,
+                        player_tx.clone(),
+                        response.index,
+                        resolved,
+                    );
+                }
+                Err(error) => {
+                    app.playing = None;
+                    app.now_playing = None;
+                    app.set_status(format!("RESOLVE ERROR: {}", error));
+                }
+            }
+        }
+
+        if !app.is_resolving && app.now_playing.is_some() && !player.is_playing() {
             let ended = app.playing;
 
             let next = match app.repeat {
@@ -76,7 +109,13 @@ pub fn run(
             };
 
             match next {
-                Some(index) => play_track(&mut app, &mut player, player_tx.clone(), index),
+                Some(index) => play_track(
+                    &mut app,
+                    &mut player,
+                    player_tx.clone(),
+                    resolve_tx.clone(),
+                    index,
+                ),
                 None => {
                     app.playing = None;
                     app.now_playing = None;
@@ -130,7 +169,14 @@ pub fn run(
             if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                 app.should_quit = true;
             } else {
-                handle_key(&mut app, &mut player, key, &search_tx, &player_tx);
+                handle_key(
+                    &mut app,
+                    &mut player,
+                    key,
+                    &search_tx,
+                    &player_tx,
+                    &resolve_tx,
+                );
             }
         }
 
@@ -146,29 +192,56 @@ pub fn run(
 pub fn play_track(
     app: &mut App,
     player: &mut AudioPlayer,
-    events: Sender<PlayerEvent>,
+    player_tx: Sender<PlayerEvent>,
+    resolve_tx: Sender<ResolveResponse>,
     index: usize,
 ) {
     let Some(mut track) = app.tracks.get(index).cloned() else {
         return;
     };
 
-    if track.stream_url.is_empty() {
-        app.set_status(format!("RESOLVING: {} — {}", track.title, track.artist));
-        match crate::music::resolve_playable(&track) {
-            Ok(resolved) => {
-                track = resolved.clone();
-                if let Some(slot) = app.tracks.get_mut(index) {
-                    *slot = resolved;
-                }
-            }
-            Err(error) => {
-                app.set_status(format!("RESOLVE ERROR: {}", error));
-                return;
-            }
+    if let Some(cached) = crate::music::get_cached_track(&track) {
+        track = cached.clone();
+        if let Some(slot) = app.tracks.get_mut(index) {
+            *slot = cached;
         }
     }
 
+    if track.stream_url.is_empty() {
+        app.resolve_generation += 1;
+        let generation = app.resolve_generation;
+        app.is_resolving = true;
+        app.playing = Some(index);
+        app.now_playing = Some(track.clone());
+        app.selected = index;
+        app.paused = false;
+        app.played_once = false;
+        app.set_status(format!("RESOLVING: {} — {}…", track.title, track.artist));
+
+        let track_to_resolve = track;
+        std::thread::spawn(move || {
+            let result = crate::music::resolve_playable(&track_to_resolve);
+            let _ = resolve_tx.send(ResolveResponse {
+                generation,
+                index,
+                result,
+            });
+        });
+        return;
+    }
+
+    app.resolve_generation += 1;
+    app.is_resolving = false;
+    start_playback(app, player, player_tx, index, track);
+}
+
+pub fn start_playback(
+    app: &mut App,
+    player: &mut AudioPlayer,
+    events: Sender<PlayerEvent>,
+    index: usize,
+    track: Track,
+) {
     let source = AudioPlayer::cached_audio(&track.stream_url)
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_else(|| track.stream_url.clone());
@@ -198,7 +271,11 @@ pub fn play_track(
                 crate::artwork::prefetch(&next.art_url);
             }
         }
-        Err(error) => app.set_status(format!("PLAYER ERROR: {}", error)),
+        Err(error) => {
+            app.playing = None;
+            app.now_playing = None;
+            app.set_status(format!("PLAYER ERROR: {}", error));
+        }
     }
 }
 

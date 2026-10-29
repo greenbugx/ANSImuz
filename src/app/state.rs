@@ -35,6 +35,8 @@ pub struct App {
     pub command_palette_open: bool,
     pub command_palette_query: String,
     pub command_palette_cursor: usize,
+    pub is_resolving: bool,
+    pub resolve_generation: u64,
 }
 
 impl App {
@@ -68,6 +70,8 @@ impl App {
             command_palette_open: false,
             command_palette_query: String::new(),
             command_palette_cursor: 0,
+            is_resolving: false,
+            resolve_generation: 0,
         }
     }
 

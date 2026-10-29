@@ -16,6 +16,7 @@ pub fn handle_key(
     key: KeyEvent,
     search_tx: &Sender<SearchResult>,
     player_tx: &Sender<PlayerEvent>,
+    resolve_tx: &Sender<crate::music::ResolveResponse>,
 ) {
     if app.command_palette_open {
         match key.code {
@@ -37,7 +38,7 @@ pub fn handle_key(
                 if let Some(cmd) = commands.get(app.command_palette_cursor) {
                     let action = cmd.id;
                     app.close_command_palette();
-                    dispatch_action(action, app, player, player_tx, search_tx);
+                    dispatch_action(action, app, player, player_tx, search_tx, resolve_tx);
                 }
             }
 
@@ -120,7 +121,13 @@ pub fn handle_key(
                         let _ = tx.send(search_music(query, provider));
                     });
                 } else {
-                    play_track(app, player, player_tx.clone(), app.selected);
+                    play_track(
+                        app,
+                        player,
+                        player_tx.clone(),
+                        resolve_tx.clone(),
+                        app.selected,
+                    );
                 }
             }
 
@@ -140,7 +147,7 @@ pub fn handle_key(
 
         Mode::Nav => {
             if let Some(action) = action_for_nav_key(key) {
-                dispatch_action(action, app, player, player_tx, search_tx);
+                dispatch_action(action, app, player, player_tx, search_tx, resolve_tx);
                 return;
             }
 
@@ -148,7 +155,13 @@ pub fn handle_key(
                 KeyCode::Esc => app.query.clear(),
                 KeyCode::Up => app.move_selection(-1),
                 KeyCode::Down => app.move_selection(1),
-                KeyCode::Enter => play_track(app, player, player_tx.clone(), app.selected),
+                KeyCode::Enter => play_track(
+                    app,
+                    player,
+                    player_tx.clone(),
+                    resolve_tx.clone(),
+                    app.selected,
+                ),
                 _ => {}
             }
         }

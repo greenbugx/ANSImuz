@@ -133,7 +133,7 @@ pub fn render_player(
         height: 1,
     };
 
-    let song_loading = app.now_playing.is_some() && playback.is_none();
+    let song_loading = (app.now_playing.is_some() || app.is_resolving) && playback.is_none();
     render_progress_bar(
         frame,
         bar_area,
