@@ -10,6 +10,12 @@ pub enum Mode {
     Nav,
 }
 
+#[derive(Clone, Debug)]
+pub struct QueueEntry {
+    pub id: u64,
+    pub track: Track,
+}
+
 pub struct App {
     pub mode: Mode,
     pub query: String,
@@ -38,6 +44,9 @@ pub struct App {
     pub pending_track: Option<Track>,
     pub is_resolving: bool,
     pub resolve_generation: u64,
+    pub queue: Vec<QueueEntry>,
+    pub queue_selected: usize,
+    pub next_queue_id: u64,
 }
 
 impl App {
@@ -74,6 +83,9 @@ impl App {
             pending_track: None,
             is_resolving: false,
             resolve_generation: 0,
+            queue: Vec::new(),
+            queue_selected: 0,
+            next_queue_id: 1,
         }
     }
 
@@ -180,6 +192,74 @@ impl App {
 
         (self.rng_state % bound as u64) as usize
     }
+
+    pub fn enqueue(&mut self, track: Track) -> u64 {
+        let id = self.next_queue_id;
+        self.next_queue_id = self.next_queue_id.wrapping_add(1);
+        self.queue.push(QueueEntry { id, track });
+        id
+    }
+
+    pub fn remove_queue_item(&mut self, index: usize) -> Option<QueueEntry> {
+        if index >= self.queue.len() {
+            return None;
+        }
+
+        let entry = self.queue.remove(index);
+
+        if self.queue.is_empty() {
+            self.queue_selected = 0;
+        } else if index < self.queue_selected {
+            self.queue_selected -= 1;
+        } else if self.queue_selected >= self.queue.len() {
+            self.queue_selected = self.queue.len() - 1;
+        }
+
+        Some(entry)
+    }
+
+    pub fn move_queue_item(&mut self, from: usize, to: usize) -> bool {
+        if from >= self.queue.len() || to >= self.queue.len() {
+            return false;
+        }
+        if from == to {
+            return true;
+        }
+
+        let item = self.queue.remove(from);
+        self.queue.insert(to, item);
+
+        if self.queue_selected == from {
+            self.queue_selected = to;
+        } else if from < self.queue_selected && to >= self.queue_selected {
+            self.queue_selected = self.queue_selected.saturating_sub(1);
+        } else if from > self.queue_selected && to <= self.queue_selected {
+            self.queue_selected = self.queue_selected.saturating_add(1);
+        }
+
+        true
+    }
+
+    pub fn pop_next_queued(&mut self) -> Option<Track> {
+        if self.queue.is_empty() {
+            return None;
+        }
+
+        let entry = self.queue.remove(0);
+
+        if self.queue.is_empty() {
+            self.queue_selected = 0;
+        } else if self.queue_selected > 0 {
+            self.queue_selected -= 1;
+        }
+
+        Some(entry.track)
+    }
+
+    pub fn clear_queue(&mut self) {
+        self.queue.clear();
+        self.queue_selected = 0;
+    }
 }
 
 impl Default for App {
@@ -215,5 +295,145 @@ mod tests {
         assert_eq!(app.resolve_generation, 1);
         assert!(!app.is_resolving);
         assert!(app.pending_track.is_none());
+    }
+
+    fn sample_track(title: &str) -> Track {
+        Track {
+            title: title.into(),
+            artist: "Sample Artist".into(),
+            stream_url: format!("https://example.com/{title}.mp3"),
+            art_url: String::new(),
+            spotify_id: None,
+            artists: vec!["Sample Artist".into()],
+            album: Some("Sample Album".into()),
+            duration_ms: Some(210_000),
+        }
+    }
+
+    #[test]
+    fn test_queue_enqueue_unique_ids_and_duplicates() {
+        let mut app = App::new();
+        assert!(app.queue.is_empty());
+        assert_eq!(app.next_queue_id, 1);
+
+        let id1 = app.enqueue(sample_track("Song A"));
+        let id2 = app.enqueue(sample_track("Song A")); // Duplicate song
+        let id3 = app.enqueue(sample_track("Song B"));
+
+        assert_eq!(app.queue.len(), 3);
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
+        assert_eq!(id3, 3);
+        assert_ne!(id1, id2);
+        assert_eq!(app.queue[0].track.title, "Song A");
+        assert_eq!(app.queue[1].track.title, "Song A");
+        assert_eq!(app.queue[2].track.title, "Song B");
+    }
+
+    #[test]
+    fn test_queue_remove_item() {
+        let mut app = App::new();
+        app.enqueue(sample_track("Track 0"));
+        app.enqueue(sample_track("Track 1"));
+        app.enqueue(sample_track("Track 2"));
+
+        // Out of bounds remove
+        assert!(app.remove_queue_item(10).is_none());
+        assert_eq!(app.queue.len(), 3);
+
+        // Select index 2, remove index 0 (before selection)
+        app.queue_selected = 2;
+        let removed = app.remove_queue_item(0).unwrap();
+        assert_eq!(removed.track.title, "Track 0");
+        assert_eq!(app.queue.len(), 2);
+        assert_eq!(app.queue[0].track.title, "Track 1");
+        assert_eq!(app.queue[1].track.title, "Track 2");
+        assert_eq!(
+            app.queue_selected, 1,
+            "Cursor should adjust down when earlier item removed"
+        );
+
+        // Remove last item while selected
+        let removed = app.remove_queue_item(1).unwrap();
+        assert_eq!(removed.track.title, "Track 2");
+        assert_eq!(app.queue.len(), 1);
+        assert_eq!(app.queue_selected, 0, "Cursor should clamp to last element");
+
+        // Remove final remaining item
+        let removed = app.remove_queue_item(0).unwrap();
+        assert_eq!(removed.track.title, "Track 1");
+        assert!(app.queue.is_empty());
+        assert_eq!(app.queue_selected, 0);
+    }
+
+    #[test]
+    fn test_queue_move_item() {
+        let mut app = App::new();
+        app.enqueue(sample_track("T0"));
+        app.enqueue(sample_track("T1"));
+        app.enqueue(sample_track("T2"));
+        app.enqueue(sample_track("T3"));
+
+        // Invalid bounds
+        assert!(!app.move_queue_item(0, 10));
+        assert!(!app.move_queue_item(10, 0));
+
+        // Same index
+        assert!(app.move_queue_item(1, 1));
+        assert_eq!(app.queue[1].track.title, "T1");
+
+        // Move T0 from 0 to 2: [T1, T2, T0, T3]
+        app.queue_selected = 0;
+        assert!(app.move_queue_item(0, 2));
+        assert_eq!(app.queue[0].track.title, "T1");
+        assert_eq!(app.queue[1].track.title, "T2");
+        assert_eq!(app.queue[2].track.title, "T0");
+        assert_eq!(app.queue[3].track.title, "T3");
+        assert_eq!(
+            app.queue_selected, 2,
+            "Selection must follow the moved item"
+        );
+
+        // Move T3 from 3 to 0 while cursor is at 2 (T0): [T3, T1, T2, T0]
+        assert!(app.move_queue_item(3, 0));
+        assert_eq!(app.queue[0].track.title, "T3");
+        assert_eq!(app.queue[1].track.title, "T1");
+        assert_eq!(app.queue[2].track.title, "T2");
+        assert_eq!(app.queue[3].track.title, "T0");
+        assert_eq!(app.queue_selected, 3, "Selection on T0 should shift right");
+    }
+
+    #[test]
+    fn test_queue_pop_next_queued() {
+        let mut app = App::new();
+        assert!(app.pop_next_queued().is_none());
+
+        app.enqueue(sample_track("First"));
+        app.enqueue(sample_track("Second"));
+        app.queue_selected = 1;
+
+        let first = app.pop_next_queued().unwrap();
+        assert_eq!(first.title, "First");
+        assert_eq!(app.queue.len(), 1);
+        assert_eq!(app.queue_selected, 0);
+
+        let second = app.pop_next_queued().unwrap();
+        assert_eq!(second.title, "Second");
+        assert!(app.queue.is_empty());
+        assert_eq!(app.queue_selected, 0);
+
+        assert!(app.pop_next_queued().is_none());
+    }
+
+    #[test]
+    fn test_queue_clear() {
+        let mut app = App::new();
+        app.enqueue(sample_track("Song 1"));
+        app.enqueue(sample_track("Song 2"));
+        app.queue_selected = 1;
+
+        app.clear_queue();
+        assert!(app.queue.is_empty());
+        assert_eq!(app.queue_selected, 0);
     }
 }
