@@ -45,11 +45,10 @@ Ensure the following tools are installed on your system:
    ```
 
 4. **Verify the build and tests**:
-   ```bash
    cargo fmt --check
    cargo check --all-targets
+   cargo clippy --all-targets -- -D warnings
    cargo test
-   ```
 
 5. **Run ANSImuz locally**:
    ```bash
@@ -104,14 +103,28 @@ cargo fmt --check
 # Check compilation across all targets
 cargo check --all-targets
 
+# Run Clippy lints (warnings treated as errors)
+cargo clippy --all-targets -- -D warnings
+
 # Run the test suite
 cargo test
 
 # Check Python syntax
 python -m py_compile backend/bridge.py backend/artwork/thumbnails.py backend/providers/spotify/spotify.py backend/providers/ytmusic/ytmusic.py
-```
 
 ---
+
+## Continuous Integration (CI)
+
+Our GitHub Actions pipeline automatically checks every push and pull request targeting `main`:
+
+- **Formatting**: `cargo fmt --check`
+- **Type & Target Checks**: `cargo check --all-targets`
+- **Linter**: `cargo clippy --all-targets -- -D warnings`
+- **Build & Tests**: `cargo build --verbose` and `cargo test --verbose`
+- **Python Syntax**: Bytecode compilation (`py_compile`) across all backend modules
+
+CI automatically skips runs when only documentation (`*.md`), `LICENSE`, or `.gitignore` files are changed.
 
 ## Submitting Pull Requests
 
