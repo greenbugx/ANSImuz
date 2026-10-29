@@ -65,15 +65,34 @@ pub fn cache_resolved_track(track: &Track) {
 }
 
 fn ensure_backend_path(py: Python<'_>) -> PyResult<()> {
-    static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    if INIT.get().is_none() {
-        let sys = PyModule::import(py, "sys")?;
-        let path = sys.getattr("path")?.cast_into::<PyList>()?;
+    static INIT: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+
+    let res = INIT.get_or_init(|| {
+        let sys = PyModule::import(py, "sys").map_err(|e| e.to_string())?;
+        let attr = sys.getattr("path").map_err(|e| e.to_string())?;
+        let path = attr.cast_into::<PyList>().map_err(|e| e.to_string())?;
+
         let backend_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("backend");
-        path.insert(0, backend_path.to_string_lossy().as_ref())?;
-        let _ = INIT.set(());
+        let backend_str = backend_path.to_string_lossy();
+
+        let already_present = path.iter().any(|item| {
+            item.extract::<String>()
+                .map(|s| s == backend_str.as_ref())
+                .unwrap_or(false)
+        });
+
+        if !already_present {
+            path.insert(0, backend_str.as_ref())
+                .map_err(|e| e.to_string())?;
+        }
+
+        Ok(())
+    });
+
+    match res {
+        Ok(()) => Ok(()),
+        Err(err) => Err(pyo3::exceptions::PyRuntimeError::new_err(err.clone())),
     }
-    Ok(())
 }
 
 pub fn search_music(query: String, provider: Provider) -> SearchResult {
