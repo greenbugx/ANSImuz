@@ -28,41 +28,7 @@ pub fn run(
 
     loop {
         while let Ok((query, result)) = search_rx.try_recv() {
-            app.loading = false;
-            app.cancel_pending_resolution();
-
-            match result {
-                Ok(tracks) => {
-                    let count = tracks.len();
-                    app.tracks = tracks;
-                    app.last_query = query;
-                    app.mode = Mode::Nav;
-
-                    if let Some(now) = &app.now_playing {
-                        app.playing = app.tracks.iter().position(|t| {
-                            (!now.stream_url.is_empty() && t.stream_url == now.stream_url)
-                                || (now.spotify_id.is_some() && t.spotify_id == now.spotify_id)
-                                || (t.title.eq_ignore_ascii_case(&now.title)
-                                    && t.artist.eq_ignore_ascii_case(&now.artist))
-                        });
-                    } else {
-                        app.playing = None;
-                    }
-
-                    // Synchronize resume position with the new list
-                    app.search_resume_index = app.playing;
-                    app.selected = app.playing.unwrap_or(0);
-
-                    app.set_status(if count == 0 {
-                        "NO RESULTS".into()
-                    } else {
-                        format!("{} RESULTS ({})", count, app.settings.provider.label())
-                    });
-                }
-                Err(error) => {
-                    app.set_status(format!("SEARCH ERROR: {}", error));
-                }
-            }
+            handle_search_result(&mut app, query, result);
         }
 
         while let Ok(response) = resolve_rx.try_recv() {
@@ -140,6 +106,44 @@ pub fn run(
     Ok(())
 }
 
+pub fn handle_search_result(app: &mut App, query: String, result: Result<Vec<Track>, String>) {
+    app.loading = false;
+    app.cancel_pending_resolution();
+
+    match result {
+        Ok(tracks) => {
+            let count = tracks.len();
+            app.tracks = tracks;
+            app.last_query = query;
+            app.mode = Mode::Nav;
+
+            if let Some(now) = &app.now_playing {
+                app.playing = app.tracks.iter().position(|t| {
+                    (!now.stream_url.is_empty() && t.stream_url == now.stream_url)
+                        || (now.spotify_id.is_some() && t.spotify_id == now.spotify_id)
+                        || (t.title.eq_ignore_ascii_case(&now.title)
+                            && t.artist.eq_ignore_ascii_case(&now.artist))
+                });
+            } else {
+                app.playing = None;
+            }
+
+            // Synchronize resume position with the new list
+            app.search_resume_index = app.playing;
+            app.selected = app.playing.unwrap_or(0);
+
+            app.set_status(if count == 0 {
+                "NO RESULTS".into()
+            } else {
+                format!("{} RESULTS ({})", count, app.settings.provider.label())
+            });
+        }
+        Err(error) => {
+            app.set_status(format!("SEARCH ERROR: {}", error));
+        }
+    }
+}
+
 pub fn play_search_result(
     app: &mut App,
     player: &mut AudioPlayer,
@@ -201,7 +205,14 @@ pub fn play_next(
     }
 
     let next = if app.shuffle {
-        app.shuffled_next()
+        app.shuffled_next().or_else(|| {
+            if (app.playing.is_none() && app.search_resume_index.is_none()) || app.tracks.len() == 1
+            {
+                Some(0)
+            } else {
+                None
+            }
+        })
     } else {
         app.next_index(1)
     };
@@ -227,7 +238,14 @@ pub fn advance_after_queue_failure(
     let next_search = if app.tracks.is_empty() {
         None
     } else if app.shuffle {
-        app.shuffled_next()
+        app.shuffled_next().or_else(|| {
+            if (app.playing.is_none() && app.search_resume_index.is_none()) || app.tracks.len() == 1
+            {
+                Some(0)
+            } else {
+                None
+            }
+        })
     } else if app.repeat == Repeat::All {
         let base = app
             .playing

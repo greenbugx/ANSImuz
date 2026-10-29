@@ -1,8 +1,8 @@
 use std::sync::mpsc;
 
 use ansimuz::app::{
-    advance_playback, handle_resolve_response, play_next, play_queue_item, play_search_result,
-    state::App,
+    advance_playback, handle_resolve_response, handle_search_result, play_next, play_queue_item,
+    play_search_result, state::App,
 };
 use ansimuz::music::{PlaybackSource, ResolveResponse, Track};
 use ansimuz::playback::{AudioPlayer, PlayerEvent, Repeat};
@@ -429,18 +429,17 @@ fn test_new_search_synchronizes_resume_position_and_falls_back() {
     assert_eq!(app.search_resume_index, Some(2));
 
     // While Q0 is playing, a new search finishes with only 2 results [New0, New1]
-    // Simulate new search result handling
+    // Test using the real handle_search_result handler
     let new_tracks = vec![
         make_test_track("New 0", "Artist", "http://stream/new0"),
         make_test_track("New 1", "Artist", "http://stream/new1"),
     ];
-    app.tracks = new_tracks;
-    // Synchronize resume position as runner.rs does:
-    app.playing = None; // Q0 is not in the new search results
-    app.search_resume_index = app.playing;
+    handle_search_result(&mut app, "new artist".to_string(), Ok(new_tracks));
 
+    // Verify real handler reset playing and search_resume_index because Q0 is not in new results
+    assert_eq!(app.playing, None);
     assert_eq!(app.search_resume_index, None);
-
+    assert!(app.status.contains("2 RESULTS"));
     // Now Q0 finishes playing and the queue empties.
     // Playback must NOT stop; it must fall back to New 0!
     let advanced = advance_playback(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
@@ -451,6 +450,37 @@ fn test_new_search_synchronizes_resume_position_and_falls_back() {
     assert_eq!(
         app.now_playing.as_ref().map(|t| t.title.as_str()),
         Some("New 0")
+    );
+    assert_eq!(app.playing, Some(0));
+    assert_eq!(app.search_resume_index, Some(0));
+}
+
+#[test]
+fn test_shuffle_with_single_search_result_and_no_resume_position_plays_first_result() {
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    // Shuffle enabled, exactly 1 search result, no resume position
+    app.shuffle = true;
+    app.tracks = vec![make_test_track(
+        "Solo Track",
+        "Artist",
+        "http://stream/solo",
+    )];
+    app.playing = None;
+    app.search_resume_index = None;
+
+    // Automatic advance from empty queue must fall back to index 0 rather than stopping
+    let advanced = advance_playback(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert!(
+        advanced,
+        "Must fall back to only available track even when shuffle is on"
+    );
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Solo Track")
     );
     assert_eq!(app.playing, Some(0));
     assert_eq!(app.search_resume_index, Some(0));
