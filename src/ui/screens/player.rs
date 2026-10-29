@@ -30,7 +30,7 @@ pub fn render_player(
         .min(area.height as usize / 3);
 
     let mut target_width = ((area.width as usize).saturating_sub(4) * 3 / 5).min(art_width);
-    let mut target_px = ((art_height * target_width / art_width.max(1)) + 1) / 2 * 2;
+    let mut target_px = (art_height * target_width / art_width.max(1)).div_ceil(2) * 2;
     let max_px = max_rows.saturating_sub(1) * 2;
 
     if target_px > max_px {
@@ -65,7 +65,7 @@ pub fn render_player(
     let current = app
         .now_playing
         .as_ref()
-        .or_else(|| app.pending_track.as_ref())
+        .or(app.pending_track.as_ref())
         .or_else(|| app.tracks.get(app.selected));
 
     render_header(
@@ -111,9 +111,7 @@ pub fn render_player(
         app.selected,
         app.loading,
         &app.last_query,
-        theme.highlight,
-        theme.primary,
-        theme.dim,
+        theme,
     );
 
     crate::artwork::render_art(

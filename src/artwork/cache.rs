@@ -36,10 +36,10 @@ pub fn load_image(url: &str) -> Result<DynamicImage, String> {
     let path = cache_path(url);
 
     if path.exists() {
-        if let Ok(bytes) = fs::read(&path) {
-            if let Ok(image) = decode_artwork(&bytes) {
-                return Ok(image);
-            }
+        if let Ok(bytes) = fs::read(&path)
+            && let Ok(image) = decode_artwork(&bytes)
+        {
+            return Ok(image);
         }
         let _ = fs::remove_file(&path);
     }
@@ -55,13 +55,13 @@ pub fn load_image(url: &str) -> Result<DynamicImage, String> {
         .send()
         .map_err(|e| format!("Artwork download failed: {e}"))?;
 
-    if !response.status().is_success() {
-        if let Some(fallback_url) = thumbnail_fallback(url) {
-            response = client
-                .get(&fallback_url)
-                .send()
-                .map_err(|e| format!("Artwork download failed: {e}"))?;
-        }
+    if !response.status().is_success()
+        && let Some(fallback_url) = thumbnail_fallback(url)
+    {
+        response = client
+            .get(&fallback_url)
+            .send()
+            .map_err(|e| format!("Artwork download failed: {e}"))?;
     }
 
     let response = response
@@ -96,19 +96,20 @@ fn thumbnail_fallback(url: &str) -> Option<String> {
         .then(|| url.replace("maxresdefault", "hqdefault"))
 }
 
-pub fn art_cache() -> &'static Mutex<HashMap<(String, u32), Result<DynamicImage, String>>> {
-    static CACHE: LazyLock<Mutex<HashMap<(String, u32), Result<DynamicImage, String>>>> =
-        LazyLock::new(|| Mutex::new(HashMap::new()));
+type ArtCache = Mutex<HashMap<(String, u32), Result<DynamicImage, String>>>;
+
+pub fn art_cache() -> &'static ArtCache {
+    static CACHE: LazyLock<ArtCache> = LazyLock::new(|| Mutex::new(HashMap::new()));
     &CACHE
 }
 
 pub fn request_art(url: &str, side: u32) -> Result<DynamicImage, String> {
     let key = (url.to_string(), side);
 
-    if let Ok(guard) = art_cache().lock() {
-        if let Some(image) = guard.get(&key) {
-            return image.clone();
-        }
+    if let Ok(guard) = art_cache().lock()
+        && let Some(image) = guard.get(&key)
+    {
+        return image.clone();
     }
 
     if let Ok(mut guard) = art_cache().lock() {

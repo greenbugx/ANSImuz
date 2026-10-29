@@ -193,6 +193,12 @@ impl AudioPlayer {
     }
 }
 
+impl Default for AudioPlayer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Drop for AudioPlayer {
     fn drop(&mut self) {
         self.stop();

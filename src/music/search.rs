@@ -32,10 +32,10 @@ pub fn get_cached_track(track: &Track) -> Option<Track> {
 
     let guard = RESOLVED_CACHE.lock().ok()?;
 
-    if let Some(id) = &track.spotify_id {
-        if let Some(cached) = guard.get(id) {
-            return Some(cached.clone());
-        }
+    if let Some(id) = &track.spotify_id
+        && let Some(cached) = guard.get(id)
+    {
+        return Some(cached.clone());
     }
 
     let key = format!(
@@ -72,11 +72,11 @@ fn ensure_backend_path(py: Python<'_>) -> PyResult<()> {
 
     let mut found = false;
     for item in path.iter() {
-        if let Ok(s) = item.extract::<String>() {
-            if s == backend_str.as_ref() {
-                found = true;
-                break;
-            }
+        if let Ok(s) = item.extract::<String>()
+            && s == backend_str.as_ref()
+        {
+            found = true;
+            break;
         }
     }
 

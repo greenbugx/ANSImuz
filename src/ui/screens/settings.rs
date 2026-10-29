@@ -50,7 +50,7 @@ pub fn render_settings(
         Provider::Spotify => "Search Spotify with lazy YouTube resolution".to_string(),
     };
 
-    let setting_rows = vec![
+    let setting_rows = [
         (
             "Provider:".to_string(),
             settings.provider.label().to_string(),

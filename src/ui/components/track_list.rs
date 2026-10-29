@@ -1,13 +1,12 @@
 use ratatui::{
     Frame,
     layout::Rect,
-    style::Style,
     text::Line,
     widgets::{List, ListItem, ListState},
 };
 
 use crate::music::Track;
-use crate::ui::theme::truncate;
+use crate::ui::theme::{Theme, truncate};
 
 pub fn render_track_list(
     frame: &mut Frame,
@@ -16,9 +15,7 @@ pub fn render_track_list(
     selected_idx: usize,
     loading: bool,
     last_query: &str,
-    selected_style: Style,
-    green: Style,
-    dim: Style,
+    theme: &Theme,
 ) {
     let items: Vec<ListItem> = if tracks.is_empty() {
         let message = if !loading && !last_query.is_empty() {
@@ -28,7 +25,7 @@ pub fn render_track_list(
         };
 
         message
-            .map(|m| ListItem::new(Line::from(m).centered().style(dim)))
+            .map(|m| ListItem::new(Line::from(m).centered().style(theme.dim)))
             .into_iter()
             .collect()
     } else {
@@ -41,9 +38,9 @@ pub fn render_track_list(
                 let label = format!(" {:>2}. {} | {}", i + 1, title, artist);
 
                 ListItem::new(label).style(if i == selected_idx {
-                    selected_style
+                    theme.highlight
                 } else {
-                    green
+                    theme.primary
                 })
             })
             .collect()
