@@ -108,9 +108,12 @@ cargo clippy --all-targets -- -D warnings
 
 # Run the test suite
 cargo test
+```
 
 # Check Python syntax
+```bash
 python -m py_compile backend/bridge.py backend/artwork/thumbnails.py backend/providers/spotify/spotify.py backend/providers/ytmusic/ytmusic.py
+```
 
 ---
 
