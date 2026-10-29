@@ -2,7 +2,7 @@ use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Wrap},
 };
 
 use crate::app::{App, Mode};
@@ -382,20 +382,37 @@ pub fn render_player(
     // only rendered when wide enough for 3-panel layout
     if layout.col_queue.width >= 8 {
         // TODO: add a persistent playback queue
+        let queue_title = if layout.col_queue.width >= 9 {
+            " QUEUE "
+        } else {
+            " Q "
+        };
+
         let queue_block = Block::default()
             .borders(Borders::ALL)
             .border_style(theme.primary)
             .title(Line::from(vec![Span::styled(
-                " QUEUE ",
+                queue_title,
                 theme.bold_primary,
             )]));
         let queue_inner = queue_block.inner(layout.col_queue);
         frame.render_widget(queue_block, layout.col_queue);
 
+        let placeholder = if queue_inner.width >= 22 {
+            "Yet to be in service :)"
+        } else if queue_inner.width >= 14 {
+            "Soon in\nservice :)"
+        } else if queue_inner.width >= 8 {
+            "Soon\n:)"
+        } else {
+            ":)"
+        };
+
         frame.render_widget(
-            Paragraph::new("Yet to be in service :)")
+            Paragraph::new(placeholder)
                 .style(theme.dim)
-                .alignment(Alignment::Center),
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: true }),
             queue_inner,
         );
     }
@@ -524,7 +541,7 @@ mod tests {
                 "Stacked heights must sum to area height at {width}"
             );
 
-            // Verify inner vertical budget: 
+            // Verify inner vertical budget:
             // all player elements must fit within col_player
             assert!(
                 layout.controls_slots[0].y + layout.controls_slots[0].height < layout.col_left.y,
@@ -631,5 +648,64 @@ mod tests {
                 <= layout_compact.col_left.y
         );
         assert_eq!(layout_compact.col_queue.width, 0);
+    }
+
+    #[test]
+    fn test_render_player_queue_reveal_unclipped() {
+        let app = App::new();
+        let theme = Theme::new(None);
+
+        for width in [108, 110, 115, 120, 124, 140] {
+            let area = Rect::new(0, 0, width, 30);
+            let backend = TestBackend::new(area.width, area.height);
+            let mut terminal = Terminal::new(backend).unwrap();
+
+            terminal
+                .draw(|frame| {
+                    render_player(frame, area, &app, None, &theme);
+                })
+                .unwrap();
+
+            let buffer = terminal.backend().buffer();
+            let layout = layout_player(area);
+
+            assert!(
+                layout.col_queue.width >= 8,
+                "Queue must be rendered at width {width}"
+            );
+
+            // Check that the queue contains its title without overflow
+            let title_row = (layout.col_queue.x..layout.col_queue.x + layout.col_queue.width)
+                .map(|x| buffer[(x, layout.col_queue.y)].symbol())
+                .collect::<String>();
+            if layout.col_queue.width >= 9 {
+                assert!(
+                    title_row.contains("QUEUE"),
+                    "Must contain QUEUE title at width {width}"
+                );
+            } else {
+                assert!(
+                    title_row.contains("Q"),
+                    "Must contain Q title at width {width}"
+                );
+            }
+
+            // Check that the inner text contains the smiley without clipping
+            let mut found_smiley = false;
+            for y in layout.col_queue.y + 1..layout.col_queue.y + layout.col_queue.height - 1 {
+                let row_str = (layout.col_queue.x + 1
+                    ..layout.col_queue.x + layout.col_queue.width - 1)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>();
+                if row_str.contains(":)") {
+                    found_smiley = true;
+                    break;
+                }
+            }
+            assert!(
+                found_smiley,
+                "Queue placeholder must contain unclipped smiley at width {width}"
+            );
+        }
     }
 }
