@@ -1,5 +1,7 @@
 # ANSImuz
 
+[![XERJ Corpus Hub contributor](https://hub.xerj.org/contributors/greenbugx/badge.svg)](https://hub.xerj.org/contributors/greenbugx)
+
 > [!IMPORTANT]
 > **Disclaimer:** This project is not affiliated with, endorsed by, or in any way officially connected to Youtube or Spotify. It is intended solely for educational purposes only.
 
