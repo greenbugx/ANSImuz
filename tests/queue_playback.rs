@@ -2,7 +2,7 @@ use std::sync::mpsc;
 
 use ansimuz::app::{
     advance_playback, handle_resolve_response, handle_search_result, play_next, play_queue_item,
-    play_search_result, state::App,
+    play_search_result, play_track, state::App,
 };
 use ansimuz::music::{PlaybackSource, ResolveResponse, Track};
 use ansimuz::playback::{AudioPlayer, PlayerEvent, Repeat};
@@ -503,4 +503,78 @@ fn test_new_search_does_not_affect_active_queue_playback() {
         advance_playback(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
     assert!(!advance_result);
     assert!(app.now_playing.is_none());
+}
+
+#[test]
+fn test_failed_queue_resolution_preserves_currently_playing_track_when_player_active() {
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    // Song A is currently playing
+    let song_a = make_test_track("Song A", "Artist", "http://stream/a");
+    play_track(
+        &mut app,
+        &mut player,
+        player_tx.clone(),
+        resolve_tx.clone(),
+        song_a,
+        PlaybackSource::SearchResult { index: 0 },
+    );
+    assert!(player.is_playing(), "Player must be active playing Song A");
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Song A")
+    );
+
+    // You press Next, selecting an unresolved queued song (Song B)
+    let song_b = make_test_track("Song B", "Artist", "");
+    let entry_id = app.enqueue(song_b);
+
+    let next_ok = play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert!(next_ok);
+    assert!(app.is_resolving);
+    let generation = app.resolve_generation;
+
+    // Song A continues playing while the new song resolves
+    assert!(player.is_playing());
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Song A")
+    );
+    assert_eq!(app.queue.len(), 0, "Song B was popped from queue");
+
+    // The queued song fails to resolve
+    // There are no more queued songs, and Repeat All is disabled
+    let fail_resp = ResolveResponse {
+        generation,
+        source: PlaybackSource::Queue { entry_id },
+        spotify_id: Some("sp_Song B".to_string()),
+        title: "Song B".to_string(),
+        artist: "Artist".to_string(),
+        result: Err("YouTube extraction failed".to_string()),
+    };
+
+    let handled =
+        handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, fail_resp);
+    assert!(!handled);
+    assert!(!app.is_resolving);
+
+    // Critical assertions:
+    // Audio/app state: Song A must remain now_playing and must NOT be cleared!
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Song A"),
+        "Song A must remain now_playing while MPV is still playing it"
+    );
+    // Song A must not be pushed into history prematurely!
+    assert!(
+        app.history.is_empty(),
+        "Song A must not be pushed to history while still playing"
+    );
+    // Player is still playing Song A
+    assert!(player.is_playing());
+    // Status reflects the resolve error
+    assert!(app.status.contains("RESOLVE ERROR"));
 }

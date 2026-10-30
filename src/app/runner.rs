@@ -262,12 +262,85 @@ pub fn play_previous(
     }
 }
 
+pub fn recover_queue_failure(
+    app: &mut App,
+    player: &mut AudioPlayer,
+    player_tx: Sender<PlayerEvent>,
+    resolve_tx: Sender<ResolveResponse>,
+) -> bool {
+    // If more queued items exist, try the next one
+    if !app.queue.is_empty() {
+        let index = if app.shuffle && app.queue.len() > 1 {
+            app.next_random(app.queue.len())
+        } else {
+            0
+        };
+        return play_queue_item(app, player, player_tx, resolve_tx, index);
+    }
+
+    // If the previous track is still playing in the audio player, preserve it!
+    if player.is_playing() && app.now_playing.is_some() {
+        return false;
+    }
+
+    // Otherwise (player is not playing), check Repeat::All to loop history
+    if app.repeat == Repeat::All && (!app.history.is_empty() || app.now_playing.is_some()) {
+        if let Some(current) = app.now_playing.take() {
+            app.history.push(current);
+        }
+        let history = std::mem::take(&mut app.history);
+        for track in history {
+            app.enqueue(track);
+        }
+        if !app.queue.is_empty() {
+            let index = if app.shuffle && app.queue.len() > 1 {
+                app.next_random(app.queue.len())
+            } else {
+                0
+            };
+            return play_queue_item(app, player, player_tx, resolve_tx, index);
+        }
+    }
+
+    // Idle/stopped: push any ended track to history and clear playback state
+    if let Some(current) = app.now_playing.take() {
+        app.history.push(current);
+    }
+    app.playing = None;
+    app.paused = false;
+    false
+}
+
 pub fn advance_after_queue_failure(
     app: &mut App,
     player: &mut AudioPlayer,
     player_tx: Sender<PlayerEvent>,
     resolve_tx: Sender<ResolveResponse>,
 ) -> bool {
+    recover_queue_failure(app, player, player_tx, resolve_tx)
+}
+
+pub fn advance_playback(
+    app: &mut App,
+    player: &mut AudioPlayer,
+    player_tx: Sender<PlayerEvent>,
+    resolve_tx: Sender<ResolveResponse>,
+) -> bool {
+    if app.repeat == Repeat::One
+        && app.played_once
+        && let Some(track) = app.now_playing.clone()
+    {
+        play_track(
+            app,
+            player,
+            player_tx,
+            resolve_tx,
+            track,
+            PlaybackSource::Current,
+        );
+        return true;
+    }
+
     if !app.queue.is_empty() {
         let index = if app.shuffle && app.queue.len() > 1 {
             app.next_random(app.queue.len())
@@ -301,30 +374,6 @@ pub fn advance_after_queue_failure(
     app.playing = None;
     app.paused = false;
     false
-}
-
-pub fn advance_playback(
-    app: &mut App,
-    player: &mut AudioPlayer,
-    player_tx: Sender<PlayerEvent>,
-    resolve_tx: Sender<ResolveResponse>,
-) -> bool {
-    if app.repeat == Repeat::One
-        && app.played_once
-        && let Some(track) = app.now_playing.clone()
-    {
-        play_track(
-            app,
-            player,
-            player_tx,
-            resolve_tx,
-            track,
-            PlaybackSource::Current,
-        );
-        return true;
-    }
-
-    advance_after_queue_failure(app, player, player_tx, resolve_tx)
 }
 pub fn play_track(
     app: &mut App,
@@ -386,7 +435,7 @@ pub fn play_track(
         && let PlaybackSource::Queue { .. } = source
     {
         app.set_status(format!("PLAYER ERROR: {error}"));
-        advance_after_queue_failure(app, player, player_tx, resolve_tx);
+        recover_queue_failure(app, player, player_tx, resolve_tx);
     }
 }
 
@@ -552,12 +601,7 @@ pub fn handle_resolve_response(
                         PlaybackSource::Queue { entry_id },
                     ) {
                         app.set_status(format!("PLAYER ERROR: {error}"));
-                        advance_after_queue_failure(
-                            app,
-                            player,
-                            player_tx.clone(),
-                            resolve_tx.clone(),
-                        );
+                        recover_queue_failure(app, player, player_tx.clone(), resolve_tx.clone());
                         return false;
                     }
                     true
@@ -589,7 +633,7 @@ pub fn handle_resolve_response(
             app.pending_queue_entry_id = None;
 
             if let PlaybackSource::Queue { .. } = response.source {
-                advance_after_queue_failure(app, player, player_tx.clone(), resolve_tx.clone());
+                recover_queue_failure(app, player, player_tx.clone(), resolve_tx.clone());
             }
 
             false
