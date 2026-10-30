@@ -310,7 +310,7 @@ pub fn render_player(
                 .iter()
                 .map(|(key, action)| {
                     Line::from(vec![
-                        Span::styled(format!(" {:<7}", key), theme.bold_primary),
+                        Span::styled(format!(" {:<8}", key), theme.bold_primary),
                         Span::styled(*action, theme.dim),
                     ])
                 })
