@@ -50,11 +50,14 @@ pub fn render_art(
         return;
     }
 
+    let has_details = !title.is_empty() || !artist.is_empty();
+    let details_reserved: u16 = if has_details && area.height > 6 { 3 } else { 0 };
+
     let art_area = Rect {
         x: area.x,
         y: area.y,
         width: area.width,
-        height: area.height.saturating_sub(3),
+        height: area.height.saturating_sub(details_reserved),
     };
 
     let side = ((art_area.height as u32) * 2)
@@ -71,12 +74,19 @@ pub fn render_art(
         height: hq_rows,
     };
 
-    if url.is_empty() {
-        let fallback = fallback_image(side);
-
-        if !(hq && render_hq(frame, hq_area, &fallback)) {
-            render_pixels(frame, art_area, fallback, side);
+    let render_fallback = |frame: &mut Frame| {
+        if let Some(frame_img) = super::animation::current_animation_frame() {
+            render_animated_frame(frame, art_area, &frame_img);
+        } else {
+            let fallback = fallback_image(side);
+            if !(hq && render_hq(frame, hq_area, &fallback)) {
+                render_pixels(frame, art_area, fallback, side);
+            }
         }
+    };
+
+    if url.is_empty() {
+        render_fallback(frame);
     } else {
         match request_art(url, HQ_SOURCE_SIDE) {
             Ok(image) => {
@@ -93,11 +103,7 @@ pub fn render_art(
                 render_loading(frame, art_area, accent.unwrap_or(Color::Green))
             }
             Err(_) => {
-                let fallback = fallback_image(side);
-
-                if !(hq && render_hq(frame, hq_area, &fallback)) {
-                    render_pixels(frame, art_area, fallback, side);
-                }
+                render_fallback(frame);
             }
         }
     }
@@ -129,6 +135,63 @@ fn render_hq(frame: &mut Frame, area: Rect, image: &DynamicImage) -> bool {
     frame.render_widget(TerminalImage::new(&protocol).allow_clipping(true), area);
 
     true
+}
+
+fn render_animated_frame(frame: &mut Frame, art_area: Rect, image: &DynamicImage) {
+    // Make animation smaller (~68% of art_area height, at least 4 rows)
+    let anim_rows = if art_area.height >= 12 {
+        (art_area.height * 68 / 100).max(4)
+    } else if art_area.height >= 8 {
+        art_area.height.saturating_sub(2).max(4)
+    } else {
+        art_area.height
+    };
+
+    let anim_cols = (anim_rows * 2).min(art_area.width);
+
+    // Calculate vertical slack and position the animation lower down
+    let slack = art_area.height.saturating_sub(anim_rows);
+    let y_shift = if slack >= 2 {
+        slack.saturating_sub(1)
+    } else {
+        slack
+    };
+
+    let hq_area = Rect {
+        x: art_area.x + (art_area.width - anim_cols) / 2,
+        y: art_area.y + y_shift,
+        width: anim_cols,
+        height: anim_rows,
+    };
+
+    // Animation is HD only: always use high-definition terminal image protocol
+    // if supported by the terminal, unaffected by the art_hq setting.
+    if render_hq(frame, hq_area, image) {
+        return;
+    }
+
+    // Fallback for terminals without graphics protocol support
+    let side = (anim_rows as u32 * 2)
+        .min(art_area.width as u32 * 2 / 5)
+        .max(2)
+        & !1;
+
+    let (w, h) = image.dimensions();
+    let target_h = (side * h / w.max(1)).max(1);
+    let resized = image.resize_exact(side, target_h, FilterType::Triangle);
+
+    let mut square = DynamicImage::new_rgba8(side, side);
+    let y_offset = (side.saturating_sub(target_h)) / 2;
+    image::imageops::overlay(&mut square, &resized, 0, y_offset as i64);
+
+    let adjusted_art_area = Rect {
+        x: art_area.x,
+        y: art_area.y + y_shift,
+        width: art_area.width,
+        height: art_area.height.saturating_sub(y_shift),
+    };
+
+    render_pixels(frame, adjusted_art_area, square, side);
 }
 
 fn fallback_image(side: u32) -> DynamicImage {
@@ -268,13 +331,22 @@ fn render_pixels(frame: &mut Frame, area: Rect, image: DynamicImage, side: u32) 
         return;
     }
 
+    let y_slack = area.height.saturating_sub(rows);
+    let y_center = y_slack / 2;
+    let y_extra = if y_slack >= 4 {
+        2
+    } else if y_slack >= 2 {
+        1
+    } else {
+        0
+    };
+
     let rect = Rect {
         x: area.x + (area.width - cols) / 2,
-        y: area.y + (area.height - rows) / 2,
+        y: area.y + y_center + y_extra,
         width: cols,
         height: rows,
     };
-
     let mut lines = Vec::new();
 
     for y in (0..side).step_by(2) {
@@ -284,12 +356,27 @@ fn render_pixels(frame: &mut Frame, area: Rect, image: DynamicImage, side: u32) 
             let top = image.get_pixel(x, y).0;
             let bottom = image.get_pixel(x, (y + 1).min(side - 1)).0;
 
-            spans.push(Span::styled(
-                "▀",
-                Style::default()
-                    .fg(Color::Rgb(top[0], top[1], top[2]))
-                    .bg(Color::Rgb(bottom[0], bottom[1], bottom[2])),
-            ));
+            let top_visible = top[3] >= 128;
+            let bottom_visible = bottom[3] >= 128;
+
+            let span = match (top_visible, bottom_visible) {
+                (true, true) => Span::styled(
+                    "▀",
+                    Style::default()
+                        .fg(Color::Rgb(top[0], top[1], top[2]))
+                        .bg(Color::Rgb(bottom[0], bottom[1], bottom[2])),
+                ),
+                (true, false) => {
+                    Span::styled("▀", Style::default().fg(Color::Rgb(top[0], top[1], top[2])))
+                }
+                (false, true) => Span::styled(
+                    "▄",
+                    Style::default().fg(Color::Rgb(bottom[0], bottom[1], bottom[2])),
+                ),
+                (false, false) => Span::raw(" "),
+            };
+
+            spans.push(span);
         }
 
         lines.push(Line::from(spans));
