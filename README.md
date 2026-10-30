@@ -14,16 +14,16 @@ ANSImuz is built with Rust, Ratatui, Python, [`ytmusicapi`](https://github.com/s
 
 ## Features
 
-- **Dual Music Providers**: Search and stream audio seamlessly from YouTube Music & Spotify with non-blocking stream resolution.
-- **Spotify-Style Queue & History**: Full playback queue and session history. `Next` (`→`) and `Previous` (`←`) navigation strictly consumes the queue and history without bleeding into search results.
-- **Queue Duplicate Prevention**: Guarantees distinct queue entries with duplicate detection across Spotify IDs, stream URLs, and normalized title/artist pairs.
-- **Focus-Aware Navigation**: Instant `Tab` toggling between Search Results and Queue with independent selection cursors.
-- **Interactive Queue Operations**: Enqueue highlighted tracks (`A`), remove entries (`Delete`), and reorder upcoming songs (`Alt+↑ / Alt+↓`).
-- **Adaptive Multi-Panel Layout**: Seamlessly adapts across terminal sizes (3-panel widescreen $\ge$ 120 cols, progressive reveal 100–119 cols, 2-panel list swap 75–99 cols, and compact stacked mode 40–74 cols).
-- **Terminal Album Artwork**: High-resolution artwork rendering supporting Kitty, Sixel, iTerm2, and Unicode half-blocks with background prewarming and disk caching.
-- **Dynamic Palette Theming**: Real-time extraction of dominant artwork colors applied dynamically across TUI borders and widgets.
-- **Playback Engine**: Queue shuffle, repeat modes (Off, All, One), volume adjustment, and robust MPV process supervision.
-- **Searchable Overlays**: Command Palette (`:`) and Keybinds Help Overlay (`?`).
+- Search and play music from YouTube Music and Spotify
+- Manage an upcoming queue: add songs, remove them, or reorder the list
+- Session history so you can jump back to previously played songs
+- Album artwork displayed directly in your terminal
+- Adaptive layout that fits any terminal size
+- Dynamic color themes based on album art
+- Shuffle and repeat modes (Repeat One / Repeat All)
+- Full playback controls with keyboard shortcuts
+- Quick command palette and built-in help screen
+
 ## Requirements
 
 - Rust toolchain (made in `rustc 1.99.1`)
