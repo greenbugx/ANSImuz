@@ -108,8 +108,8 @@ mod tests {
     fn test_animation_frame_resolution_and_cycling() {
         // Test frame index math
         assert_eq!(0 % TOTAL_FRAMES, 0);
-        assert_eq!(49 % TOTAL_FRAMES, 49);
-        assert_eq!(50 % TOTAL_FRAMES, 0);
+        assert_eq!(19 % TOTAL_FRAMES, 19);
+        assert_eq!(20 % TOTAL_FRAMES, 0);
 
         // Verify frame 0 loads a valid image with dimensions
         if let Some(frame) = get_animation_frame(0) {
