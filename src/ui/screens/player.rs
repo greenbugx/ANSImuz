@@ -283,13 +283,14 @@ pub fn render_player(
         let search_inner = search_block.inner(layout.search_area);
         frame.render_widget(search_block, layout.search_area);
 
+        let empty_msg = (!app.loading && !app.last_query.is_empty()).then_some("NO RESULTS");
         render_track_list(
             frame,
             search_inner,
             &app.tracks,
             app.selected,
-            app.loading,
-            &app.last_query,
+            empty_msg,
+            is_search_focused,
             theme,
         );
     }
@@ -806,8 +807,18 @@ mod tests {
             album: None,
             duration_ms: None,
         });
+        app.tracks = vec![Track {
+            title: "Search Track".into(),
+            artist: "Search Artist".into(),
+            stream_url: "".into(),
+            art_url: "".into(),
+            spotify_id: None,
+            artists: vec![],
+            album: None,
+            duration_ms: None,
+        }];
+        app.selected = 0;
         app.list_focus = ListFocus::Queue;
-
         let area = Rect::new(0, 0, 140, 30);
         let backend = TestBackend::new(area.width, area.height);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -851,6 +862,21 @@ mod tests {
         assert!(
             found_second,
             "Queue list must render second queued track with position"
+        );
+
+        // Focus highlight must be ONLY on the focused panel
+        let search_selected_cell = &buffer[(layout.search_area.x + 2, layout.search_area.y + 1)];
+        let queue_selected_cell = &buffer[(layout.col_queue.x + 2, layout.col_queue.y + 1)];
+
+        assert_eq!(
+            queue_selected_cell.bg,
+            theme.highlight.bg.unwrap(),
+            "Focused Queue panel must have the highlight box on selected item"
+        );
+        assert_ne!(
+            search_selected_cell.bg,
+            theme.highlight.bg.unwrap(),
+            "Unfocused Search panel must NOT have the highlight box on selected item"
         );
     }
 

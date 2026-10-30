@@ -13,18 +13,12 @@ pub fn render_track_list(
     area: Rect,
     tracks: &[Track],
     selected_idx: usize,
-    loading: bool,
-    last_query: &str,
+    empty_msg: Option<&str>,
+    is_focused: bool,
     theme: &Theme,
 ) {
     let items: Vec<ListItem> = if tracks.is_empty() {
-        let message = if !loading && !last_query.is_empty() {
-            Some("NO RESULTS")
-        } else {
-            None
-        };
-
-        message
+        empty_msg
             .map(|m| ListItem::new(Line::from(m).centered().style(theme.dim)))
             .into_iter()
             .collect()
@@ -45,11 +39,19 @@ pub fn render_track_list(
                     format!(" {:>2}. {}", i + 1, title)
                 };
 
-                ListItem::new(label).style(if i == selected_idx {
-                    theme.highlight
-                } else {
+                let style = if i == selected_idx {
+                    if is_focused {
+                        theme.highlight
+                    } else {
+                        theme.bold_primary
+                    }
+                } else if is_focused {
                     theme.primary
-                })
+                } else {
+                    theme.dim
+                };
+
+                ListItem::new(label).style(style)
             })
             .collect()
     };
