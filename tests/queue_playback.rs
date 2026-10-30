@@ -641,7 +641,7 @@ fn test_failed_queue_resolution_preserves_currently_playing_track_when_player_ac
         app.now_playing.as_ref().map(|t| t.title.as_str()),
         Some("Song A")
     );
-    assert_eq!(app.queue.len(), 0, "Song B was popped from queue");
+    assert_eq!(app.queue.len(), 1, "Song B stays in queue while resolving");
 
     // The queued song fails to resolve
     // There are no more queued songs, and Repeat All is disabled
@@ -658,6 +658,11 @@ fn test_failed_queue_resolution_preserves_currently_playing_track_when_player_ac
         handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, fail_resp);
     assert!(!handled);
     assert!(!app.is_resolving);
+    assert_eq!(
+        app.queue.len(),
+        0,
+        "Failed Song B is removed on resolve failure"
+    );
 
     // Critical assertions:
     // Audio/app state: Song A must remain now_playing and must NOT be cleared!
@@ -825,4 +830,71 @@ fn test_mpv_startup_failure_preserves_previous_track_in_history() {
         app.now_playing.as_ref().map(|t| t.title.as_str()),
         Some("Song A")
     );
+}
+
+#[test]
+fn test_cancellation_during_resolution_preserves_queue_entry() {
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    // Enqueue unresolved song
+    let unresolved = make_test_track("Queued Song", "Artist", "");
+    let entry_id = app.enqueue(unresolved).unwrap();
+    assert_eq!(app.queue.len(), 1);
+
+    // Play queue item -> begins async resolution
+    let ok = play_queue_item(
+        &mut app,
+        &mut player,
+        player_tx.clone(),
+        resolve_tx.clone(),
+        0,
+    );
+    assert!(ok);
+    assert!(app.is_resolving);
+    let generation = app.resolve_generation;
+
+    // Track must remain in app.queue while resolution is pending!
+    assert_eq!(
+        app.queue.len(),
+        1,
+        "Queued track must remain in queue while resolving"
+    );
+    assert_eq!(app.queue[0].id, entry_id);
+    assert_eq!(app.queue[0].track.title, "Queued Song");
+
+    // User submits a search or changes provider, cancelling the pending resolution
+    let new_search_results = vec![make_test_track("Search Song", "Artist", "http://stream/s")];
+    handle_search_result(&mut app, "query".into(), Ok(new_search_results));
+    assert!(!app.is_resolving);
+    assert_eq!(app.resolve_generation, generation + 1);
+
+    // Queued track must NOT have been silently dropped!
+    assert_eq!(
+        app.queue.len(),
+        1,
+        "Queued track must be preserved on resolution cancellation"
+    );
+    assert_eq!(app.queue[0].id, entry_id);
+    assert_eq!(app.queue[0].track.title, "Queued Song");
+
+    // Stale resolution response arrives from the background thread
+    let mut resolved = make_test_track("Queued Song", "Artist", "http://stream/q_resolved");
+    resolved.spotify_id = Some("sp_Queued Song".to_string());
+    let stale_resp = ResolveResponse {
+        generation,
+        source: PlaybackSource::Queue { entry_id },
+        spotify_id: Some("sp_Queued Song".to_string()),
+        title: "Queued Song".to_string(),
+        artist: "Artist".to_string(),
+        result: Ok(resolved),
+    };
+
+    let handled =
+        handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, stale_resp);
+    assert!(!handled, "Stale resolution must be rejected");
+    assert_eq!(app.queue.len(), 1, "Track must remain safely in queue");
+    assert_eq!(app.queue[0].id, entry_id);
 }

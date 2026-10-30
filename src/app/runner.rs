@@ -176,17 +176,41 @@ pub fn play_queue_item(
     resolve_tx: Sender<ResolveResponse>,
     index: usize,
 ) -> bool {
-    let Some(entry) = app.remove_queue_item(index) else {
+    let Some(mut entry) = app.queue.get(index).cloned() else {
         return false;
     };
-    play_track(
-        app,
-        player,
-        player_tx,
-        resolve_tx,
-        entry.track,
-        PlaybackSource::Queue { entry_id: entry.id },
-    )
+
+    if let Some(cached) = crate::music::get_cached_track(&entry.track) {
+        entry.track = cached.clone();
+        if let Some(slot) = app.queue.get_mut(index) {
+            slot.track = cached;
+        }
+    }
+
+    if entry.track.stream_url.is_empty() {
+        play_track(
+            app,
+            player,
+            player_tx,
+            resolve_tx,
+            entry.track,
+            PlaybackSource::Queue { entry_id: entry.id },
+        )
+    } else {
+        let Some(removed) = app.remove_queue_item(index) else {
+            return false;
+        };
+        play_track(
+            app,
+            player,
+            player_tx,
+            resolve_tx,
+            removed.track,
+            PlaybackSource::Queue {
+                entry_id: removed.id,
+            },
+        )
+    }
 }
 
 pub(crate) fn refill_queue_from_repeat_all(app: &mut App) -> bool {
@@ -560,6 +584,10 @@ pub fn handle_resolve_response(
                     }
                     app.pending_queue_entry_id = None;
 
+                    if let Some(pos) = app.queue.iter().position(|e| e.id == entry_id) {
+                        app.remove_queue_item(pos);
+                    }
+
                     if let Err(error) = start_playback(
                         app,
                         player,
@@ -599,7 +627,10 @@ pub fn handle_resolve_response(
             app.set_status(format!("RESOLVE ERROR: {}", error));
             app.pending_queue_entry_id = None;
 
-            if let PlaybackSource::Queue { .. } = response.source {
+            if let PlaybackSource::Queue { entry_id } = response.source {
+                if let Some(pos) = app.queue.iter().position(|e| e.id == entry_id) {
+                    app.remove_queue_item(pos);
+                }
                 recover_queue_failure(app, player, player_tx.clone(), resolve_tx.clone());
             }
 
