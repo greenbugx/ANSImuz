@@ -456,3 +456,105 @@ fn test_stage_4_connected_interactions() {
     assert_eq!(app.queue[0].track.title, "Track A");
     assert_eq!(app.queue[1].track.title, "Track D");
 }
+
+#[test]
+fn test_queue_mutations_ignored_when_search_focused() {
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (search_tx, _search_rx) = mpsc::channel::<SearchResult>();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    let make_key = |code: KeyCode, modifiers: KeyModifiers| KeyEvent {
+        code,
+        modifiers,
+        kind: KeyEventKind::Press,
+        state: KeyEventState::empty(),
+    };
+
+    app.tracks = vec![test_track("Search 0", "A"), test_track("Search 1", "A")];
+    app.enqueue(test_track("Queue 0", "Artist"));
+    app.enqueue(test_track("Queue 1", "Artist"));
+
+    // Ensure list_focus is Search
+    app.mode = Mode::Nav;
+    app.list_focus = ListFocus::Search;
+    app.queue_selected = 1;
+
+    // Delete while Search is focused: must NOT delete anything from the queue
+    handle_key(
+        &mut app,
+        &mut player,
+        make_key(KeyCode::Delete, KeyModifiers::empty()),
+        &search_tx,
+        &player_tx,
+        &resolve_tx,
+    );
+    assert_eq!(
+        app.queue.len(),
+        2,
+        "Delete while Search is focused must not remove queue items"
+    );
+    assert_eq!(app.queue[0].track.title, "Queue 0");
+    assert_eq!(app.queue[1].track.title, "Queue 1");
+
+    // Alt+Up while Search is focused: must NOT reorder the queue
+    handle_key(
+        &mut app,
+        &mut player,
+        make_key(KeyCode::Up, KeyModifiers::ALT),
+        &search_tx,
+        &player_tx,
+        &resolve_tx,
+    );
+    assert_eq!(app.queue[0].track.title, "Queue 0");
+    assert_eq!(app.queue[1].track.title, "Queue 1");
+    assert_eq!(
+        app.queue_selected, 1,
+        "Alt+Up while Search is focused must not reorder"
+    );
+
+    // Alt+Down while Search is focused: must NOT reorder the queue
+    app.queue_selected = 0;
+    handle_key(
+        &mut app,
+        &mut player,
+        make_key(KeyCode::Down, KeyModifiers::ALT),
+        &search_tx,
+        &player_tx,
+        &resolve_tx,
+    );
+    assert_eq!(app.queue[0].track.title, "Queue 0");
+    assert_eq!(app.queue[1].track.title, "Queue 1");
+    assert_eq!(
+        app.queue_selected, 0,
+        "Alt+Down while Search is focused must not reorder"
+    );
+
+    // Switch to Queue focus: now Delete, Alt+Up, Alt+Down must work
+    app.list_focus = ListFocus::Queue;
+    app.queue_selected = 1;
+
+    handle_key(
+        &mut app,
+        &mut player,
+        make_key(KeyCode::Up, KeyModifiers::ALT),
+        &search_tx,
+        &player_tx,
+        &resolve_tx,
+    );
+    assert_eq!(app.queue[0].track.title, "Queue 1");
+    assert_eq!(app.queue[1].track.title, "Queue 0");
+    assert_eq!(app.queue_selected, 0);
+
+    handle_key(
+        &mut app,
+        &mut player,
+        make_key(KeyCode::Delete, KeyModifiers::empty()),
+        &search_tx,
+        &player_tx,
+        &resolve_tx,
+    );
+    assert_eq!(app.queue.len(), 1);
+    assert_eq!(app.queue[0].track.title, "Queue 0");
+}

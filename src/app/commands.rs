@@ -416,15 +416,21 @@ pub fn dispatch_action(
             }
         }
         Action::RemoveQueueItem => {
-            if let Some(entry) = app.remove_queue_item(app.queue_selected) {
+            if app.list_focus == ListFocus::Queue
+                && let Some(entry) = app.remove_queue_item(app.queue_selected)
+            {
                 app.set_status(format!("REMOVED: {}", entry.track.title));
             }
         }
         Action::MoveQueueUp => {
-            app.move_selected_queue_item(-1);
+            if app.list_focus == ListFocus::Queue {
+                app.move_selected_queue_item(-1);
+            }
         }
         Action::MoveQueueDown => {
-            app.move_selected_queue_item(1);
+            if app.list_focus == ListFocus::Queue {
+                app.move_selected_queue_item(1);
+            }
         }
     }
 }
