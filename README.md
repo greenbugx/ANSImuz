@@ -40,6 +40,22 @@ git clone https://github.com/greenbugx/ANSImuz.git
 cd ANSImuz
 ```
 
+### Automated Setup (Recommended)
+
+Run the installer for your operating system. It installs all prerequisites (including `mpv` and `yt-dlp`), creates the Python environment, installs dependencies, and compiles the release binary:
+
+**Linux:**
+```bash
+./scripts/install_linux.sh
+```
+
+**Windows (PowerShell):**
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\scripts\install_windows.ps1
+```
+
+### Manual Setup
 Create a python virtual environment:
 
 ```bash
