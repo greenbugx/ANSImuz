@@ -3,7 +3,7 @@ use std::sync::mpsc::Sender;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{
-    runner::{now_playing, play_next, play_search_result},
+    runner::{now_playing, play_next, play_queue_item, play_search_result},
     state::{App, ListFocus, Mode},
 };
 use crate::playback::{AudioPlayer, PlayerEvent, Repeat};
@@ -180,6 +180,9 @@ pub const PANEL_KEYBINDS: &[(&str, &str)] = &[
     ("ENTER", "PLAY"),
     ("SPACE", "PAUSE"),
     ("←→", "TRACK"),
+    ("TAB", "FOCUS"),
+    ("A", "QUEUE"),
+    ("DEL", "REMOVE"),
     ("X", "SHUFFLE"),
     ("R", "REPEAT"),
     (":", "COMMANDS"),
@@ -201,8 +204,12 @@ pub const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
     (
         "NAVIGATION",
         &[
-            ("↑ / ↓", "Select track in list"),
+            ("Tab", "Switch focus between Search and Queue"),
+            ("↑ / ↓", "Select track in focused list"),
             ("Enter", "Play selected track"),
+            ("A", "Add highlighted search track to queue"),
+            ("Delete", "Remove highlighted track from queue"),
+            ("Alt+↑ / ↓", "Reorder queue item"),
             ("/", "Focus song search input"),
             ("Esc", "Clear search query / Close dialog"),
         ],
@@ -299,6 +306,14 @@ pub fn dispatch_action(
                     }
                     Err(error) => app.set_status(format!("PLAYER ERROR: {error}")),
                 }
+            } else if app.list_focus == ListFocus::Queue && !app.queue.is_empty() {
+                play_queue_item(
+                    app,
+                    player,
+                    player_tx.clone(),
+                    resolve_tx.clone(),
+                    app.queue_selected,
+                );
             } else if !app.tracks.is_empty() {
                 play_search_result(
                     app,

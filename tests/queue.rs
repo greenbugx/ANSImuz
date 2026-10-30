@@ -310,3 +310,149 @@ fn test_focus_aware_keyboard_navigation_and_controls() {
     assert_eq!(app.queue.len(), 0, "Queue item consumed on play");
     assert_eq!(app.playing, None, "Queue playback has playing = None");
 }
+
+#[test]
+fn test_stage_4_connected_interactions() {
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (search_tx, _search_rx) = mpsc::channel::<SearchResult>();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    let make_key = |code: KeyCode, modifiers: KeyModifiers| KeyEvent {
+        code,
+        modifiers,
+        kind: KeyEventKind::Press,
+        state: KeyEventState::empty(),
+    };
+
+    app.tracks = vec![
+        test_track("Track A", "Artist"),
+        test_track("Track B", "Artist"),
+    ];
+
+    // Add: Enqueue highlighted search track, verify status and duplicate handling
+    app.mode = Mode::Nav;
+    app.list_focus = ListFocus::Search;
+    app.selected = 0;
+
+    handle_key(
+        &mut app,
+        &mut player,
+        make_key(KeyCode::Char('a'), KeyModifiers::empty()),
+        &search_tx,
+        &player_tx,
+        &resolve_tx,
+    );
+    assert_eq!(app.queue.len(), 1);
+    assert_eq!(app.queue[0].track.title, "Track A");
+    assert!(app.status.contains("QUEUED: Track A"));
+
+    // Enqueue duplicate
+    handle_key(
+        &mut app,
+        &mut player,
+        make_key(KeyCode::Char('a'), KeyModifiers::empty()),
+        &search_tx,
+        &player_tx,
+        &resolve_tx,
+    );
+    assert_eq!(app.queue.len(), 2);
+    assert_eq!(app.queue[1].track.title, "Track A");
+    assert_ne!(
+        app.queue[0].id, app.queue[1].id,
+        "Duplicate entries must have distinct IDs"
+    );
+
+    // Add Track B as 3rd item
+    app.selected = 1;
+    handle_key(
+        &mut app,
+        &mut player,
+        make_key(KeyCode::Char('a'), KeyModifiers::empty()),
+        &search_tx,
+        &player_tx,
+        &resolve_tx,
+    );
+    assert_eq!(app.queue.len(), 3);
+    assert_eq!(app.queue[2].track.title, "Track B");
+
+    // Reorder: Switch to Queue focus, move Track B up from index 2 to index 1
+    app.list_focus = ListFocus::Queue;
+    app.queue_selected = 2; // on Track B
+
+    handle_key(
+        &mut app,
+        &mut player,
+        make_key(KeyCode::Up, KeyModifiers::ALT),
+        &search_tx,
+        &player_tx,
+        &resolve_tx,
+    );
+    assert_eq!(app.queue[1].track.title, "Track B");
+    assert_eq!(
+        app.queue_selected, 1,
+        "Cursor must follow moved item Track B to index 1"
+    );
+
+    // Remove: Delete Track B at index 1
+    handle_key(
+        &mut app,
+        &mut player,
+        make_key(KeyCode::Delete, KeyModifiers::empty()),
+        &search_tx,
+        &player_tx,
+        &resolve_tx,
+    );
+    assert_eq!(app.queue.len(), 2);
+    assert!(app.status.contains("REMOVED: Track B"));
+    assert_eq!(app.queue_selected, 1, "Cursor clamps/adjusts correctly");
+    assert_eq!(app.queue[0].track.title, "Track A");
+    assert_eq!(app.queue[1].track.title, "Track A");
+
+    // Add a distinct Track C at the end: queue is now [Track A (0), Track A (1), Track C (2)]
+    app.enqueue(test_track("Track C", "Artist"));
+    assert_eq!(app.queue.len(), 3);
+
+    // Play: Highlight Track C at index 2, press Enter -> plays Track C directly
+    app.queue_selected = 2;
+    handle_key(
+        &mut app,
+        &mut player,
+        make_key(KeyCode::Enter, KeyModifiers::empty()),
+        &search_tx,
+        &player_tx,
+        &resolve_tx,
+    );
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Track C")
+    );
+    assert_eq!(app.queue.len(), 2);
+    assert_eq!(app.queue[0].track.title, "Track A");
+    assert_eq!(app.queue[1].track.title, "Track A");
+
+    // Enqueue Track D at end: queue is now [Track A, Track A, Track D]
+    app.enqueue(test_track("Track D", "Artist"));
+    assert_eq!(app.queue.len(), 3);
+
+    // Manual Next: highlight Track D at index 2, then press Right (Next)
+    // Invariant: Next MUST play the front of the queue (Track A at index 0), NOT highlighted selection Track D!
+    app.queue_selected = 2; // highlight Track D
+    handle_key(
+        &mut app,
+        &mut player,
+        make_key(KeyCode::Right, KeyModifiers::empty()),
+        &search_tx,
+        &player_tx,
+        &resolve_tx,
+    );
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Track A"),
+        "Next button must prioritize front of queue (index 0), ignoring queue_selected cursor"
+    );
+    assert_eq!(app.queue.len(), 2);
+    assert_eq!(app.queue[0].track.title, "Track A");
+    assert_eq!(app.queue[1].track.title, "Track D");
+}
