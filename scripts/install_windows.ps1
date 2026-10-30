@@ -25,7 +25,7 @@ function Write-Step {
         [string]$Title
     )
     $Percent = [int](($Number / $TotalSteps) * 100)
-    Write-Progress -Activity "Installing ANSImuz" -Status "Step $Number of $TotalSteps: $Title" -PercentComplete $Percent
+    Write-Progress -Activity "Installing ANSImuz" -Status "Step $Number of ${TotalSteps}: $Title" -PercentComplete $Percent
     Write-Host "`n[$Number/$TotalSteps] " -ForegroundColor Cyan -NoNewline
     Write-Host "$Title" -ForegroundColor White
 }
