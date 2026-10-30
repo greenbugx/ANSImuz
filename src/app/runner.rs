@@ -189,7 +189,7 @@ pub fn play_queue_item(
     )
 }
 
-pub fn refill_queue_from_repeat_all(app: &mut App) -> bool {
+pub(crate) fn refill_queue_from_repeat_all(app: &mut App) -> bool {
     if app.repeat != Repeat::All {
         return false;
     }
@@ -209,7 +209,7 @@ pub fn refill_queue_from_repeat_all(app: &mut App) -> bool {
     !app.queue.is_empty()
 }
 
-pub fn play_next_queued(
+pub(crate) fn play_next_queued(
     app: &mut App,
     player: &mut AudioPlayer,
     player_tx: Sender<PlayerEvent>,
@@ -241,7 +241,7 @@ pub fn play_previous(
     player_tx: Sender<PlayerEvent>,
     resolve_tx: Sender<ResolveResponse>,
 ) -> bool {
-    if let Some(prev) = app.history.pop() {
+    if let Some(prev) = app.history.pop_back() {
         if let Some(current) = app.now_playing.take() {
             app.push_front_queue(current);
         }
@@ -271,7 +271,7 @@ pub fn play_previous(
     }
 }
 
-pub fn recover_queue_failure(
+pub(crate) fn recover_queue_failure(
     app: &mut App,
     player: &mut AudioPlayer,
     player_tx: Sender<PlayerEvent>,
@@ -299,15 +299,6 @@ pub fn recover_queue_failure(
     app.playing = None;
     app.paused = false;
     false
-}
-
-pub fn advance_after_queue_failure(
-    app: &mut App,
-    player: &mut AudioPlayer,
-    player_tx: Sender<PlayerEvent>,
-    resolve_tx: Sender<ResolveResponse>,
-) -> bool {
-    recover_queue_failure(app, player, player_tx, resolve_tx)
 }
 
 pub fn advance_playback(

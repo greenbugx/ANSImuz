@@ -1,5 +1,7 @@
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 pub const MAX_HISTORY_SIZE: usize = 100;
 
 use crate::config::Settings;
@@ -57,7 +59,7 @@ pub struct App {
     pub queue_selected: usize,
     pub next_queue_id: u64,
     pub pending_queue_entry_id: Option<u64>,
-    pub history: Vec<Track>,
+    pub history: VecDeque<Track>,
 }
 
 impl App {
@@ -98,7 +100,7 @@ impl App {
             queue: Vec::new(),
             queue_selected: 0,
             next_queue_id: 1,
-            history: Vec::new(),
+            history: VecDeque::new(),
             pending_queue_entry_id: None,
         }
     }
@@ -213,25 +215,22 @@ impl App {
     }
 
     pub fn enqueue_selected(&mut self) -> Option<u64> {
-        if let Some(track) = self.tracks.get(self.selected).cloned() {
-            if self.queue_contains(&track) {
-                self.set_status("ALREADY IN QUEUE");
-                return None;
-            }
-            let title = track.title.clone();
-            let id = self.enqueue(track);
+        let track = self.tracks.get(self.selected)?.clone();
+        let title = track.title.clone();
+        if let Some(id) = self.enqueue(track) {
             self.set_status(format!("QUEUED: {}", title));
-            id
+            Some(id)
         } else {
+            self.set_status("ALREADY IN QUEUE");
             None
         }
     }
 
     pub fn push_history(&mut self, track: Track) {
         if self.history.len() >= MAX_HISTORY_SIZE {
-            self.history.remove(0);
+            self.history.pop_front();
         }
-        self.history.push(track);
+        self.history.push_back(track);
     }
 
     pub fn next_random(&mut self, bound: usize) -> usize {

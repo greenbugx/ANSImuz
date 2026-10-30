@@ -185,8 +185,7 @@ fn test_previous_track_rewinds_history_and_prepends_to_queue() {
     let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
 
     // History: [Song 1]. Currently playing: Song 2. Queue: [Song 3].
-    app.history
-        .push(make_test_track("Song 1", "Artist", "http://stream/1"));
+    app.push_history(make_test_track("Song 1", "Artist", "http://stream/1"));
     app.now_playing = Some(make_test_track("Song 2", "Artist", "http://stream/2"));
     app.enqueue(make_test_track("Song 3", "Artist", "http://stream/3"));
 
@@ -236,7 +235,7 @@ fn test_previous_track_preserves_selected_queue_entry_id() {
     // Queue:
     //   0. Track A
     //   1. Track B  <-- selected
-    app.history.push(make_test_track(
+    app.push_history(make_test_track(
         "Track Prev",
         "Artist",
         "http://stream/prev",
@@ -764,7 +763,7 @@ fn test_history_capped_at_maximum_size() {
     }
     assert_eq!(app.history.len(), ansimuz::app::MAX_HISTORY_SIZE);
     assert_eq!(app.history[0].title, "Song 10");
-    assert_eq!(app.history.last().unwrap().title, "Song 109");
+    assert_eq!(app.history.back().unwrap().title, "Song 109");
 }
 
 #[test]
