@@ -65,32 +65,32 @@ The codebase is organized into modular boundaries:
 ```
 ANSImuz/
 ├── src/
-│   ├── app/          # State management, keyboard event routing, and main loop
+│   ├── app/          # State management (queue, history, focus), key routing, runner
 │   ├── artwork/      # Image decoding, thumbnail cache, palette extraction, and renderer
 │   ├── config/       # Settings persistence and platform-aware cache paths
 │   ├── music/        # Track models, search interfaces, and lazy resolution
 │   ├── playback/     # MPV IPC process supervision, volume, and playback controls
 │   ├── terminal/     # Terminal raw mode setup and clean teardown
-│   ├── ui/           # Ratatui components, screens (player, settings, help, command palette), theme
+│   ├── ui/           # Ratatui components (queue_list, track_list), screens, theme
 │   ├── lib.rs        # Library interface for integration tests
 │   └── main.rs       # Minimal application entry point
 ├── backend/
 │   ├── bridge.py     # PyO3 integration boundary
 │   ├── artwork/      # Python thumbnail utilities and prewarming
 │   └── providers/    # Music provider implementations (ytmusic, spotify)
-├── tests/            # Integration test suites
+├── tests/            # Integration test suites (queue, queue_playback, resolution, artwork)
 └── .github/          # CI workflows
 ```
 
 ---
 
 ## Code Guidelines & Best Practices
-
 - **Non-blocking TUI**: Never block the main TUI rendering thread. Long-running tasks (such as network requests or stream resolutions) must execute asynchronously in background threads and communicate via channels.
+- **Queue & Playback Separation**: Search results (`app.tracks`) are strictly for track discovery. Playback sequencing (`Next`, `Previous`, `Shuffle`, `Repeat`) operates exclusively on the playback queue (`app.queue`) and session history (`app.history`), never cycling through search results.
+- **Queue Deduplication**: Use `app.enqueue()` or `app.queue_contains()` to prevent duplicate tracks from being added to the queue.
 - **Unicode Safety**: Never slice strings by raw byte offsets when displaying text in the TUI. Use character-based bounds or the project's `truncate` helper (`crate::ui::theme::truncate`) to prevent panics on multibyte characters.
 - **Style & Consistency**: Keep code formatting consistent. Avoid unnecessary abstractions or dead code.
 - **Comments**: Keep comments minimal and focused strictly on explaining non-obvious requirements.
-
 ---
 
 ## Validation Before Submitting
