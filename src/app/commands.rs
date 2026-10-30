@@ -183,6 +183,7 @@ pub const PANEL_KEYBINDS: &[(&str, &str)] = &[
     ("TAB", "FOCUS"),
     ("A", "QUEUE"),
     ("DEL", "REMOVE"),
+    ("ALT+↑↓", "REORDER"),
     ("X", "SHUFFLE"),
     ("R", "REPEAT"),
     (":", "COMMANDS"),
