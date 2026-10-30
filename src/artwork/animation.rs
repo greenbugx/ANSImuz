@@ -7,7 +7,7 @@ use std::{
 
 use image::DynamicImage;
 
-pub const TOTAL_FRAMES: usize = 50;
+pub const TOTAL_FRAMES: usize = 20;
 pub const FRAME_DURATION_MS: usize = 100; // 10 FPS
 
 static ANIM_START: LazyLock<Instant> = LazyLock::new(Instant::now);
