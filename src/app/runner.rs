@@ -206,6 +206,9 @@ pub fn refill_queue_from_repeat_all(app: &mut App) -> bool {
     for track in history {
         app.enqueue(track);
     }
+    if app.shuffle {
+        app.shuffle_queue();
+    }
     !app.queue.is_empty()
 }
 
@@ -216,14 +219,8 @@ pub fn play_next(
     resolve_tx: Sender<ResolveResponse>,
 ) -> bool {
     if !app.queue.is_empty() || refill_queue_from_repeat_all(app) {
-        let index = if app.shuffle && app.queue.len() > 1 {
-            app.next_random(app.queue.len())
-        } else {
-            0
-        };
-        return play_queue_item(app, player, player_tx, resolve_tx, index);
+        return play_queue_item(app, player, player_tx, resolve_tx, 0);
     }
-
     app.set_status("QUEUE IS EMPTY");
     false
 }
@@ -272,12 +269,7 @@ pub fn recover_queue_failure(
 ) -> bool {
     // If more queued items exist, try the next one
     if !app.queue.is_empty() {
-        let index = if app.shuffle && app.queue.len() > 1 {
-            app.next_random(app.queue.len())
-        } else {
-            0
-        };
-        return play_queue_item(app, player, player_tx, resolve_tx, index);
+        return play_queue_item(app, player, player_tx, resolve_tx, 0);
     }
 
     // If the previous track is still playing in the audio player, preserve it!
@@ -287,12 +279,7 @@ pub fn recover_queue_failure(
 
     // Otherwise (player is not playing), check Repeat::All to loop history
     if refill_queue_from_repeat_all(app) {
-        let index = if app.shuffle && app.queue.len() > 1 {
-            app.next_random(app.queue.len())
-        } else {
-            0
-        };
-        return play_queue_item(app, player, player_tx, resolve_tx, index);
+        return play_queue_item(app, player, player_tx, resolve_tx, 0);
     }
     // Idle/stopped: push any ended track to history and clear playback state
     if let Some(current) = app.now_playing.take() {
@@ -334,12 +321,7 @@ pub fn advance_playback(
     }
 
     if !app.queue.is_empty() || refill_queue_from_repeat_all(app) {
-        let index = if app.shuffle && app.queue.len() > 1 {
-            app.next_random(app.queue.len())
-        } else {
-            0
-        };
-        return play_queue_item(app, player, player_tx, resolve_tx, index);
+        return play_queue_item(app, player, player_tx, resolve_tx, 0);
     }
     if let Some(current) = app.now_playing.take() {
         app.history.push(current);

@@ -4,7 +4,7 @@ use ansimuz::app::{
     advance_playback, handle_resolve_response, handle_search_result, play_next, play_queue_item,
     play_search_result, play_track, state::App,
 };
-use ansimuz::music::{PlaybackSource, ResolveResponse, Track};
+use ansimuz::music::{PlaybackSource, ResolveResponse, SearchResult, Track};
 use ansimuz::playback::{AudioPlayer, PlayerEvent, Repeat};
 
 fn make_test_track(title: &str, artist: &str, stream: &str) -> Track {
@@ -674,4 +674,78 @@ fn test_failed_queue_resolution_preserves_currently_playing_track_when_player_ac
     assert!(player.is_playing());
     // Status reflects the resolve error
     assert!(app.status.contains("RESOLVE ERROR"));
+}
+
+#[test]
+fn test_shuffle_once_strategy_predictably_plays_head_of_queue() {
+    use ansimuz::app::commands::{Action, dispatch_action};
+
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (search_tx, _search_rx) = mpsc::channel::<SearchResult>();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    for i in 0..10 {
+        app.enqueue(make_test_track(
+            &format!("Track {i}"),
+            "Artist",
+            &format!("http://stream/{i}"),
+        ));
+    }
+    assert_eq!(app.queue.len(), 10);
+    assert_eq!(app.queue[0].track.title, "Track 0");
+
+    // Toggle shuffle ON: shuffles queue once
+    dispatch_action(
+        Action::ToggleShuffle,
+        &mut app,
+        &mut player,
+        &player_tx,
+        &search_tx,
+        &resolve_tx,
+    );
+    assert!(app.shuffle);
+    assert!(app.status.contains("SHUFFLE ON"));
+
+    // The top of the queue is visible to the user as index 0
+    let expected_first = app.queue[0].track.title.clone();
+    let expected_second = app.queue[1].track.title.clone();
+
+    // play_next() must deterministically play index 0 (what user sees at top of queue)
+    let next_ok = play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert!(next_ok);
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some(expected_first.as_str()),
+        "Shuffle-once must play visible top item (index 0) of queue"
+    );
+    assert_eq!(app.queue[0].track.title, expected_second);
+
+    // Next track plays the new index 0
+    let next_ok_2 = play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert!(next_ok_2);
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some(expected_second.as_str()),
+        "Subsequent play must continue consuming index 0"
+    );
+
+    // Toggle shuffle OFF: remaining queue order is preserved intact
+    let remaining_before: Vec<String> = app.queue.iter().map(|e| e.track.title.clone()).collect();
+    dispatch_action(
+        Action::ToggleShuffle,
+        &mut app,
+        &mut player,
+        &player_tx,
+        &search_tx,
+        &resolve_tx,
+    );
+    assert!(!app.shuffle);
+    assert!(app.status.contains("SHUFFLE OFF"));
+    let remaining_after: Vec<String> = app.queue.iter().map(|e| e.track.title.clone()).collect();
+    assert_eq!(
+        remaining_before, remaining_after,
+        "Disabling shuffle must leave queue intact"
+    );
 }
