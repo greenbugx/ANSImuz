@@ -128,8 +128,6 @@ pub fn handle_search_result(app: &mut App, query: String, result: Result<Vec<Tra
                 app.playing = None;
             }
 
-            // Synchronize resume position with the new list
-            app.search_resume_index = app.playing;
             app.selected = app.playing.unwrap_or(0);
 
             app.set_status(if count == 0 {
@@ -200,7 +198,7 @@ pub fn refill_queue_from_repeat_all(app: &mut App) -> bool {
         return false;
     }
     if let Some(current) = app.now_playing.take() {
-        app.history.push(current);
+        app.push_history(current);
     }
     let history = std::mem::take(&mut app.history);
     for track in history {
@@ -212,7 +210,7 @@ pub fn refill_queue_from_repeat_all(app: &mut App) -> bool {
     !app.queue.is_empty()
 }
 
-pub fn play_next(
+pub fn play_next_queued(
     app: &mut App,
     player: &mut AudioPlayer,
     player_tx: Sender<PlayerEvent>,
@@ -221,8 +219,21 @@ pub fn play_next(
     if !app.queue.is_empty() || refill_queue_from_repeat_all(app) {
         return play_queue_item(app, player, player_tx, resolve_tx, 0);
     }
-    app.set_status("QUEUE IS EMPTY");
     false
+}
+
+pub fn play_next(
+    app: &mut App,
+    player: &mut AudioPlayer,
+    player_tx: Sender<PlayerEvent>,
+    resolve_tx: Sender<ResolveResponse>,
+) -> bool {
+    if play_next_queued(app, player, player_tx, resolve_tx) {
+        true
+    } else {
+        app.set_status("QUEUE IS EMPTY");
+        false
+    }
 }
 
 pub fn play_previous(
@@ -278,12 +289,13 @@ pub fn recover_queue_failure(
     }
 
     // Otherwise (player is not playing), check Repeat::All to loop history
-    if refill_queue_from_repeat_all(app) {
-        return play_queue_item(app, player, player_tx, resolve_tx, 0);
+    if play_next_queued(app, player, player_tx, resolve_tx) {
+        return true;
     }
+
     // Idle/stopped: push any ended track to history and clear playback state
     if let Some(current) = app.now_playing.take() {
-        app.history.push(current);
+        app.push_history(current);
     }
     app.playing = None;
     app.paused = false;
@@ -320,11 +332,12 @@ pub fn advance_playback(
         return true;
     }
 
-    if !app.queue.is_empty() || refill_queue_from_repeat_all(app) {
-        return play_queue_item(app, player, player_tx, resolve_tx, 0);
+    if play_next_queued(app, player, player_tx, resolve_tx) {
+        return true;
     }
+
     if let Some(current) = app.now_playing.take() {
-        app.history.push(current);
+        app.push_history(current);
     }
     app.playing = None;
     app.paused = false;
@@ -413,7 +426,7 @@ pub fn start_playback(
             if let Some(old) = app.now_playing.take()
                 && (old.stream_url != track.stream_url || old.title != track.title)
             {
-                app.history.push(old);
+                app.push_history(old);
             }
             app.now_playing = Some(track.clone());
             app.paused = false;
@@ -423,7 +436,6 @@ pub fn start_playback(
             match source {
                 PlaybackSource::SearchResult { index } => {
                     app.playing = Some(index);
-                    app.search_resume_index = Some(index);
                     app.selected = index;
                 }
                 PlaybackSource::Queue { .. }

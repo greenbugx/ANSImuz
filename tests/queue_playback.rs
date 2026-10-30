@@ -751,3 +751,18 @@ fn test_shuffle_once_strategy_predictably_plays_head_of_queue() {
         "Disabling shuffle must leave queue intact"
     );
 }
+
+#[test]
+fn test_history_capped_at_maximum_size() {
+    let mut app = App::new();
+    for i in 0..110 {
+        app.push_history(make_test_track(
+            &format!("Song {i}"),
+            "Artist",
+            "http://stream",
+        ));
+    }
+    assert_eq!(app.history.len(), ansimuz::app::MAX_HISTORY_SIZE);
+    assert_eq!(app.history[0].title, "Song 10");
+    assert_eq!(app.history.last().unwrap().title, "Song 109");
+}

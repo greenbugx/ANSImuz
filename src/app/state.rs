@@ -1,5 +1,7 @@
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+pub const MAX_HISTORY_SIZE: usize = 100;
+
 use crate::config::Settings;
 use crate::music::Track;
 use crate::playback::Repeat;
@@ -54,7 +56,6 @@ pub struct App {
     pub queue: Vec<QueueEntry>,
     pub queue_selected: usize,
     pub next_queue_id: u64,
-    pub search_resume_index: Option<usize>,
     pub pending_queue_entry_id: Option<u64>,
     pub history: Vec<Track>,
 }
@@ -98,7 +99,6 @@ impl App {
             queue_selected: 0,
             next_queue_id: 1,
             history: Vec::new(),
-            search_resume_index: None,
             pending_queue_entry_id: None,
         }
     }
@@ -227,38 +227,11 @@ impl App {
         }
     }
 
-    pub fn next_index(&self, delta: isize) -> Option<usize> {
-        if self.tracks.is_empty() {
-            return None;
+    pub fn push_history(&mut self, track: Track) {
+        if self.history.len() >= MAX_HISTORY_SIZE {
+            self.history.remove(0);
         }
-
-        let len = self.tracks.len() as isize;
-        let base = self
-            .playing
-            .or(self.search_resume_index)
-            .unwrap_or(self.selected) as isize;
-        Some((base + delta).rem_euclid(len) as usize)
-    }
-
-    pub fn shuffled_next(&mut self) -> Option<usize> {
-        let len = self.tracks.len();
-        if len < 2 {
-            return None;
-        }
-
-        let current = self
-            .playing
-            .or(self.search_resume_index)
-            .unwrap_or(self.selected);
-        let after = len.saturating_sub(current + 1);
-
-        let index = if after > 0 {
-            current + 1 + self.next_random(after)
-        } else {
-            self.next_random(len)
-        };
-
-        Some(index)
+        self.history.push(track);
     }
 
     pub fn next_random(&mut self, bound: usize) -> usize {
@@ -273,13 +246,23 @@ impl App {
     }
 
     pub fn push_front_queue(&mut self, track: Track) -> u64 {
+        let selected_id = self.queue.get(self.queue_selected).map(|e| e.id);
         self.queue.retain(|entry| !entry.track.is_same(&track));
-        if !self.queue.is_empty() {
-            self.queue_selected += 1;
-        }
+
         let id = self.next_queue_id;
         self.next_queue_id = self.next_queue_id.wrapping_add(1);
         self.queue.insert(0, QueueEntry { id, track });
+
+        if let Some(sel_id) = selected_id {
+            if let Some(new_idx) = self.queue.iter().position(|e| e.id == sel_id) {
+                self.queue_selected = new_idx;
+            } else {
+                self.queue_selected = (self.queue_selected + 1).min(self.queue.len() - 1);
+            }
+        } else {
+            self.queue_selected = 0;
+        }
+
         id
     }
 

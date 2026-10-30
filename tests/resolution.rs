@@ -358,7 +358,6 @@ fn test_queue_track_resolution_plays_directly_without_touching_search_results() 
         make_resolved_track("sp_search", "Search Song", "Search Artist", "yt_search");
     app.tracks = vec![search_track.clone()];
     app.playing = Some(0);
-    app.search_resume_index = Some(0);
     app.now_playing = Some(search_track);
 
     // Enqueue an unresolved Spotify track
@@ -413,13 +412,6 @@ fn test_queue_track_resolution_plays_directly_without_touching_search_results() 
     assert_eq!(
         app.playing, None,
         "Queued track must have app.playing = None"
-    );
-
-    // search_resume_index is preserved for when queue drains
-    assert_eq!(
-        app.search_resume_index,
-        Some(0),
-        "search_resume_index must be preserved during queue playback"
     );
 }
 

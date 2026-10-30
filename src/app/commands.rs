@@ -57,7 +57,7 @@ pub const COMMANDS: &[CommandInfo] = &[
     CommandInfo {
         id: Action::PreviousTrack,
         name: "Previous Track",
-        description: "Go back to previous track in queue",
+        description: "Play previously played track",
         shortcut: "←",
         category: "Playback",
     },
@@ -196,7 +196,8 @@ pub const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
         "PLAYBACK",
         &[
             ("Space", "Play / Pause playback"),
-            ("← / →", "Previous / Next track"),
+            ("←", "Play previously played track"),
+            ("→", "Next track in queue"),
             ("X", "Toggle shuffle mode"),
             ("R", "Cycle repeat (Off / All / One)"),
             ("+ / -", "Volume up / down (±5%)"),
