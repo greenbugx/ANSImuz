@@ -192,34 +192,36 @@ pub fn play_queue_item(
     true
 }
 
+pub fn refill_queue_from_repeat_all(app: &mut App) -> bool {
+    if app.repeat != Repeat::All {
+        return false;
+    }
+    if app.history.is_empty() && app.now_playing.is_none() {
+        return false;
+    }
+    if let Some(current) = app.now_playing.take() {
+        app.history.push(current);
+    }
+    let history = std::mem::take(&mut app.history);
+    for track in history {
+        app.enqueue(track);
+    }
+    !app.queue.is_empty()
+}
+
 pub fn play_next(
     app: &mut App,
     player: &mut AudioPlayer,
     player_tx: Sender<PlayerEvent>,
     resolve_tx: Sender<ResolveResponse>,
 ) -> bool {
-    if !app.queue.is_empty() {
+    if !app.queue.is_empty() || refill_queue_from_repeat_all(app) {
         let index = if app.shuffle && app.queue.len() > 1 {
             app.next_random(app.queue.len())
         } else {
             0
         };
         return play_queue_item(app, player, player_tx, resolve_tx, index);
-    }
-
-    if app.repeat == Repeat::All && (!app.history.is_empty() || app.now_playing.is_some()) {
-        let history = std::mem::take(&mut app.history);
-        for track in history {
-            app.enqueue(track);
-        }
-        if !app.queue.is_empty() {
-            let index = if app.shuffle && app.queue.len() > 1 {
-                app.next_random(app.queue.len())
-            } else {
-                0
-            };
-            return play_queue_item(app, player, player_tx, resolve_tx, index);
-        }
     }
 
     app.set_status("QUEUE IS EMPTY");
@@ -284,24 +286,14 @@ pub fn recover_queue_failure(
     }
 
     // Otherwise (player is not playing), check Repeat::All to loop history
-    if app.repeat == Repeat::All && (!app.history.is_empty() || app.now_playing.is_some()) {
-        if let Some(current) = app.now_playing.take() {
-            app.history.push(current);
-        }
-        let history = std::mem::take(&mut app.history);
-        for track in history {
-            app.enqueue(track);
-        }
-        if !app.queue.is_empty() {
-            let index = if app.shuffle && app.queue.len() > 1 {
-                app.next_random(app.queue.len())
-            } else {
-                0
-            };
-            return play_queue_item(app, player, player_tx, resolve_tx, index);
-        }
+    if refill_queue_from_repeat_all(app) {
+        let index = if app.shuffle && app.queue.len() > 1 {
+            app.next_random(app.queue.len())
+        } else {
+            0
+        };
+        return play_queue_item(app, player, player_tx, resolve_tx, index);
     }
-
     // Idle/stopped: push any ended track to history and clear playback state
     if let Some(current) = app.now_playing.take() {
         app.history.push(current);
@@ -341,7 +333,7 @@ pub fn advance_playback(
         return true;
     }
 
-    if !app.queue.is_empty() {
+    if !app.queue.is_empty() || refill_queue_from_repeat_all(app) {
         let index = if app.shuffle && app.queue.len() > 1 {
             app.next_random(app.queue.len())
         } else {
@@ -349,25 +341,6 @@ pub fn advance_playback(
         };
         return play_queue_item(app, player, player_tx, resolve_tx, index);
     }
-
-    if app.repeat == Repeat::All && (!app.history.is_empty() || app.now_playing.is_some()) {
-        if let Some(current) = app.now_playing.take() {
-            app.history.push(current);
-        }
-        let history = std::mem::take(&mut app.history);
-        for track in history {
-            app.enqueue(track);
-        }
-        if !app.queue.is_empty() {
-            let index = if app.shuffle && app.queue.len() > 1 {
-                app.next_random(app.queue.len())
-            } else {
-                0
-            };
-            return play_queue_item(app, player, player_tx, resolve_tx, index);
-        }
-    }
-
     if let Some(current) = app.now_playing.take() {
         app.history.push(current);
     }

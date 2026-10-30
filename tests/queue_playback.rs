@@ -515,6 +515,50 @@ fn test_repeat_all_loops_session_history_when_queue_exhausted() {
 }
 
 #[test]
+fn test_repeat_all_single_track_manual_next() {
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    // Single song played directly from search:
+    // Now playing: Song A
+    // History: []
+    // Queue: []
+    // Repeat: All
+    app.repeat = Repeat::All;
+    let song_a = make_test_track("Song A", "Artist", "http://stream/a");
+    app.tracks = vec![song_a.clone()];
+    play_search_result(
+        &mut app,
+        &mut player,
+        player_tx.clone(),
+        resolve_tx.clone(),
+        0,
+    );
+
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Song A")
+    );
+    assert!(app.queue.is_empty());
+    assert!(app.history.is_empty());
+
+    // Press Next: must replay Song A and NOT report QUEUE IS EMPTY!
+    let next_ok = play_next(&mut app, &mut player, player_tx, resolve_tx);
+    assert!(
+        next_ok,
+        "play_next on Repeat::All with single track must succeed"
+    );
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Song A"),
+        "Song A must replay under Repeat::All"
+    );
+    assert!(!app.status.contains("QUEUE IS EMPTY"));
+}
+
+#[test]
 fn test_new_search_does_not_affect_active_queue_playback() {
     let mut app = App::new();
     let mut player = AudioPlayer::new_mock();
