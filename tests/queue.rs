@@ -1,5 +1,10 @@
-use ansimuz::app::App;
-use ansimuz::music::Track;
+use std::sync::mpsc;
+
+use ansimuz::app::events::handle_key;
+use ansimuz::app::{App, ListFocus, Mode};
+use ansimuz::music::{ResolveResponse, SearchResult, Track};
+use ansimuz::playback::{AudioPlayer, PlayerEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
 fn test_track(title: &str, artist: &str) -> Track {
     Track {
@@ -124,4 +129,184 @@ fn test_removing_or_consuming_entries_keeps_queue_selected_bounded() {
 
     assert!(app.pop_next_queued().is_none());
     assert_eq!(app.queue_selected, 0);
+}
+
+#[test]
+fn test_focus_switching_preserves_selections() {
+    let mut app = App::new();
+    app.tracks = vec![test_track("S0", "A"), test_track("S1", "A")];
+    app.enqueue(test_track("Q0", "A"));
+    app.enqueue(test_track("Q1", "A"));
+
+    assert_eq!(app.list_focus, ListFocus::Search);
+    app.selected = 1;
+    app.queue_selected = 0;
+
+    app.toggle_focus();
+    assert_eq!(app.list_focus, ListFocus::Queue);
+    assert_eq!(app.selected, 1, "Search selection must be preserved");
+    assert_eq!(app.queue_selected, 0, "Queue selection must be preserved");
+
+    app.move_queue_selection(1);
+    assert_eq!(app.queue_selected, 1);
+
+    app.toggle_focus();
+    assert_eq!(app.list_focus, ListFocus::Search);
+    assert_eq!(app.selected, 1);
+    assert_eq!(app.queue_selected, 1);
+}
+
+#[test]
+fn test_focus_aware_keyboard_navigation_and_controls() {
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (search_tx, _search_rx) = mpsc::channel::<SearchResult>();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    let make_key = |code: KeyCode, modifiers: KeyModifiers| KeyEvent {
+        code,
+        modifiers,
+        kind: KeyEventKind::Press,
+        state: KeyEventState::empty(),
+    };
+
+    app.tracks = vec![test_track("Search 0", "A"), test_track("Search 1", "A")];
+
+    // In Mode::Type, letter 'a' types into search input, does not enqueue
+    app.mode = Mode::Type;
+    handle_key(
+        &mut app,
+        &mut player,
+        make_key(KeyCode::Char('a'), KeyModifiers::empty()),
+        &search_tx,
+        &player_tx,
+        &resolve_tx,
+    );
+    assert_eq!(app.query, "a");
+    assert!(
+        app.queue.is_empty(),
+        "'a' in Mode::Type must type, not enqueue"
+    );
+
+    // Switch to Mode::Nav
+    app.mode = Mode::Nav;
+    app.selected = 0;
+
+    // In Mode::Nav with Search focus, 'A' enqueues highlighted search result
+    handle_key(
+        &mut app,
+        &mut player,
+        make_key(KeyCode::Char('a'), KeyModifiers::empty()),
+        &search_tx,
+        &player_tx,
+        &resolve_tx,
+    );
+    assert_eq!(app.queue.len(), 1);
+    assert_eq!(app.queue[0].track.title, "Search 0");
+
+    // Down to select Search 1 and enqueue it too
+    handle_key(
+        &mut app,
+        &mut player,
+        make_key(KeyCode::Down, KeyModifiers::empty()),
+        &search_tx,
+        &player_tx,
+        &resolve_tx,
+    );
+    assert_eq!(app.selected, 1);
+
+    handle_key(
+        &mut app,
+        &mut player,
+        make_key(KeyCode::Char('a'), KeyModifiers::empty()),
+        &search_tx,
+        &player_tx,
+        &resolve_tx,
+    );
+    assert_eq!(app.queue.len(), 2);
+    assert_eq!(app.queue[1].track.title, "Search 1");
+
+    // Tab switches focus to Queue
+    handle_key(
+        &mut app,
+        &mut player,
+        make_key(KeyCode::Tab, KeyModifiers::empty()),
+        &search_tx,
+        &player_tx,
+        &resolve_tx,
+    );
+    assert_eq!(app.list_focus, ListFocus::Queue);
+
+    // 'A' while Queue is focused does NOT enqueue search result
+    handle_key(
+        &mut app,
+        &mut player,
+        make_key(KeyCode::Char('a'), KeyModifiers::empty()),
+        &search_tx,
+        &player_tx,
+        &resolve_tx,
+    );
+    assert_eq!(
+        app.queue.len(),
+        2,
+        "'a' while Queue is focused must not enqueue"
+    );
+
+    // Down while Queue is focused moves queue_selected
+    assert_eq!(app.queue_selected, 0);
+    handle_key(
+        &mut app,
+        &mut player,
+        make_key(KeyCode::Down, KeyModifiers::empty()),
+        &search_tx,
+        &player_tx,
+        &resolve_tx,
+    );
+    assert_eq!(app.queue_selected, 1);
+    assert_eq!(app.selected, 1, "Search selected remains unchanged");
+
+    // Alt+Up moves the selected queue item (Search 1 moves from 1 to 0)
+    handle_key(
+        &mut app,
+        &mut player,
+        make_key(KeyCode::Up, KeyModifiers::ALT),
+        &search_tx,
+        &player_tx,
+        &resolve_tx,
+    );
+    assert_eq!(app.queue[0].track.title, "Search 1");
+    assert_eq!(app.queue[1].track.title, "Search 0");
+    assert_eq!(
+        app.queue_selected, 0,
+        "queue_selected follows the moved item"
+    );
+
+    // Delete removes highlighted queue item (Search 1 at index 0)
+    handle_key(
+        &mut app,
+        &mut player,
+        make_key(KeyCode::Delete, KeyModifiers::empty()),
+        &search_tx,
+        &player_tx,
+        &resolve_tx,
+    );
+    assert_eq!(app.queue.len(), 1);
+    assert_eq!(app.queue[0].track.title, "Search 0");
+
+    // Enter plays highlighted queue item
+    handle_key(
+        &mut app,
+        &mut player,
+        make_key(KeyCode::Enter, KeyModifiers::empty()),
+        &search_tx,
+        &player_tx,
+        &resolve_tx,
+    );
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Search 0")
+    );
+    assert_eq!(app.queue.len(), 0, "Queue item consumed on play");
+    assert_eq!(app.playing, None, "Queue playback has playing = None");
 }

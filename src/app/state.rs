@@ -10,6 +10,12 @@ pub enum Mode {
     Nav,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListFocus {
+    Search,
+    Queue,
+}
+
 #[derive(Clone, Debug)]
 pub struct QueueEntry {
     pub id: u64,
@@ -18,6 +24,7 @@ pub struct QueueEntry {
 
 pub struct App {
     pub mode: Mode,
+    pub list_focus: ListFocus,
     pub query: String,
     pub last_query: String,
     pub tracks: Vec<Track>,
@@ -55,6 +62,7 @@ impl App {
     pub fn new() -> Self {
         Self {
             mode: Mode::Nav,
+            list_focus: ListFocus::Search,
             query: String::new(),
             last_query: String::new(),
             tracks: Vec::new(),
@@ -160,6 +168,53 @@ impl App {
 
         let len = self.tracks.len() as isize;
         self.selected = (self.selected as isize + delta).rem_euclid(len) as usize;
+    }
+
+    pub fn toggle_focus(&mut self) {
+        self.list_focus = match self.list_focus {
+            ListFocus::Search => ListFocus::Queue,
+            ListFocus::Queue => ListFocus::Search,
+        };
+    }
+
+    pub fn move_queue_selection(&mut self, delta: isize) {
+        if self.queue.is_empty() {
+            self.queue_selected = 0;
+            return;
+        }
+
+        let len = self.queue.len() as isize;
+        self.queue_selected = (self.queue_selected as isize + delta).rem_euclid(len) as usize;
+    }
+
+    pub fn move_selected_queue_item(&mut self, delta: isize) -> bool {
+        if self.queue.is_empty() {
+            return false;
+        }
+        let current = self.queue_selected;
+        let target = if delta < 0 {
+            if current == 0 {
+                return false;
+            }
+            current - 1
+        } else {
+            if current + 1 >= self.queue.len() {
+                return false;
+            }
+            current + 1
+        };
+        self.move_queue_item(current, target)
+    }
+
+    pub fn enqueue_selected(&mut self) -> Option<u64> {
+        if let Some(track) = self.tracks.get(self.selected).cloned() {
+            let title = track.title.clone();
+            let id = self.enqueue(track);
+            self.set_status(format!("QUEUED: {}", title));
+            Some(id)
+        } else {
+            None
+        }
     }
 
     pub fn next_index(&self, delta: isize) -> Option<usize> {
