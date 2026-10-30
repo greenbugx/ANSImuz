@@ -24,6 +24,7 @@ pub struct AudioPlayer {
     dumping: Arc<Mutex<HashSet<String>>>,
     is_mock: bool,
     mock_playing: bool,
+    mock_fail: bool,
 }
 
 impl AudioPlayer {
@@ -40,6 +41,7 @@ impl AudioPlayer {
             dumping: Arc::new(Mutex::new(HashSet::new())),
             is_mock: false,
             mock_playing: false,
+            mock_fail: false,
         }
     }
 
@@ -53,7 +55,12 @@ impl AudioPlayer {
             dumping: Arc::new(Mutex::new(HashSet::new())),
             is_mock: true,
             mock_playing: false,
+            mock_fail: false,
         }
+    }
+
+    pub fn set_mock_fail(&mut self, fail: bool) {
+        self.mock_fail = fail;
     }
 
     pub fn cached_audio(url: &str) -> Option<PathBuf> {
@@ -133,6 +140,11 @@ impl AudioPlayer {
             self.last_error = None;
             self.paused = false;
             self.generation += 1;
+            if self.mock_fail {
+                self.mock_playing = false;
+                self.last_error = Some("Failed to launch mpv: process failed to start".into());
+                return Err("Failed to launch mpv: process failed to start".into());
+            }
             self.mock_playing = true;
             return Ok(());
         }

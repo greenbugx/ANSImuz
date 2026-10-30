@@ -148,9 +148,9 @@ pub fn play_search_result(
     player_tx: Sender<PlayerEvent>,
     resolve_tx: Sender<ResolveResponse>,
     index: usize,
-) {
+) -> bool {
     let Some(mut track) = app.tracks.get(index).cloned() else {
-        return;
+        return false;
     };
 
     if let Some(cached) = crate::music::get_cached_track(&track) {
@@ -166,7 +166,7 @@ pub fn play_search_result(
         resolve_tx,
         track,
         PlaybackSource::SearchResult { index },
-    );
+    )
 }
 
 pub fn play_queue_item(
@@ -186,8 +186,7 @@ pub fn play_queue_item(
         resolve_tx,
         entry.track,
         PlaybackSource::Queue { entry_id: entry.id },
-    );
-    true
+    )
 }
 
 pub fn refill_queue_from_repeat_all(app: &mut App) -> bool {
@@ -228,12 +227,12 @@ pub fn play_next(
     player_tx: Sender<PlayerEvent>,
     resolve_tx: Sender<ResolveResponse>,
 ) -> bool {
-    if play_next_queued(app, player, player_tx, resolve_tx) {
-        true
-    } else {
+    if app.queue.is_empty() && !refill_queue_from_repeat_all(app) {
         app.set_status("QUEUE IS EMPTY");
-        false
+        return false;
     }
+
+    play_queue_item(app, player, player_tx, resolve_tx, 0)
 }
 
 pub fn play_previous(
@@ -350,7 +349,7 @@ pub fn play_track(
     resolve_tx: Sender<ResolveResponse>,
     mut track: Track,
     source: PlaybackSource,
-) {
+) -> bool {
     if let Some(cached) = crate::music::get_cached_track(&track) {
         track = cached.clone();
         if let PlaybackSource::SearchResult { index } = source
@@ -395,15 +394,20 @@ pub fn play_track(
                 result,
             });
         });
-        return;
+        return true;
     }
 
     app.cancel_pending_resolution();
-    if let Err(error) = start_playback(app, player, player_tx.clone(), track, source)
-        && let PlaybackSource::Queue { .. } = source
-    {
-        app.set_status(format!("PLAYER ERROR: {error}"));
-        recover_queue_failure(app, player, player_tx, resolve_tx);
+    match start_playback(app, player, player_tx.clone(), track, source) {
+        Ok(()) => true,
+        Err(error) => {
+            if let PlaybackSource::Queue { .. } = source {
+                app.set_status(format!("PLAYER ERROR: {error}"));
+                recover_queue_failure(app, player, player_tx, resolve_tx)
+            } else {
+                false
+            }
+        }
     }
 }
 
@@ -458,6 +462,11 @@ pub fn start_playback(
             Ok(())
         }
         Err(error) => {
+            if let Some(old) = app.now_playing.take()
+                && (old.stream_url != track.stream_url || old.title != track.title)
+            {
+                app.push_history(old);
+            }
             app.playing = None;
             app.now_playing = None;
             app.set_status(format!("PLAYER ERROR: {}", error));

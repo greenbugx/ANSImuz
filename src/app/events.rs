@@ -171,13 +171,15 @@ pub fn handle_key(
                     ListFocus::Queue => app.move_queue_selection(1),
                 },
                 KeyCode::Enter => match app.list_focus {
-                    ListFocus::Search => play_search_result(
-                        app,
-                        player,
-                        player_tx.clone(),
-                        resolve_tx.clone(),
-                        app.selected,
-                    ),
+                    ListFocus::Search => {
+                        play_search_result(
+                            app,
+                            player,
+                            player_tx.clone(),
+                            resolve_tx.clone(),
+                            app.selected,
+                        );
+                    }
                     ListFocus::Queue => {
                         if !app.queue.is_empty() {
                             play_queue_item(

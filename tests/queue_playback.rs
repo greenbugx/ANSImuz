@@ -766,3 +766,64 @@ fn test_history_capped_at_maximum_size() {
     assert_eq!(app.history[0].title, "Song 10");
     assert_eq!(app.history.last().unwrap().title, "Song 109");
 }
+
+#[test]
+fn test_mpv_startup_failure_preserves_previous_track_in_history() {
+    use ansimuz::app::play_previous;
+
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    // Song A is currently playing
+    let song_a = make_test_track("Song A", "Artist", "http://stream/a");
+    play_track(
+        &mut app,
+        &mut player,
+        player_tx.clone(),
+        resolve_tx.clone(),
+        song_a,
+        PlaybackSource::SearchResult { index: 0 },
+    );
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Song A")
+    );
+    assert!(player.is_playing());
+    assert!(app.history.is_empty());
+
+    // Queue has Song B
+    let song_b = make_test_track("Song B", "Artist", "http://stream/b");
+    app.enqueue(song_b);
+
+    // Configure mock player to fail on next launch (simulate MPV spawn failure)
+    player.set_mock_fail(true);
+
+    // Press Next to play queued Song B
+    let next_ok = play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert!(!next_ok, "play_next must fail when MPV startup fails");
+
+    // Song A must have been preserved into history when MPV stopped it during failed launch!
+    assert_eq!(
+        app.history.len(),
+        1,
+        "Song A must be preserved in history on MPV startup failure"
+    );
+    assert_eq!(app.history[0].title, "Song A");
+    assert!(app.now_playing.is_none());
+    assert!(!player.is_playing());
+    assert!(app.status.contains("PLAYER ERROR"));
+
+    // User presses Previous Track: Song A can be recovered from history!
+    player.set_mock_fail(false); // Restore normal MPV startup
+    let prev_ok = play_previous(&mut app, &mut player, player_tx, resolve_tx);
+    assert!(
+        prev_ok,
+        "Previous Track must be able to restore Song A from history"
+    );
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Song A")
+    );
+}
