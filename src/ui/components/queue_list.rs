@@ -21,10 +21,29 @@ pub fn render_queue_list(
     }
 
     if queue.is_empty() {
-        let lines = if area.height >= 3 && area.width >= 16 {
+        let lines = if area.height >= 4 && area.width >= 16 {
+            if is_focused {
+                vec![
+                    Line::from("Queue is empty").centered().style(theme.dim),
+                    Line::from("Tab → Search").centered().style(theme.dim),
+                    Line::from("A → Add to queue").centered().style(theme.dim),
+                ]
+            } else {
+                vec![
+                    Line::from("Queue is empty").centered().style(theme.dim),
+                    Line::from("Press 'A' to add").centered().style(theme.dim),
+                ]
+            }
+        } else if area.height >= 3 && area.width >= 16 {
             vec![
                 Line::from("Queue is empty").centered().style(theme.dim),
-                Line::from("Press 'A' to add").centered().style(theme.dim),
+                Line::from(if is_focused {
+                    "Tab → Search | A → Add"
+                } else {
+                    "Press 'A' to add"
+                })
+                .centered()
+                .style(theme.dim),
             ]
         } else if area.width >= 14 {
             vec![Line::from("Queue is empty").centered().style(theme.dim)]
