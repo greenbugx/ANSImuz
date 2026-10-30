@@ -2,14 +2,15 @@ use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph},
 };
 
-use crate::app::{App, Mode};
+use crate::app::{App, ListFocus, Mode};
 use crate::ui::components::{
     controls::render_controls,
     logo::{bitmap_lines, logo_bitmap, scale_bitmap},
     progress::render_progress_bar,
+    queue_list::render_queue_list,
     search_box::render_search_box,
     track_list::render_track_list,
     volume_timer::render_volume_timer,
@@ -228,12 +229,21 @@ pub fn render_player(
         )
     };
 
+    let is_search_focused = app.list_focus == ListFocus::Search;
     let search_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(theme.primary)
+        .border_style(if is_search_focused {
+            theme.bold_primary
+        } else {
+            theme.dim
+        })
         .title(Line::from(vec![Span::styled(
             search_title,
-            theme.bold_primary,
+            if is_search_focused {
+                theme.bold_primary
+            } else {
+                theme.primary
+            },
         )]));
     let search_inner = search_block.inner(layout.search_area);
     frame.render_widget(search_block, layout.search_area);
@@ -392,39 +402,44 @@ pub fn render_player(
     // RIGHT SECTION: Queue
     // only rendered when wide enough for 3-panel layout
     if layout.col_queue.width >= 8 {
-        // TODO: add a persistent playback queue
-        let queue_title = if layout.col_queue.width >= 10 {
-            " QUEUE "
+        let count = app.queue.len();
+        let queue_title = if layout.col_queue.width >= 16 {
+            format!(" UP NEXT ({count}) ")
+        } else if layout.col_queue.width >= 10 {
+            format!(" Q ({count}) ")
         } else {
-            " Q "
+            " Q ".to_string()
+        };
+
+        let is_queue_focused = app.list_focus == ListFocus::Queue;
+        let queue_border_style = if is_queue_focused {
+            theme.bold_primary
+        } else {
+            theme.dim
+        };
+        let queue_title_style = if is_queue_focused {
+            theme.bold_primary
+        } else {
+            theme.primary
         };
 
         let queue_block = Block::default()
             .borders(Borders::ALL)
-            .border_style(theme.primary)
+            .border_style(queue_border_style)
             .title(Line::from(vec![Span::styled(
                 queue_title,
-                theme.bold_primary,
+                queue_title_style,
             )]));
         let queue_inner = queue_block.inner(layout.col_queue);
         frame.render_widget(queue_block, layout.col_queue);
 
-        let placeholder = if queue_inner.width >= 24 {
-            "Yet to be in service :)"
-        } else if queue_inner.width >= 16 {
-            "Coming soon :)"
-        } else if queue_inner.width >= 9 {
-            "Soon :)"
-        } else {
-            ":)"
-        };
-
-        frame.render_widget(
-            Paragraph::new(placeholder)
-                .style(theme.dim)
-                .alignment(Alignment::Center)
-                .wrap(Wrap { trim: true }),
+        render_queue_list(
+            frame,
             queue_inner,
+            &app.queue,
+            app.queue_selected,
+            is_queue_focused,
+            theme,
         );
     }
 }
@@ -693,34 +708,113 @@ mod tests {
             let title_row = (layout.col_queue.x..layout.col_queue.x + layout.col_queue.width)
                 .map(|x| buffer[(x, layout.col_queue.y)].symbol())
                 .collect::<String>();
-            if layout.col_queue.width >= 10 {
+            if layout.col_queue.width >= 16 {
                 assert!(
-                    title_row.contains("QUEUE"),
-                    "Must contain QUEUE title at width {width}"
+                    title_row.contains("UP NEXT (0)"),
+                    "Must contain UP NEXT (0) title at width {width}, got {title_row}"
+                );
+            } else if layout.col_queue.width >= 10 {
+                assert!(
+                    title_row.contains("Q (0)"),
+                    "Must contain Q (0) title at width {width}, got {title_row}"
                 );
             } else {
                 assert!(
                     title_row.contains("Q"),
-                    "Must contain Q title at width {width}"
+                    "Must contain Q title at width {width}, got {title_row}"
                 );
             }
 
-            // Check that the inner text contains the smiley without clipping
-            let mut found_smiley = false;
+            // Check that the empty state is rendered
+            let mut found_empty = false;
             for y in layout.col_queue.y + 1..layout.col_queue.y + layout.col_queue.height - 1 {
                 let row_str = (layout.col_queue.x + 1
                     ..layout.col_queue.x + layout.col_queue.width - 1)
                     .map(|x| buffer[(x, y)].symbol())
                     .collect::<String>();
-                if row_str.contains(":)") {
-                    found_smiley = true;
+                if row_str.contains("empty") || row_str.contains("Empty") {
+                    found_empty = true;
                     break;
                 }
             }
             assert!(
-                found_smiley,
-                "Queue placeholder must contain unclipped smiley at width {width}"
+                found_empty,
+                "Queue empty state must render at width {width}"
             );
         }
+    }
+
+    #[test]
+    fn test_render_player_queue_with_items_and_focus() {
+        use crate::music::Track;
+
+        let mut app = App::new();
+        let theme = Theme::new(None);
+        app.enqueue(Track {
+            title: "First Queue Song".into(),
+            artist: "Queue Artist".into(),
+            stream_url: "http://stream/1".into(),
+            art_url: "".into(),
+            spotify_id: None,
+            artists: vec!["Queue Artist".into()],
+            album: None,
+            duration_ms: None,
+        });
+        app.enqueue(Track {
+            title: "Second Queue Song".into(),
+            artist: "Queue Artist 2".into(),
+            stream_url: "http://stream/2".into(),
+            art_url: "".into(),
+            spotify_id: None,
+            artists: vec!["Queue Artist 2".into()],
+            album: None,
+            duration_ms: None,
+        });
+        app.list_focus = ListFocus::Queue;
+
+        let area = Rect::new(0, 0, 140, 30);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                render_player(frame, area, &app, None, &theme);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let layout = layout_player(area);
+
+        // Title must show live count
+        let title_row = (layout.col_queue.x..layout.col_queue.x + layout.col_queue.width)
+            .map(|x| buffer[(x, layout.col_queue.y)].symbol())
+            .collect::<String>();
+        assert!(
+            title_row.contains("UP NEXT (2)"),
+            "Title must show live count UP NEXT (2), got {title_row}"
+        );
+
+        // Inner rows must contain position numbers and track titles
+        let mut found_first = false;
+        let mut found_second = false;
+        for y in layout.col_queue.y + 1..layout.col_queue.y + layout.col_queue.height - 1 {
+            let row_str = (layout.col_queue.x + 1..layout.col_queue.x + layout.col_queue.width - 1)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>();
+            if row_str.contains("1.") && row_str.contains("FIRST QUEUE") {
+                found_first = true;
+            }
+            if row_str.contains("2.") && row_str.contains("SECOND QUEUE") {
+                found_second = true;
+            }
+        }
+        assert!(
+            found_first,
+            "Queue list must render first queued track with position"
+        );
+        assert!(
+            found_second,
+            "Queue list must render second queued track with position"
+        );
     }
 }
