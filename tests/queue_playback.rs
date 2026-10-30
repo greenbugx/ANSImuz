@@ -98,7 +98,7 @@ fn test_automatic_advance_queue_priority_and_exhaustion() {
     app.enqueue(make_test_track("Q1", "Artist", "http://stream/q1"));
     assert_eq!(app.queue.len(), 2);
 
-    // Track 1 ends: queue priority plays Q0
+    // Search 0 ends: queue priority plays Q0, Search 0 pushed to history
     let adv1 = advance_playback(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
     assert!(adv1);
     assert_eq!(
@@ -106,8 +106,10 @@ fn test_automatic_advance_queue_priority_and_exhaustion() {
         Some("Q0")
     );
     assert_eq!(app.queue.len(), 1);
+    assert_eq!(app.history.len(), 1);
+    assert_eq!(app.history[0].title, "Search 0");
 
-    // Q0 ends: queue priority plays Q1
+    // Q0 ends: queue priority plays Q1, Q0 pushed to history
     let adv2 = advance_playback(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
     assert!(adv2);
     assert_eq!(
@@ -115,15 +117,18 @@ fn test_automatic_advance_queue_priority_and_exhaustion() {
         Some("Q1")
     );
     assert_eq!(app.queue.len(), 0);
+    assert_eq!(app.history.len(), 2);
+    assert_eq!(app.history[1].title, "Q0");
 
-    // Q1 ends: queue is exhausted, resumes search sequence at Search 1!
+    // Q1 ends: queue is exhausted. MUST NOT play Search 1! Playback ends cleanly.
     let adv3 = advance_playback(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
-    assert!(adv3);
-    assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
-        Some("Search 1")
+    assert!(
+        !adv3,
+        "Playback must end when queue exhausts without Repeat::All"
     );
-    assert_eq!(app.playing, Some(1));
+    assert!(app.now_playing.is_none());
+    assert_eq!(app.history.len(), 3);
+    assert_eq!(app.history[2].title, "Q1");
 }
 
 #[test]
@@ -171,74 +176,100 @@ fn test_repeat_one_overrides_queue_advance() {
 }
 
 #[test]
-fn test_resuming_search_sequence_after_queue_drains() {
+fn test_previous_track_rewinds_history_and_prepends_to_queue() {
+    use ansimuz::app::play_previous;
+
     let mut app = App::new();
     let mut player = AudioPlayer::new_mock();
     let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
     let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
 
-    // Search results: [A, B, C]
+    // History: [Song 1]. Currently playing: Song 2. Queue: [Song 3].
+    app.history
+        .push(make_test_track("Song 1", "Artist", "http://stream/1"));
+    app.now_playing = Some(make_test_track("Song 2", "Artist", "http://stream/2"));
+    app.enqueue(make_test_track("Song 3", "Artist", "http://stream/3"));
+
+    assert_eq!(app.history.len(), 1);
+    assert_eq!(app.queue.len(), 1);
+
+    // User presses Previous
+    let prev_ok = play_previous(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert!(prev_ok);
+
+    // Song 1 must be playing now!
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Song 1")
+    );
+    assert_eq!(app.history.len(), 0);
+
+    // Song 2 must be prepended to the front of the queue, in front of Song 3!
+    assert_eq!(app.queue.len(), 2);
+    assert_eq!(app.queue[0].track.title, "Song 2");
+    assert_eq!(app.queue[1].track.title, "Song 3");
+
+    // Now user presses Next: Song 1 goes to history, Song 2 is played!
+    let next_ok = play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert!(next_ok);
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Song 2")
+    );
+    assert_eq!(app.history.len(), 1);
+    assert_eq!(app.history[0].title, "Song 1");
+    assert_eq!(app.queue.len(), 1);
+    assert_eq!(app.queue[0].track.title, "Song 3");
+}
+
+#[test]
+fn test_next_and_previous_do_not_operate_on_search_results() {
+    use ansimuz::app::play_previous;
+
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    // Search results: [S0, S1, S2]
     app.tracks = vec![
-        make_test_track("A", "Artist", "http://stream/a"),
-        make_test_track("B", "Artist", "http://stream/b"),
-        make_test_track("C", "Artist", "http://stream/c"),
+        make_test_track("S0", "Artist", "http://stream/s0"),
+        make_test_track("S1", "Artist", "http://stream/s1"),
+        make_test_track("S2", "Artist", "http://stream/s2"),
     ];
 
-    // User plays A
+    // Play S1 directly from search
     play_search_result(
         &mut app,
         &mut player,
         player_tx.clone(),
         resolve_tx.clone(),
-        0,
+        1,
     );
-    assert_eq!(app.search_resume_index, Some(0));
-
-    // User enqueues X, Y
-    app.enqueue(make_test_track("X", "Artist", "http://stream/x"));
-    app.enqueue(make_test_track("Y", "Artist", "http://stream/y"));
-
-    // A finishes -> X plays
-    advance_playback(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
     assert_eq!(
         app.now_playing.as_ref().map(|t| t.title.as_str()),
-        Some("X")
+        Some("S1")
     );
-    assert_eq!(
-        app.search_resume_index,
-        Some(0),
-        "search_resume_index must stay 0"
-    );
+    assert!(app.queue.is_empty());
+    assert!(app.history.is_empty());
 
-    // X finishes -> Y plays
-    advance_playback(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    // Pressing Next with empty queue MUST NOT play S2 from search results!
+    let next_result = play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert!(!next_result);
+    assert!(app.status.contains("QUEUE IS EMPTY"));
     assert_eq!(
         app.now_playing.as_ref().map(|t| t.title.as_str()),
-        Some("Y")
-    );
-    assert_eq!(
-        app.search_resume_index,
-        Some(0),
-        "search_resume_index must stay 0"
+        Some("S1")
     );
 
-    // Y finishes -> queue is empty! Search resumes at B (0 + 1)
-    advance_playback(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    // Pressing Previouswith empty history MUST NOT play S0 from search results!
+    let prev_result = play_previous(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert!(prev_result);
+    assert!(app.status.contains("REPLAYING TRACK"));
     assert_eq!(
         app.now_playing.as_ref().map(|t| t.title.as_str()),
-        Some("B")
+        Some("S1")
     );
-    assert_eq!(app.playing, Some(1));
-    assert_eq!(app.search_resume_index, Some(1));
-
-    // B finishes -> advances to C (1 + 1)
-    advance_playback(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
-    assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
-        Some("C")
-    );
-    assert_eq!(app.playing, Some(2));
-    assert_eq!(app.search_resume_index, Some(2));
 }
 
 #[test]
@@ -394,94 +425,82 @@ fn test_repeat_one_does_not_interfere_with_failed_queue_resolution() {
 }
 
 #[test]
-fn test_new_search_synchronizes_resume_position_and_falls_back() {
+fn test_repeat_all_loops_session_history_when_queue_exhausted() {
     let mut app = App::new();
     let mut player = AudioPlayer::new_mock();
     let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
     let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
 
-    // Old search: 3 tracks [T0, T1, T2]
-    app.tracks = vec![
-        make_test_track("T0", "Artist", "http://stream/t0"),
-        make_test_track("T1", "Artist", "http://stream/t1"),
-        make_test_track("T2", "Artist", "http://stream/t2"),
-    ];
+    app.repeat = Repeat::All;
+    app.enqueue(make_test_track("Track 1", "Artist", "http://stream/1"));
+    app.enqueue(make_test_track("Track 2", "Artist", "http://stream/2"));
 
-    // User played T2
-    play_search_result(
-        &mut app,
-        &mut player,
-        player_tx.clone(),
-        resolve_tx.clone(),
-        2,
+    // Play Track 1
+    play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Track 1")
     );
-    assert_eq!(app.search_resume_index, Some(2));
 
-    // User enqueues Q0
+    // Play Track 2 (Track 1 pushed to history)
+    play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Track 2")
+    );
+    assert_eq!(app.queue.len(), 0);
+    assert_eq!(app.history.len(), 1);
+    assert_eq!(app.history[0].title, "Track 1");
+
+    // Track 2 ends: Repeat::All re-enqueues History and loops!
+    let advanced = advance_playback(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert!(advanced);
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Track 1")
+    );
+}
+
+#[test]
+fn test_new_search_does_not_affect_active_queue_playback() {
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    // Playing Q0 with Q1 queued
     app.enqueue(make_test_track("Q0", "Artist", "http://stream/q0"));
-
-    // Q0 starts playing
+    app.enqueue(make_test_track("Q1", "Artist", "http://stream/q1"));
     play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
     assert_eq!(
         app.now_playing.as_ref().map(|t| t.title.as_str()),
         Some("Q0")
     );
-    assert_eq!(app.search_resume_index, Some(2));
 
-    // While Q0 is playing, a new search finishes with only 2 results [New0, New1]
-    // Test using the real handle_search_result handler
+    // User searches for something else
     let new_tracks = vec![
-        make_test_track("New 0", "Artist", "http://stream/new0"),
-        make_test_track("New 1", "Artist", "http://stream/new1"),
+        make_test_track("New Search 0", "Artist", "http://stream/new0"),
+        make_test_track("New Search 1", "Artist", "http://stream/new1"),
     ];
-    handle_search_result(&mut app, "new artist".to_string(), Ok(new_tracks));
+    handle_search_result(&mut app, "new query".to_string(), Ok(new_tracks));
 
-    // Verify real handler reset playing and search_resume_index because Q0 is not in new results
-    assert_eq!(app.playing, None);
-    assert_eq!(app.search_resume_index, None);
-    assert!(app.status.contains("2 RESULTS"));
-    // Now Q0 finishes playing and the queue empties.
-    // Playback must NOT stop; it must fall back to New 0!
-    let advanced = advance_playback(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
-    assert!(
-        advanced,
-        "Must fall back and advance through new search results"
-    );
+    // Q0 continues playing unaffected
     assert_eq!(
         app.now_playing.as_ref().map(|t| t.title.as_str()),
-        Some("New 0")
+        Some("Q0")
     );
-    assert_eq!(app.playing, Some(0));
-    assert_eq!(app.search_resume_index, Some(0));
-}
 
-#[test]
-fn test_shuffle_with_single_search_result_and_no_resume_position_plays_first_result() {
-    let mut app = App::new();
-    let mut player = AudioPlayer::new_mock();
-    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
-    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
-
-    // Shuffle enabled, exactly 1 search result, no resume position
-    app.shuffle = true;
-    app.tracks = vec![make_test_track(
-        "Solo Track",
-        "Artist",
-        "http://stream/solo",
-    )];
-    app.playing = None;
-    app.search_resume_index = None;
-
-    // Automatic advance from empty queue must fall back to index 0 rather than stopping
-    let advanced = advance_playback(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
-    assert!(
-        advanced,
-        "Must fall back to only available track even when shuffle is on"
-    );
+    // Next plays Q1 from queue, NOT any of the new search results!
+    let next_ok = play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert!(next_ok);
     assert_eq!(
         app.now_playing.as_ref().map(|t| t.title.as_str()),
-        Some("Solo Track")
+        Some("Q1")
     );
-    assert_eq!(app.playing, Some(0));
-    assert_eq!(app.search_resume_index, Some(0));
+
+    // When Q1 ends, playback stops; does NOT play New Search 0!
+    let advance_result =
+        advance_playback(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert!(!advance_result);
+    assert!(app.now_playing.is_none());
 }

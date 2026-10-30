@@ -14,4 +14,6 @@ pub struct Track {
 pub enum PlaybackSource {
     SearchResult { index: usize },
     Queue { entry_id: u64 },
+    History,
+    Current,
 }

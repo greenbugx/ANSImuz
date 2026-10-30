@@ -161,7 +161,6 @@ pub fn play_search_result(
             *slot = cached;
         }
     }
-
     play_track(
         app,
         player,
@@ -182,7 +181,6 @@ pub fn play_queue_item(
     let Some(entry) = app.remove_queue_item(index) else {
         return false;
     };
-
     play_track(
         app,
         player,
@@ -201,26 +199,65 @@ pub fn play_next(
     resolve_tx: Sender<ResolveResponse>,
 ) -> bool {
     if !app.queue.is_empty() {
-        return play_queue_item(app, player, player_tx, resolve_tx, 0);
+        let index = if app.shuffle && app.queue.len() > 1 {
+            app.next_random(app.queue.len())
+        } else {
+            0
+        };
+        return play_queue_item(app, player, player_tx, resolve_tx, index);
     }
 
-    let next = if app.shuffle {
-        app.shuffled_next().or_else(|| {
-            if (app.playing.is_none() && app.search_resume_index.is_none()) || app.tracks.len() == 1
-            {
-                Some(0)
+    if app.repeat == Repeat::All && (!app.history.is_empty() || app.now_playing.is_some()) {
+        let history = std::mem::take(&mut app.history);
+        for track in history {
+            app.enqueue(track);
+        }
+        if !app.queue.is_empty() {
+            let index = if app.shuffle && app.queue.len() > 1 {
+                app.next_random(app.queue.len())
             } else {
-                None
-            }
-        })
-    } else {
-        app.next_index(1)
-    };
+                0
+            };
+            return play_queue_item(app, player, player_tx, resolve_tx, index);
+        }
+    }
 
-    if let Some(index) = next {
-        play_search_result(app, player, player_tx, resolve_tx, index);
+    app.set_status("QUEUE IS EMPTY");
+    false
+}
+
+pub fn play_previous(
+    app: &mut App,
+    player: &mut AudioPlayer,
+    player_tx: Sender<PlayerEvent>,
+    resolve_tx: Sender<ResolveResponse>,
+) -> bool {
+    if let Some(prev) = app.history.pop() {
+        if let Some(current) = app.now_playing.take() {
+            app.push_front_queue(current);
+        }
+        play_track(
+            app,
+            player,
+            player_tx,
+            resolve_tx,
+            prev,
+            PlaybackSource::History,
+        );
+        true
+    } else if let Some(current) = app.now_playing.clone() {
+        play_track(
+            app,
+            player,
+            player_tx,
+            resolve_tx,
+            current,
+            PlaybackSource::Current,
+        );
+        app.set_status("REPLAYING TRACK");
         true
     } else {
+        app.set_status("NO PREVIOUS TRACK");
         false
     }
 }
@@ -232,45 +269,38 @@ pub fn advance_after_queue_failure(
     resolve_tx: Sender<ResolveResponse>,
 ) -> bool {
     if !app.queue.is_empty() {
-        return play_queue_item(app, player, player_tx, resolve_tx, 0);
-    }
-
-    let next_search = if app.tracks.is_empty() {
-        None
-    } else if app.shuffle {
-        app.shuffled_next().or_else(|| {
-            if (app.playing.is_none() && app.search_resume_index.is_none()) || app.tracks.len() == 1
-            {
-                Some(0)
-            } else {
-                None
-            }
-        })
-    } else if app.repeat == Repeat::All {
-        let base = app
-            .playing
-            .or(app.search_resume_index)
-            .unwrap_or(app.selected);
-        Some((base + 1) % app.tracks.len())
-    } else if let Some(base) = app.playing.or(app.search_resume_index) {
-        if base + 1 < app.tracks.len() {
-            Some(base + 1)
+        let index = if app.shuffle && app.queue.len() > 1 {
+            app.next_random(app.queue.len())
         } else {
-            None
-        }
-    } else {
-        Some(0)
-    };
-
-    if let Some(index) = next_search {
-        play_search_result(app, player, player_tx, resolve_tx, index);
-        true
-    } else {
-        app.playing = None;
-        app.now_playing = None;
-        app.paused = false;
-        false
+            0
+        };
+        return play_queue_item(app, player, player_tx, resolve_tx, index);
     }
+
+    if app.repeat == Repeat::All && (!app.history.is_empty() || app.now_playing.is_some()) {
+        if let Some(current) = app.now_playing.take() {
+            app.history.push(current);
+        }
+        let history = std::mem::take(&mut app.history);
+        for track in history {
+            app.enqueue(track);
+        }
+        if !app.queue.is_empty() {
+            let index = if app.shuffle && app.queue.len() > 1 {
+                app.next_random(app.queue.len())
+            } else {
+                0
+            };
+            return play_queue_item(app, player, player_tx, resolve_tx, index);
+        }
+    }
+
+    if let Some(current) = app.now_playing.take() {
+        app.history.push(current);
+    }
+    app.playing = None;
+    app.paused = false;
+    false
 }
 
 pub fn advance_playback(
@@ -279,26 +309,23 @@ pub fn advance_playback(
     player_tx: Sender<PlayerEvent>,
     resolve_tx: Sender<ResolveResponse>,
 ) -> bool {
-    if app.repeat == Repeat::One && app.played_once {
-        if let Some(index) = app.playing {
-            play_search_result(app, player, player_tx, resolve_tx, index);
-            return true;
-        } else if let Some(track) = app.now_playing.clone() {
-            play_track(
-                app,
-                player,
-                player_tx,
-                resolve_tx,
-                track,
-                PlaybackSource::Queue { entry_id: 0 },
-            );
-            return true;
-        }
+    if app.repeat == Repeat::One
+        && app.played_once
+        && let Some(track) = app.now_playing.clone()
+    {
+        play_track(
+            app,
+            player,
+            player_tx,
+            resolve_tx,
+            track,
+            PlaybackSource::Current,
+        );
+        return true;
     }
 
     advance_after_queue_failure(app, player, player_tx, resolve_tx)
 }
-
 pub fn play_track(
     app: &mut App,
     player: &mut AudioPlayer,
@@ -328,6 +355,9 @@ pub fn play_track(
             }
             PlaybackSource::Queue { entry_id } => {
                 app.pending_queue_entry_id = Some(entry_id);
+            }
+            PlaybackSource::History | PlaybackSource::Current => {
+                app.pending_queue_entry_id = None;
             }
         }
         app.set_status(format!("RESOLVING: {} — {}…", track.title, track.artist));
@@ -376,6 +406,11 @@ pub fn start_playback(
             app.is_resolving = false;
             app.pending_track = None;
             app.pending_queue_entry_id = None;
+            if let Some(old) = app.now_playing.take()
+                && (old.stream_url != track.stream_url || old.title != track.title)
+            {
+                app.history.push(old);
+            }
             app.now_playing = Some(track.clone());
             app.paused = false;
             app.played_once = false;
@@ -386,22 +421,19 @@ pub fn start_playback(
                     app.playing = Some(index);
                     app.search_resume_index = Some(index);
                     app.selected = index;
-
-                    if app.tracks.len() > 1 {
-                        let next = app
-                            .tracks
-                            .get((index + 1) % app.tracks.len())
-                            .expect("index within tracks");
-
-                        if app.settings.audio_cache {
-                            player.prefetch_later(&next.stream_url, 25);
-                        }
-                        crate::artwork::prefetch(&next.art_url);
-                    }
                 }
-                PlaybackSource::Queue { .. } => {
+                PlaybackSource::Queue { .. }
+                | PlaybackSource::History
+                | PlaybackSource::Current => {
                     app.playing = None;
                 }
+            }
+
+            if let Some(next_queue) = app.queue.first() {
+                if app.settings.audio_cache {
+                    player.prefetch_later(&next_queue.track.stream_url, 25);
+                }
+                crate::artwork::prefetch(&next_queue.track.art_url);
             }
 
             if app.settings.audio_cache {
@@ -528,6 +560,26 @@ pub fn handle_resolve_response(
                         );
                         return false;
                     }
+                    true
+                }
+                PlaybackSource::History => {
+                    let _ = start_playback(
+                        app,
+                        player,
+                        player_tx.clone(),
+                        resolved,
+                        PlaybackSource::History,
+                    );
+                    true
+                }
+                PlaybackSource::Current => {
+                    let _ = start_playback(
+                        app,
+                        player,
+                        player_tx.clone(),
+                        resolved,
+                        PlaybackSource::Current,
+                    );
                     true
                 }
             }

@@ -5,6 +5,6 @@ pub mod state;
 
 pub use runner::{
     advance_after_queue_failure, advance_playback, handle_resolve_response, handle_search_result,
-    play_next, play_queue_item, play_search_result, play_track, run, start_playback,
+    play_next, play_previous, play_queue_item, play_search_result, play_track, run,
 };
 pub use state::{App, ListFocus, Mode, QueueEntry};

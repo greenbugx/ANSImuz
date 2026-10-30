@@ -56,6 +56,7 @@ pub struct App {
     pub next_queue_id: u64,
     pub search_resume_index: Option<usize>,
     pub pending_queue_entry_id: Option<u64>,
+    pub history: Vec<Track>,
 }
 
 impl App {
@@ -96,6 +97,7 @@ impl App {
             queue: Vec::new(),
             queue_selected: 0,
             next_queue_id: 1,
+            history: Vec::new(),
             search_resume_index: None,
             pending_queue_entry_id: None,
         }
@@ -251,12 +253,34 @@ impl App {
         Some(index)
     }
 
-    fn next_random(&mut self, bound: usize) -> usize {
+    pub fn next_random(&mut self, bound: usize) -> usize {
+        if bound == 0 {
+            return 0;
+        }
         self.rng_state ^= self.rng_state << 13;
         self.rng_state ^= self.rng_state >> 7;
         self.rng_state ^= self.rng_state << 17;
 
         (self.rng_state % bound as u64) as usize
+    }
+
+    pub fn push_front_queue(&mut self, track: Track) -> u64 {
+        let id = self.next_queue_id;
+        self.next_queue_id = self.next_queue_id.wrapping_add(1);
+        self.queue.insert(0, QueueEntry { id, track });
+        id
+    }
+
+    pub fn shuffle_queue(&mut self) {
+        let len = self.queue.len();
+        if len < 2 {
+            return;
+        }
+        for i in (1..len).rev() {
+            let j = self.next_random(i + 1);
+            self.queue.swap(i, j);
+        }
+        self.queue_selected = 0;
     }
 
     pub fn enqueue(&mut self, track: Track) -> u64 {

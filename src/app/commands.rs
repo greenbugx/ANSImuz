@@ -3,7 +3,7 @@ use std::sync::mpsc::Sender;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{
-    runner::{now_playing, play_next, play_queue_item, play_search_result},
+    runner::{now_playing, play_next, play_previous, play_queue_item, play_search_result},
     state::{App, ListFocus, Mode},
 };
 use crate::playback::{AudioPlayer, PlayerEvent, Repeat};
@@ -330,13 +330,14 @@ pub fn dispatch_action(
         }
 
         Action::PreviousTrack => {
-            if let Some(index) = app.next_index(-1) {
-                play_search_result(app, player, player_tx.clone(), resolve_tx.clone(), index);
-            }
+            play_previous(app, player, player_tx.clone(), resolve_tx.clone());
         }
 
         Action::ToggleShuffle => {
             app.shuffle = !app.shuffle;
+            if app.shuffle {
+                app.shuffle_queue();
+            }
             app.set_status(if app.shuffle {
                 "SHUFFLE ON"
             } else {
