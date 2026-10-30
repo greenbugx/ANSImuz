@@ -47,37 +47,34 @@ fn test_next_song_is_always_first_queued_song() {
 }
 
 #[test]
-fn test_same_song_can_appear_twice() {
+fn test_same_song_cannot_appear_twice() {
     let mut app = App::new();
     let track = test_track("Echoes", "Pink Floyd");
 
     let id1 = app.enqueue(track.clone());
     let id2 = app.enqueue(track);
 
-    assert_eq!(app.queue.len(), 2);
+    assert_eq!(app.queue.len(), 1);
     assert_eq!(app.queue[0].track.title, "Echoes");
-    assert_eq!(app.queue[1].track.title, "Echoes");
-    assert_ne!(id1, id2, "Duplicate songs must receive distinct entry IDs");
-    assert_ne!(app.queue[0].id, app.queue[1].id);
+    assert_eq!(id1, Some(1));
+    assert_eq!(
+        id2, None,
+        "Duplicate song must return None and not be added"
+    );
 }
 
 #[test]
-fn test_removing_one_entry_does_not_remove_duplicate() {
+fn test_queue_contains_matches_same_song() {
     let mut app = App::new();
-    let track = test_track("Echoes", "Pink Floyd");
+    let track1 = test_track("Song 1", "Artist 1");
+    let mut track1_dup = test_track("song 1", "artist 1");
+    track1_dup.stream_url = track1.stream_url.clone();
 
-    let id1 = app.enqueue(track.clone());
-    let id2 = app.enqueue(track);
+    app.enqueue(track1);
+    assert!(app.queue_contains(&track1_dup));
 
-    assert_eq!(app.queue.len(), 2);
-
-    let removed = app.remove_queue_item(0);
-    assert!(removed.is_some());
-    assert_eq!(removed.unwrap().id, id1);
-
-    assert_eq!(app.queue.len(), 1);
-    assert_eq!(app.queue[0].id, id2);
-    assert_eq!(app.queue[0].track.title, "Echoes");
+    let track2 = test_track("Song 2", "Artist 2");
+    assert!(!app.queue_contains(&track2));
 }
 
 #[test]
@@ -349,6 +346,7 @@ fn test_stage_4_connected_interactions() {
     assert!(app.status.contains("QUEUED: Track A"));
 
     // Enqueue duplicate
+    // must be rejected with ALREADY IN QUEUE status
     handle_key(
         &mut app,
         &mut player,
@@ -357,14 +355,14 @@ fn test_stage_4_connected_interactions() {
         &player_tx,
         &resolve_tx,
     );
-    assert_eq!(app.queue.len(), 2);
-    assert_eq!(app.queue[1].track.title, "Track A");
-    assert_ne!(
-        app.queue[0].id, app.queue[1].id,
-        "Duplicate entries must have distinct IDs"
+    assert_eq!(
+        app.queue.len(),
+        1,
+        "Duplicate song must not be added to queue"
     );
+    assert!(app.status.contains("ALREADY IN QUEUE"));
 
-    // Add Track B as 3rd item
+    // Add Track B as 2nd item
     app.selected = 1;
     handle_key(
         &mut app,
@@ -374,12 +372,16 @@ fn test_stage_4_connected_interactions() {
         &player_tx,
         &resolve_tx,
     );
-    assert_eq!(app.queue.len(), 3);
-    assert_eq!(app.queue[2].track.title, "Track B");
+    assert_eq!(app.queue.len(), 2);
+    assert_eq!(app.queue[1].track.title, "Track B");
 
-    // Reorder: Switch to Queue focus, move Track B up from index 2 to index 1
+    // Add Track C as 3rd item
+    app.enqueue(test_track("Track C", "Artist"));
+    assert_eq!(app.queue.len(), 3);
+
+    // Reorder: Switch to Queue focus, move Track C up from index 2 to index 1
     app.list_focus = ListFocus::Queue;
-    app.queue_selected = 2; // on Track B
+    app.queue_selected = 2; // on Track C
 
     handle_key(
         &mut app,
@@ -389,13 +391,13 @@ fn test_stage_4_connected_interactions() {
         &player_tx,
         &resolve_tx,
     );
-    assert_eq!(app.queue[1].track.title, "Track B");
+    assert_eq!(app.queue[1].track.title, "Track C");
     assert_eq!(
         app.queue_selected, 1,
-        "Cursor must follow moved item Track B to index 1"
+        "Cursor must follow moved item Track C to index 1"
     );
 
-    // Remove: Delete Track B at index 1
+    // Remove: Delete Track C at index 1
     handle_key(
         &mut app,
         &mut player,
@@ -405,16 +407,16 @@ fn test_stage_4_connected_interactions() {
         &resolve_tx,
     );
     assert_eq!(app.queue.len(), 2);
-    assert!(app.status.contains("REMOVED: Track B"));
+    assert!(app.status.contains("REMOVED: Track C"));
     assert_eq!(app.queue_selected, 1, "Cursor clamps/adjusts correctly");
     assert_eq!(app.queue[0].track.title, "Track A");
-    assert_eq!(app.queue[1].track.title, "Track A");
+    assert_eq!(app.queue[1].track.title, "Track B");
 
-    // Add a distinct Track C at the end: queue is now [Track A (0), Track A (1), Track C (2)]
-    app.enqueue(test_track("Track C", "Artist"));
+    // Add a distinct Track X at the end: queue is now [Track A (0), Track B (1), Track X (2)]
+    app.enqueue(test_track("Track X", "Artist"));
     assert_eq!(app.queue.len(), 3);
 
-    // Play: Highlight Track C at index 2, press Enter -> plays Track C directly
+    // Play: Highlight Track X at index 2, press Enter -> plays Track X directly
     app.queue_selected = 2;
     handle_key(
         &mut app,
@@ -426,13 +428,13 @@ fn test_stage_4_connected_interactions() {
     );
     assert_eq!(
         app.now_playing.as_ref().map(|t| t.title.as_str()),
-        Some("Track C")
+        Some("Track X")
     );
     assert_eq!(app.queue.len(), 2);
     assert_eq!(app.queue[0].track.title, "Track A");
-    assert_eq!(app.queue[1].track.title, "Track A");
+    assert_eq!(app.queue[1].track.title, "Track B");
 
-    // Enqueue Track D at end: queue is now [Track A, Track A, Track D]
+    // Enqueue Track D at end: queue is now [Track A, Track B, Track D]
     app.enqueue(test_track("Track D", "Artist"));
     assert_eq!(app.queue.len(), 3);
 
@@ -453,7 +455,7 @@ fn test_stage_4_connected_interactions() {
         "Next button must prioritize front of queue (index 0), ignoring queue_selected cursor"
     );
     assert_eq!(app.queue.len(), 2);
-    assert_eq!(app.queue[0].track.title, "Track A");
+    assert_eq!(app.queue[0].track.title, "Track B");
     assert_eq!(app.queue[1].track.title, "Track D");
 }
 

@@ -208,12 +208,20 @@ impl App {
         self.move_queue_item(current, target)
     }
 
+    pub fn queue_contains(&self, track: &Track) -> bool {
+        self.queue.iter().any(|entry| entry.track.is_same(track))
+    }
+
     pub fn enqueue_selected(&mut self) -> Option<u64> {
         if let Some(track) = self.tracks.get(self.selected).cloned() {
+            if self.queue_contains(&track) {
+                self.set_status("ALREADY IN QUEUE");
+                return None;
+            }
             let title = track.title.clone();
             let id = self.enqueue(track);
             self.set_status(format!("QUEUED: {}", title));
-            Some(id)
+            id
         } else {
             None
         }
@@ -265,6 +273,7 @@ impl App {
     }
 
     pub fn push_front_queue(&mut self, track: Track) -> u64 {
+        self.queue.retain(|entry| !entry.track.is_same(&track));
         if !self.queue.is_empty() {
             self.queue_selected += 1;
         }
@@ -286,11 +295,14 @@ impl App {
         self.queue_selected = 0;
     }
 
-    pub fn enqueue(&mut self, track: Track) -> u64 {
+    pub fn enqueue(&mut self, track: Track) -> Option<u64> {
+        if self.queue_contains(&track) {
+            return None;
+        }
         let id = self.next_queue_id;
         self.next_queue_id = self.next_queue_id.wrapping_add(1);
         self.queue.push(QueueEntry { id, track });
-        id
+        Some(id)
     }
 
     pub fn remove_queue_item(&mut self, index: usize) -> Option<QueueEntry> {
@@ -401,23 +413,24 @@ mod tests {
     }
 
     #[test]
-    fn test_queue_enqueue_unique_ids_and_duplicates() {
+    fn test_queue_enqueue_rejects_duplicates() {
         let mut app = App::new();
         assert!(app.queue.is_empty());
         assert_eq!(app.next_queue_id, 1);
 
         let id1 = app.enqueue(sample_track("Song A"));
-        let id2 = app.enqueue(sample_track("Song A")); // Duplicate song
+        let id2 = app.enqueue(sample_track("Song A")); // Duplicate song must be rejected
         let id3 = app.enqueue(sample_track("Song B"));
 
-        assert_eq!(app.queue.len(), 3);
-        assert_eq!(id1, 1);
-        assert_eq!(id2, 2);
-        assert_eq!(id3, 3);
-        assert_ne!(id1, id2);
+        assert_eq!(app.queue.len(), 2);
+        assert_eq!(id1, Some(1));
+        assert_eq!(
+            id2, None,
+            "Duplicate song must return None and not be added"
+        );
+        assert_eq!(id3, Some(2));
         assert_eq!(app.queue[0].track.title, "Song A");
-        assert_eq!(app.queue[1].track.title, "Song A");
-        assert_eq!(app.queue[2].track.title, "Song B");
+        assert_eq!(app.queue[1].track.title, "Song B");
     }
 
     #[test]
@@ -531,7 +544,7 @@ mod tests {
     fn test_push_front_queue_adjusts_queue_selected() {
         let mut app = App::new();
         app.enqueue(sample_track("Track A"));
-        let id_b = app.enqueue(sample_track("Track B"));
+        let id_b = app.enqueue(sample_track("Track B")).unwrap();
         app.queue_selected = 1;
 
         assert_eq!(app.queue[app.queue_selected].id, id_b);

@@ -363,7 +363,7 @@ fn test_queue_track_resolution_plays_directly_without_touching_search_results() 
 
     // Enqueue an unresolved Spotify track
     let queue_track = make_spotify_track("sp_queue", "Queued Song", "Queued Artist");
-    let entry_id = app.enqueue(queue_track.clone());
+    let entry_id = app.enqueue(queue_track.clone()).unwrap();
 
     // Play the queued track
     play_track(

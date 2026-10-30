@@ -247,7 +247,9 @@ fn test_previous_track_preserves_selected_queue_entry_id() {
         "http://stream/cur",
     ));
     app.enqueue(make_test_track("Track A", "Artist", "http://stream/a"));
-    let track_b_id = app.enqueue(make_test_track("Track B", "Artist", "http://stream/b"));
+    let track_b_id = app
+        .enqueue(make_test_track("Track B", "Artist", "http://stream/b"))
+        .unwrap();
 
     app.queue_selected = 1;
     assert_eq!(app.queue[app.queue_selected].id, track_b_id);
@@ -334,7 +336,7 @@ fn test_removed_resolving_queue_entry_does_not_start_playback() {
 
     // Unresolved queue track
     let track = make_test_track("Unresolved Queue Track", "Artist", "");
-    let entry_id = app.enqueue(track);
+    let entry_id = app.enqueue(track).unwrap();
 
     // Trigger playback of the queue item
     play_queue_item(
@@ -386,7 +388,7 @@ fn test_failed_queue_resolution_skips_to_next_queued_item() {
 
     // Queue: [Failing Track (unresolved), Working Track (resolved)]
     let failing_track = make_test_track("Failing Track", "Artist", "");
-    let entry_id = app.enqueue(failing_track.clone());
+    let entry_id = app.enqueue(failing_track.clone()).unwrap();
 
     let working_track = make_test_track("Working Track", "Artist", "http://stream/working");
     app.enqueue(working_track);
@@ -448,7 +450,7 @@ fn test_repeat_one_does_not_interfere_with_failed_queue_resolution() {
 
     // Queue: [Q_fail (unresolved), Q_good (resolved)]
     let fail_track = make_test_track("Q Fail", "Artist", "");
-    let fail_id = app.enqueue(fail_track.clone());
+    let fail_id = app.enqueue(fail_track.clone()).unwrap();
     let good_track = make_test_track("Q Good", "Artist", "http://stream/good");
     app.enqueue(good_track);
 
@@ -627,7 +629,7 @@ fn test_failed_queue_resolution_preserves_currently_playing_track_when_player_ac
 
     // You press Next, selecting an unresolved queued song (Song B)
     let song_b = make_test_track("Song B", "Artist", "");
-    let entry_id = app.enqueue(song_b);
+    let entry_id = app.enqueue(song_b).unwrap();
 
     let next_ok = play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
     assert!(next_ok);
