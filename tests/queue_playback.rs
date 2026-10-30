@@ -1,0 +1,900 @@
+use std::sync::mpsc;
+
+use ansimuz::app::{
+    advance_playback, handle_resolve_response, handle_search_result, play_next, play_queue_item,
+    play_search_result, play_track, state::App,
+};
+use ansimuz::music::{PlaybackSource, ResolveResponse, SearchResult, Track};
+use ansimuz::playback::{AudioPlayer, PlayerEvent, Repeat};
+
+fn make_test_track(title: &str, artist: &str, stream: &str) -> Track {
+    Track {
+        title: title.to_string(),
+        artist: artist.to_string(),
+        stream_url: stream.to_string(),
+        art_url: String::new(),
+        spotify_id: if stream.is_empty() {
+            Some(format!("sp_{title}"))
+        } else {
+            None
+        },
+        artists: vec![artist.to_string()],
+        album: Some("Album".to_string()),
+        duration_ms: Some(180_000),
+    }
+}
+
+#[test]
+fn test_manual_next_plays_queue_item_before_search_results() {
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    // Search results: [S0, S1]
+    app.tracks = vec![
+        make_test_track("S0", "Artist", "http://stream/s0"),
+        make_test_track("S1", "Artist", "http://stream/s1"),
+    ];
+
+    // Start playing S0
+    play_search_result(
+        &mut app,
+        &mut player,
+        player_tx.clone(),
+        resolve_tx.clone(),
+        0,
+    );
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("S0")
+    );
+    assert_eq!(app.playing, Some(0));
+
+    // Enqueue Q0
+    let q0 = make_test_track("Q0", "Artist", "http://stream/q0");
+    app.enqueue(q0);
+    assert_eq!(app.queue.len(), 1);
+
+    // Press Next (manual next): must play Q0 first, NOT S1!
+    let advanced = play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert!(advanced);
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Q0")
+    );
+    assert_eq!(app.playing, None, "Queued track must have playing = None");
+    assert_eq!(
+        app.queue.len(),
+        0,
+        "Played queued track must be consumed from queue"
+    );
+}
+
+#[test]
+fn test_automatic_advance_queue_priority_and_exhaustion() {
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    app.tracks = vec![
+        make_test_track("Search 0", "Artist", "http://stream/s0"),
+        make_test_track("Search 1", "Artist", "http://stream/s1"),
+    ];
+
+    // Start playing Search 0
+    play_search_result(
+        &mut app,
+        &mut player,
+        player_tx.clone(),
+        resolve_tx.clone(),
+        0,
+    );
+    app.played_once = true;
+
+    // Enqueue Q0 and Q1
+    app.enqueue(make_test_track("Q0", "Artist", "http://stream/q0"));
+    app.enqueue(make_test_track("Q1", "Artist", "http://stream/q1"));
+    assert_eq!(app.queue.len(), 2);
+
+    // Search 0 ends: queue priority plays Q0, Search 0 pushed to history
+    let adv1 = advance_playback(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert!(adv1);
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Q0")
+    );
+    assert_eq!(app.queue.len(), 1);
+    assert_eq!(app.history.len(), 1);
+    assert_eq!(app.history[0].title, "Search 0");
+
+    // Q0 ends: queue priority plays Q1, Q0 pushed to history
+    let adv2 = advance_playback(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert!(adv2);
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Q1")
+    );
+    assert_eq!(app.queue.len(), 0);
+    assert_eq!(app.history.len(), 2);
+    assert_eq!(app.history[1].title, "Q0");
+
+    // Q1 ends: queue is exhausted. MUST NOT play Search 1! Playback ends cleanly.
+    let adv3 = advance_playback(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert!(
+        !adv3,
+        "Playback must end when queue exhausts without Repeat::All"
+    );
+    assert!(app.now_playing.is_none());
+    assert_eq!(app.history.len(), 3);
+    assert_eq!(app.history[2].title, "Q1");
+}
+
+#[test]
+fn test_repeat_one_overrides_queue_advance() {
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    app.tracks = vec![make_test_track(
+        "Looping Song",
+        "Artist",
+        "http://stream/loop",
+    )];
+    app.repeat = Repeat::One;
+
+    play_search_result(
+        &mut app,
+        &mut player,
+        player_tx.clone(),
+        resolve_tx.clone(),
+        0,
+    );
+    app.played_once = true;
+
+    // Enqueue an item
+    app.enqueue(make_test_track(
+        "Waiting Song",
+        "Artist",
+        "http://stream/wait",
+    ));
+
+    // Track ends: Repeat::One must repeat current song, leaving the queue intact
+    let advanced = advance_playback(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert!(advanced);
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Looping Song")
+    );
+    assert_eq!(
+        app.queue.len(),
+        1,
+        "Queue must not be consumed when Repeat::One is active"
+    );
+}
+
+#[test]
+fn test_previous_track_rewinds_history_and_prepends_to_queue() {
+    use ansimuz::app::play_previous;
+
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    // History: [Song 1]. Currently playing: Song 2. Queue: [Song 3].
+    app.push_history(make_test_track("Song 1", "Artist", "http://stream/1"));
+    app.now_playing = Some(make_test_track("Song 2", "Artist", "http://stream/2"));
+    app.enqueue(make_test_track("Song 3", "Artist", "http://stream/3"));
+
+    assert_eq!(app.history.len(), 1);
+    assert_eq!(app.queue.len(), 1);
+
+    // User presses Previous
+    let prev_ok = play_previous(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert!(prev_ok);
+
+    // Song 1 must be playing now!
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Song 1")
+    );
+    assert_eq!(app.history.len(), 0);
+
+    // Song 2 must be prepended to the front of the queue, in front of Song 3!
+    assert_eq!(app.queue.len(), 2);
+    assert_eq!(app.queue[0].track.title, "Song 2");
+    assert_eq!(app.queue[1].track.title, "Song 3");
+
+    // Now user presses Next: Song 1 goes to history, Song 2 is played!
+    let next_ok = play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert!(next_ok);
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Song 2")
+    );
+    assert_eq!(app.history.len(), 1);
+    assert_eq!(app.history[0].title, "Song 1");
+    assert_eq!(app.queue.len(), 1);
+    assert_eq!(app.queue[0].track.title, "Song 3");
+}
+
+#[test]
+fn test_previous_track_preserves_selected_queue_entry_id() {
+    use ansimuz::app::play_previous;
+
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    // History: [Track Prev]
+    // Currently playing: Track Current
+    // Queue:
+    //   0. Track A
+    //   1. Track B  <-- selected
+    app.push_history(make_test_track(
+        "Track Prev",
+        "Artist",
+        "http://stream/prev",
+    ));
+    app.now_playing = Some(make_test_track(
+        "Track Current",
+        "Artist",
+        "http://stream/cur",
+    ));
+    app.enqueue(make_test_track("Track A", "Artist", "http://stream/a"));
+    let track_b_id = app
+        .enqueue(make_test_track("Track B", "Artist", "http://stream/b"))
+        .unwrap();
+
+    app.queue_selected = 1;
+    assert_eq!(app.queue[app.queue_selected].id, track_b_id);
+    assert_eq!(app.queue[app.queue_selected].track.title, "Track B");
+
+    // User presses Previous
+    let prev_ok = play_previous(&mut app, &mut player, player_tx, resolve_tx);
+    assert!(prev_ok);
+
+    // Track Current is prepended to queue:
+    // Queue:
+    //   0. Track Current
+    //   1. Track A
+    //   2. Track B
+    // queue_selected must have shifted to index 2 so Track B remains selected!
+    assert_eq!(app.queue.len(), 3);
+    assert_eq!(app.queue_selected, 2);
+    assert_eq!(
+        app.queue[app.queue_selected].id, track_b_id,
+        "Selected queue entry ID must be preserved after Previous"
+    );
+    assert_eq!(
+        app.queue[app.queue_selected].track.title, "Track B",
+        "Track B must still be the selected entry after Previous"
+    );
+}
+
+#[test]
+fn test_next_and_previous_do_not_operate_on_search_results() {
+    use ansimuz::app::play_previous;
+
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    // Search results: [S0, S1, S2]
+    app.tracks = vec![
+        make_test_track("S0", "Artist", "http://stream/s0"),
+        make_test_track("S1", "Artist", "http://stream/s1"),
+        make_test_track("S2", "Artist", "http://stream/s2"),
+    ];
+
+    // Play S1 directly from search
+    play_search_result(
+        &mut app,
+        &mut player,
+        player_tx.clone(),
+        resolve_tx.clone(),
+        1,
+    );
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("S1")
+    );
+    assert!(app.queue.is_empty());
+    assert!(app.history.is_empty());
+
+    // Pressing Next with empty queue MUST NOT play S2 from search results!
+    let next_result = play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert!(!next_result);
+    assert!(app.status.contains("QUEUE IS EMPTY"));
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("S1")
+    );
+
+    // Pressing Previouswith empty history MUST NOT play S0 from search results!
+    let prev_result = play_previous(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert!(prev_result);
+    assert!(app.status.contains("REPLAYING TRACK"));
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("S1")
+    );
+}
+
+#[test]
+fn test_removed_resolving_queue_entry_does_not_start_playback() {
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    // Unresolved queue track
+    let track = make_test_track("Unresolved Queue Track", "Artist", "");
+    let entry_id = app.enqueue(track).unwrap();
+
+    // Trigger playback of the queue item
+    play_queue_item(
+        &mut app,
+        &mut player,
+        player_tx.clone(),
+        resolve_tx.clone(),
+        0,
+    );
+    assert!(app.is_resolving);
+    let generation = app.resolve_generation;
+    assert_eq!(app.pending_queue_entry_id, Some(entry_id));
+
+    // User cancels / removes pending resolution
+    app.cancel_pending_resolution();
+    assert!(!app.is_resolving);
+    assert_eq!(app.pending_queue_entry_id, None);
+
+    // Resolution response arrives
+    let mut resolved_track =
+        make_test_track("Unresolved Queue Track", "Artist", "http://stream/resolved");
+    resolved_track.spotify_id = Some("sp_Unresolved Queue Track".to_string());
+    let response = ResolveResponse {
+        generation,
+        source: PlaybackSource::Queue { entry_id },
+        spotify_id: Some("sp_Unresolved Queue Track".to_string()),
+        title: "Unresolved Queue Track".to_string(),
+        artist: "Artist".to_string(),
+        result: Ok(resolved_track),
+    };
+
+    let handled = handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, response);
+    assert!(
+        !handled,
+        "Stale resolution for removed/cancelled queue item must be rejected"
+    );
+    assert!(
+        app.now_playing.is_none(),
+        "Removed track must NOT start playing"
+    );
+}
+
+#[test]
+fn test_failed_queue_resolution_skips_to_next_queued_item() {
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    // Queue: [Failing Track (unresolved), Working Track (resolved)]
+    let failing_track = make_test_track("Failing Track", "Artist", "");
+    let entry_id = app.enqueue(failing_track.clone()).unwrap();
+
+    let working_track = make_test_track("Working Track", "Artist", "http://stream/working");
+    app.enqueue(working_track);
+
+    // Play failing track from queue
+    // Play failing track from queue using play_queue_item (which consumes it from queue)
+    play_queue_item(
+        &mut app,
+        &mut player,
+        player_tx.clone(),
+        resolve_tx.clone(),
+        0,
+    );
+    let generation = app.resolve_generation;
+    let fail_response = ResolveResponse {
+        generation,
+        source: PlaybackSource::Queue { entry_id },
+        spotify_id: Some("sp_Failing Track".to_string()),
+        title: "Failing Track".to_string(),
+        artist: "Artist".to_string(),
+        result: Err("404 Not Found".to_string()),
+    };
+
+    let handled = handle_resolve_response(
+        &mut app,
+        &mut player,
+        &player_tx,
+        &resolve_tx,
+        fail_response,
+    );
+    assert!(!handled, "Failed resolution returns false");
+    assert!(app.status.contains("PLAYING: Working Track"));
+    // Player automatically skips and starts the working track!
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Working Track")
+    );
+    assert_eq!(app.queue.len(), 0);
+}
+
+#[test]
+fn test_repeat_one_does_not_interfere_with_failed_queue_resolution() {
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    // Song A is playing with Repeat::One enabled and played_once = true
+    app.tracks = vec![make_test_track("Song A", "Artist", "http://stream/a")];
+    app.repeat = Repeat::One;
+    play_search_result(
+        &mut app,
+        &mut player,
+        player_tx.clone(),
+        resolve_tx.clone(),
+        0,
+    );
+    app.played_once = true;
+
+    // Queue: [Q_fail (unresolved), Q_good (resolved)]
+    let fail_track = make_test_track("Q Fail", "Artist", "");
+    let fail_id = app.enqueue(fail_track.clone()).unwrap();
+    let good_track = make_test_track("Q Good", "Artist", "http://stream/good");
+    app.enqueue(good_track);
+
+    // Manual Next: plays Q_fail
+    play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert!(app.is_resolving);
+    let generation = app.resolve_generation;
+
+    // Resolution fails for Q_fail
+    let fail_resp = ResolveResponse {
+        generation,
+        source: PlaybackSource::Queue { entry_id: fail_id },
+        spotify_id: Some("sp_Q Fail".to_string()),
+        title: "Q Fail".to_string(),
+        artist: "Artist".to_string(),
+        result: Err("Audio stream unavailable".to_string()),
+    };
+
+    handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, fail_resp);
+
+    // Must NOT restart Song A! Must advance to Q_good!
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Q Good"),
+        "Repeat::One on previous song must not restart previous song when a queued track fails"
+    );
+}
+
+#[test]
+fn test_repeat_all_loops_session_history_when_queue_exhausted() {
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    app.repeat = Repeat::All;
+    app.enqueue(make_test_track("Track 1", "Artist", "http://stream/1"));
+    app.enqueue(make_test_track("Track 2", "Artist", "http://stream/2"));
+
+    // Play Track 1
+    play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Track 1")
+    );
+
+    // Play Track 2 (Track 1 pushed to history)
+    play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Track 2")
+    );
+    assert_eq!(app.queue.len(), 0);
+    assert_eq!(app.history.len(), 1);
+    assert_eq!(app.history[0].title, "Track 1");
+
+    // Track 2 ends: Repeat::All re-enqueues History and loops!
+    let advanced = advance_playback(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert!(advanced);
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Track 1")
+    );
+}
+
+#[test]
+fn test_repeat_all_single_track_manual_next() {
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    // Single song played directly from search:
+    // Now playing: Song A
+    // History: []
+    // Queue: []
+    // Repeat: All
+    app.repeat = Repeat::All;
+    let song_a = make_test_track("Song A", "Artist", "http://stream/a");
+    app.tracks = vec![song_a.clone()];
+    play_search_result(
+        &mut app,
+        &mut player,
+        player_tx.clone(),
+        resolve_tx.clone(),
+        0,
+    );
+
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Song A")
+    );
+    assert!(app.queue.is_empty());
+    assert!(app.history.is_empty());
+
+    // Press Next: must replay Song A and NOT report QUEUE IS EMPTY!
+    let next_ok = play_next(&mut app, &mut player, player_tx, resolve_tx);
+    assert!(
+        next_ok,
+        "play_next on Repeat::All with single track must succeed"
+    );
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Song A"),
+        "Song A must replay under Repeat::All"
+    );
+    assert!(!app.status.contains("QUEUE IS EMPTY"));
+}
+
+#[test]
+fn test_new_search_does_not_affect_active_queue_playback() {
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    // Playing Q0 with Q1 queued
+    app.enqueue(make_test_track("Q0", "Artist", "http://stream/q0"));
+    app.enqueue(make_test_track("Q1", "Artist", "http://stream/q1"));
+    play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Q0")
+    );
+
+    // User searches for something else
+    let new_tracks = vec![
+        make_test_track("New Search 0", "Artist", "http://stream/new0"),
+        make_test_track("New Search 1", "Artist", "http://stream/new1"),
+    ];
+    handle_search_result(&mut app, "new query".to_string(), Ok(new_tracks));
+
+    // Q0 continues playing unaffected
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Q0")
+    );
+
+    // Next plays Q1 from queue, NOT any of the new search results!
+    let next_ok = play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert!(next_ok);
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Q1")
+    );
+
+    // When Q1 ends, playback stops; does NOT play New Search 0!
+    let advance_result =
+        advance_playback(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert!(!advance_result);
+    assert!(app.now_playing.is_none());
+}
+
+#[test]
+fn test_failed_queue_resolution_preserves_currently_playing_track_when_player_active() {
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    // Song A is currently playing
+    let song_a = make_test_track("Song A", "Artist", "http://stream/a");
+    play_track(
+        &mut app,
+        &mut player,
+        player_tx.clone(),
+        resolve_tx.clone(),
+        song_a,
+        PlaybackSource::SearchResult { index: 0 },
+    );
+    assert!(player.is_playing(), "Player must be active playing Song A");
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Song A")
+    );
+
+    // You press Next, selecting an unresolved queued song (Song B)
+    let song_b = make_test_track("Song B", "Artist", "");
+    let entry_id = app.enqueue(song_b).unwrap();
+
+    let next_ok = play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert!(next_ok);
+    assert!(app.is_resolving);
+    let generation = app.resolve_generation;
+
+    // Song A continues playing while the new song resolves
+    assert!(player.is_playing());
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Song A")
+    );
+    assert_eq!(app.queue.len(), 1, "Song B stays in queue while resolving");
+
+    // The queued song fails to resolve
+    // There are no more queued songs, and Repeat All is disabled
+    let fail_resp = ResolveResponse {
+        generation,
+        source: PlaybackSource::Queue { entry_id },
+        spotify_id: Some("sp_Song B".to_string()),
+        title: "Song B".to_string(),
+        artist: "Artist".to_string(),
+        result: Err("YouTube extraction failed".to_string()),
+    };
+
+    let handled =
+        handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, fail_resp);
+    assert!(!handled);
+    assert!(!app.is_resolving);
+    assert_eq!(
+        app.queue.len(),
+        0,
+        "Failed Song B is removed on resolve failure"
+    );
+
+    // Critical assertions:
+    // Audio/app state: Song A must remain now_playing and must NOT be cleared!
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Song A"),
+        "Song A must remain now_playing while MPV is still playing it"
+    );
+    // Song A must not be pushed into history prematurely!
+    assert!(
+        app.history.is_empty(),
+        "Song A must not be pushed to history while still playing"
+    );
+    // Player is still playing Song A
+    assert!(player.is_playing());
+    // Status reflects the resolve error
+    assert!(app.status.contains("RESOLVE ERROR"));
+}
+
+#[test]
+fn test_shuffle_once_strategy_predictably_plays_head_of_queue() {
+    use ansimuz::app::commands::{Action, dispatch_action};
+
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (search_tx, _search_rx) = mpsc::channel::<SearchResult>();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    for i in 0..10 {
+        app.enqueue(make_test_track(
+            &format!("Track {i}"),
+            "Artist",
+            &format!("http://stream/{i}"),
+        ));
+    }
+    assert_eq!(app.queue.len(), 10);
+    assert_eq!(app.queue[0].track.title, "Track 0");
+
+    // Toggle shuffle ON: shuffles queue once
+    dispatch_action(
+        Action::ToggleShuffle,
+        &mut app,
+        &mut player,
+        &player_tx,
+        &search_tx,
+        &resolve_tx,
+    );
+    assert!(app.shuffle);
+    assert!(app.status.contains("SHUFFLE ON"));
+
+    // The top of the queue is visible to the user as index 0
+    let expected_first = app.queue[0].track.title.clone();
+    let expected_second = app.queue[1].track.title.clone();
+
+    // play_next() must deterministically play index 0 (what user sees at top of queue)
+    let next_ok = play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert!(next_ok);
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some(expected_first.as_str()),
+        "Shuffle-once must play visible top item (index 0) of queue"
+    );
+    assert_eq!(app.queue[0].track.title, expected_second);
+
+    // Next track plays the new index 0
+    let next_ok_2 = play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert!(next_ok_2);
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some(expected_second.as_str()),
+        "Subsequent play must continue consuming index 0"
+    );
+
+    // Toggle shuffle OFF: remaining queue order is preserved intact
+    let remaining_before: Vec<String> = app.queue.iter().map(|e| e.track.title.clone()).collect();
+    dispatch_action(
+        Action::ToggleShuffle,
+        &mut app,
+        &mut player,
+        &player_tx,
+        &search_tx,
+        &resolve_tx,
+    );
+    assert!(!app.shuffle);
+    assert!(app.status.contains("SHUFFLE OFF"));
+    let remaining_after: Vec<String> = app.queue.iter().map(|e| e.track.title.clone()).collect();
+    assert_eq!(
+        remaining_before, remaining_after,
+        "Disabling shuffle must leave queue intact"
+    );
+}
+
+#[test]
+fn test_history_capped_at_maximum_size() {
+    let mut app = App::new();
+    for i in 0..110 {
+        app.push_history(make_test_track(
+            &format!("Song {i}"),
+            "Artist",
+            "http://stream",
+        ));
+    }
+    assert_eq!(app.history.len(), ansimuz::app::MAX_HISTORY_SIZE);
+    assert_eq!(app.history[0].title, "Song 10");
+    assert_eq!(app.history.back().unwrap().title, "Song 109");
+}
+
+#[test]
+fn test_mpv_startup_failure_preserves_previous_track_in_history() {
+    use ansimuz::app::play_previous;
+
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    // Song A is currently playing
+    let song_a = make_test_track("Song A", "Artist", "http://stream/a");
+    play_track(
+        &mut app,
+        &mut player,
+        player_tx.clone(),
+        resolve_tx.clone(),
+        song_a,
+        PlaybackSource::SearchResult { index: 0 },
+    );
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Song A")
+    );
+    assert!(player.is_playing());
+    assert!(app.history.is_empty());
+
+    // Queue has Song B
+    let song_b = make_test_track("Song B", "Artist", "http://stream/b");
+    app.enqueue(song_b);
+
+    // Configure mock player to fail on next launch (simulate MPV spawn failure)
+    player.set_mock_fail(true);
+
+    // Press Next to play queued Song B
+    let next_ok = play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+    assert!(!next_ok, "play_next must fail when MPV startup fails");
+
+    // Song A must have been preserved into history when MPV stopped it during failed launch!
+    assert_eq!(
+        app.history.len(),
+        1,
+        "Song A must be preserved in history on MPV startup failure"
+    );
+    assert_eq!(app.history[0].title, "Song A");
+    assert!(app.now_playing.is_none());
+    assert!(!player.is_playing());
+    assert!(app.status.contains("PLAYER ERROR"));
+
+    // User presses Previous Track: Song A can be recovered from history!
+    player.set_mock_fail(false); // Restore normal MPV startup
+    let prev_ok = play_previous(&mut app, &mut player, player_tx, resolve_tx);
+    assert!(
+        prev_ok,
+        "Previous Track must be able to restore Song A from history"
+    );
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Song A")
+    );
+}
+
+#[test]
+fn test_cancellation_during_resolution_preserves_queue_entry() {
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    // Enqueue unresolved song
+    let unresolved = make_test_track("Queued Song", "Artist", "");
+    let entry_id = app.enqueue(unresolved).unwrap();
+    assert_eq!(app.queue.len(), 1);
+
+    // Play queue item -> begins async resolution
+    let ok = play_queue_item(
+        &mut app,
+        &mut player,
+        player_tx.clone(),
+        resolve_tx.clone(),
+        0,
+    );
+    assert!(ok);
+    assert!(app.is_resolving);
+    let generation = app.resolve_generation;
+
+    // Track must remain in app.queue while resolution is pending!
+    assert_eq!(
+        app.queue.len(),
+        1,
+        "Queued track must remain in queue while resolving"
+    );
+    assert_eq!(app.queue[0].id, entry_id);
+    assert_eq!(app.queue[0].track.title, "Queued Song");
+
+    // User submits a search or changes provider, cancelling the pending resolution
+    let new_search_results = vec![make_test_track("Search Song", "Artist", "http://stream/s")];
+    handle_search_result(&mut app, "query".into(), Ok(new_search_results));
+    assert!(!app.is_resolving);
+    assert_eq!(app.resolve_generation, generation + 1);
+
+    // Queued track must NOT have been silently dropped!
+    assert_eq!(
+        app.queue.len(),
+        1,
+        "Queued track must be preserved on resolution cancellation"
+    );
+    assert_eq!(app.queue[0].id, entry_id);
+    assert_eq!(app.queue[0].track.title, "Queued Song");
+
+    // Stale resolution response arrives from the background thread
+    let mut resolved = make_test_track("Queued Song", "Artist", "http://stream/q_resolved");
+    resolved.spotify_id = Some("sp_Queued Song".to_string());
+    let stale_resp = ResolveResponse {
+        generation,
+        source: PlaybackSource::Queue { entry_id },
+        spotify_id: Some("sp_Queued Song".to_string()),
+        title: "Queued Song".to_string(),
+        artist: "Artist".to_string(),
+        result: Ok(resolved),
+    };
+
+    let handled =
+        handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, stale_resp);
+    assert!(!handled, "Stale resolution must be rejected");
+    assert_eq!(app.queue.len(), 1, "Track must remain safely in queue");
+    assert_eq!(app.queue[0].id, entry_id);
+}

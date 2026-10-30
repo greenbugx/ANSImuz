@@ -4,8 +4,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{
     commands::{action_for_nav_key, dispatch_action, filtered_commands},
-    runner::play_track,
-    state::{App, Mode},
+    runner::{play_queue_item, play_search_result},
+    state::{App, ListFocus, Mode},
 };
 use crate::music::{SearchResult, search_music};
 use crate::playback::{AudioPlayer, PlayerEvent};
@@ -123,7 +123,7 @@ pub fn handle_key(
                         let _ = tx.send(search_music(query, provider));
                     });
                 } else {
-                    play_track(
+                    play_search_result(
                         app,
                         player,
                         player_tx.clone(),
@@ -162,15 +162,36 @@ pub fn handle_key(
                         app.query.clear();
                     }
                 }
-                KeyCode::Up => app.move_selection(-1),
-                KeyCode::Down => app.move_selection(1),
-                KeyCode::Enter => play_track(
-                    app,
-                    player,
-                    player_tx.clone(),
-                    resolve_tx.clone(),
-                    app.selected,
-                ),
+                KeyCode::Up => match app.list_focus {
+                    ListFocus::Search => app.move_selection(-1),
+                    ListFocus::Queue => app.move_queue_selection(-1),
+                },
+                KeyCode::Down => match app.list_focus {
+                    ListFocus::Search => app.move_selection(1),
+                    ListFocus::Queue => app.move_queue_selection(1),
+                },
+                KeyCode::Enter => match app.list_focus {
+                    ListFocus::Search => {
+                        play_search_result(
+                            app,
+                            player,
+                            player_tx.clone(),
+                            resolve_tx.clone(),
+                            app.selected,
+                        );
+                    }
+                    ListFocus::Queue => {
+                        if !app.queue.is_empty() {
+                            play_queue_item(
+                                app,
+                                player,
+                                player_tx.clone(),
+                                resolve_tx.clone(),
+                                app.queue_selected,
+                            );
+                        }
+                    }
+                },
                 _ => {}
             }
         }

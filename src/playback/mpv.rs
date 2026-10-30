@@ -22,6 +22,9 @@ pub struct AudioPlayer {
     last_error: Option<String>,
     generation: u64,
     dumping: Arc<Mutex<HashSet<String>>>,
+    is_mock: bool,
+    mock_playing: bool,
+    mock_fail: bool,
 }
 
 impl AudioPlayer {
@@ -36,7 +39,28 @@ impl AudioPlayer {
             last_error: None,
             generation: 0,
             dumping: Arc::new(Mutex::new(HashSet::new())),
+            is_mock: false,
+            mock_playing: false,
+            mock_fail: false,
         }
+    }
+
+    pub fn new_mock() -> Self {
+        Self {
+            child: None,
+            socket_path: PathBuf::new(),
+            paused: false,
+            last_error: None,
+            generation: 0,
+            dumping: Arc::new(Mutex::new(HashSet::new())),
+            is_mock: true,
+            mock_playing: false,
+            mock_fail: false,
+        }
+    }
+
+    pub fn set_mock_fail(&mut self, fail: bool) {
+        self.mock_fail = fail;
     }
 
     pub fn cached_audio(url: &str) -> Option<PathBuf> {
@@ -81,6 +105,10 @@ impl AudioPlayer {
     }
 
     pub fn is_playing(&mut self) -> bool {
+        if self.is_mock {
+            return self.mock_playing && !self.paused;
+        }
+
         if let Some(child) = self.child.as_mut() {
             match child.try_wait() {
                 Ok(Some(status)) => {
@@ -107,6 +135,20 @@ impl AudioPlayer {
         volume: u8,
         events: Sender<PlayerEvent>,
     ) -> Result<(), String> {
+        if self.is_mock {
+            self.stop();
+            self.last_error = None;
+            self.paused = false;
+            self.generation += 1;
+            if self.mock_fail {
+                self.mock_playing = false;
+                self.last_error = Some("Failed to launch mpv: process failed to start".into());
+                return Err("Failed to launch mpv: process failed to start".into());
+            }
+            self.mock_playing = true;
+            return Ok(());
+        }
+
         self.stop();
 
         self.last_error = None;
@@ -158,12 +200,19 @@ impl AudioPlayer {
     }
 
     pub fn toggle_pause(&mut self) -> Result<(), String> {
+        if self.is_mock {
+            self.paused = !self.paused;
+            return Ok(());
+        }
         self.send(r#"{"command":["cycle","pause"]}"#)?;
         self.paused = !self.paused;
         Ok(())
     }
 
     pub fn set_volume(&mut self, volume: u8) -> Result<(), String> {
+        if self.is_mock {
+            return Ok(());
+        }
         self.send(&format!(
             r#"{{"command":["set_property","volume",{}]}}"#,
             volume.min(100)
@@ -172,6 +221,11 @@ impl AudioPlayer {
     }
 
     pub fn stop(&mut self) {
+        if self.is_mock {
+            self.mock_playing = false;
+            self.paused = false;
+            return;
+        }
         if self.child.is_some() {
             let _ = self.send(r#"{"command":["quit"]}"#);
 

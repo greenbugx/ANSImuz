@@ -1,10 +1,10 @@
 use std::sync::mpsc;
 
 use ansimuz::app::{
-    runner::{handle_resolve_response, play_track},
+    runner::{handle_resolve_response, play_search_result, play_track},
     state::App,
 };
-use ansimuz::music::{ResolveResponse, Track};
+use ansimuz::music::{PlaybackSource, ResolveResponse, Track};
 use ansimuz::playback::{AudioPlayer, PlayerEvent};
 
 fn make_spotify_track(id: &str, title: &str, artist: &str) -> Track {
@@ -29,7 +29,7 @@ fn make_resolved_track(id: &str, title: &str, artist: &str, youtube_id: &str) ->
 #[test]
 fn test_rapid_track_switching_ignores_stale_responses() {
     let mut app = App::new();
-    let mut player = AudioPlayer::new();
+    let mut player = AudioPlayer::new_mock();
     let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
     let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
 
@@ -40,7 +40,7 @@ fn test_rapid_track_switching_ignores_stale_responses() {
     ];
 
     // Rapidly request track 0, then 1, then 2
-    play_track(
+    play_search_result(
         &mut app,
         &mut player,
         player_tx.clone(),
@@ -54,7 +54,7 @@ fn test_rapid_track_switching_ignores_stale_responses() {
         Some("Track Zero")
     );
 
-    play_track(
+    play_search_result(
         &mut app,
         &mut player,
         player_tx.clone(),
@@ -68,7 +68,7 @@ fn test_rapid_track_switching_ignores_stale_responses() {
         Some("Track One")
     );
 
-    play_track(
+    play_search_result(
         &mut app,
         &mut player,
         player_tx.clone(),
@@ -85,7 +85,7 @@ fn test_rapid_track_switching_ignores_stale_responses() {
     // Stale response from request 0 arrives (generation 1)
     let stale_resp_0 = ResolveResponse {
         generation: 1,
-        index: 0,
+        source: PlaybackSource::SearchResult { index: 0 },
         spotify_id: Some("sp0".into()),
         title: "Track Zero".into(),
         artist: "Artist Zero".into(),
@@ -96,7 +96,8 @@ fn test_rapid_track_switching_ignores_stale_responses() {
             "yt0",
         )),
     };
-    let handled_0 = handle_resolve_response(&mut app, &mut player, &player_tx, stale_resp_0);
+    let handled_0 =
+        handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, stale_resp_0);
     assert!(!handled_0, "Stale generation 1 response must be ignored");
     assert!(app.is_resolving, "Track 2 must still be resolving");
     assert_eq!(
@@ -111,26 +112,28 @@ fn test_rapid_track_switching_ignores_stale_responses() {
     // Stale response from request 1 arrives (generation 2)
     let stale_resp_1 = ResolveResponse {
         generation: 2,
-        index: 1,
+        source: PlaybackSource::SearchResult { index: 1 },
         spotify_id: Some("sp1".into()),
         title: "Track One".into(),
         artist: "Artist One".into(),
         result: Ok(make_resolved_track("sp1", "Track One", "Artist One", "yt1")),
     };
-    let handled_1 = handle_resolve_response(&mut app, &mut player, &player_tx, stale_resp_1);
+    let handled_1 =
+        handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, stale_resp_1);
     assert!(!handled_1, "Stale generation 2 response must be ignored");
     assert!(app.is_resolving);
 
     // Fresh response from request 2 arrives (generation 3)
     let fresh_resp_2 = ResolveResponse {
         generation: 3,
-        index: 2,
+        source: PlaybackSource::SearchResult { index: 2 },
         spotify_id: Some("sp2".into()),
         title: "Track Two".into(),
         artist: "Artist Two".into(),
         result: Ok(make_resolved_track("sp2", "Track Two", "Artist Two", "yt2")),
     };
-    let handled_2 = handle_resolve_response(&mut app, &mut player, &player_tx, fresh_resp_2);
+    let handled_2 =
+        handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, fresh_resp_2);
     assert!(handled_2, "Fresh generation 3 response must be accepted");
     assert!(!app.is_resolving);
     assert!(app.pending_track.is_none());
@@ -144,7 +147,7 @@ fn test_rapid_track_switching_ignores_stale_responses() {
 #[test]
 fn test_cancelling_while_old_track_is_playing_preserves_playback() {
     let mut app = App::new();
-    let mut player = AudioPlayer::new();
+    let mut player = AudioPlayer::new_mock();
     let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
     let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
 
@@ -158,7 +161,7 @@ fn test_cancelling_while_old_track_is_playing_preserves_playback() {
     app.now_playing = Some(old_track.clone());
 
     // User selects Track 1 (unresolved Spotify track)
-    play_track(
+    play_search_result(
         &mut app,
         &mut player,
         player_tx.clone(),
@@ -196,13 +199,14 @@ fn test_cancelling_while_old_track_is_playing_preserves_playback() {
     // Stale response arriving after cancel must be discarded
     let stale_resp = ResolveResponse {
         generation: 1,
-        index: 1,
+        source: PlaybackSource::SearchResult { index: 1 },
         spotify_id: Some("sp1".into()),
         title: "New Track".into(),
         artist: "New Artist".into(),
         result: Ok(make_resolved_track("sp1", "New Track", "New Artist", "yt1")),
     };
-    let handled = handle_resolve_response(&mut app, &mut player, &player_tx, stale_resp);
+    let handled =
+        handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, stale_resp);
     assert!(!handled, "Stale response after cancel must be discarded");
     assert_eq!(
         app.now_playing.as_ref().map(|t| t.title.as_str()),
@@ -213,7 +217,7 @@ fn test_cancelling_while_old_track_is_playing_preserves_playback() {
 #[test]
 fn test_resolution_failure_preserves_playing_track() {
     let mut app = App::new();
-    let mut player = AudioPlayer::new();
+    let mut player = AudioPlayer::new_mock();
     let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
     let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
 
@@ -227,7 +231,7 @@ fn test_resolution_failure_preserves_playing_track() {
     app.now_playing = Some(old_track.clone());
 
     // Request track 1
-    play_track(
+    play_search_result(
         &mut app,
         &mut player,
         player_tx.clone(),
@@ -239,14 +243,15 @@ fn test_resolution_failure_preserves_playing_track() {
     // Simulate resolution failure
     let fail_resp = ResolveResponse {
         generation,
-        index: 1,
+        source: PlaybackSource::SearchResult { index: 1 },
         spotify_id: Some("sp1".into()),
         title: "Failing Song".into(),
         artist: "Failing Artist".into(),
         result: Err("No matching YouTube video found".into()),
     };
 
-    let handled = handle_resolve_response(&mut app, &mut player, &player_tx, fail_resp);
+    let handled =
+        handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, fail_resp);
     assert!(!handled, "Failed resolution must return false");
     assert!(!app.is_resolving);
     assert!(app.pending_track.is_none());
@@ -266,7 +271,7 @@ fn test_resolution_failure_preserves_playing_track() {
 #[test]
 fn test_resolution_failure_when_idle_cleans_up() {
     let mut app = App::new();
-    let mut player = AudioPlayer::new();
+    let mut player = AudioPlayer::new_mock();
     let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
     let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
 
@@ -274,7 +279,7 @@ fn test_resolution_failure_when_idle_cleans_up() {
     app.playing = None;
     app.now_playing = None;
 
-    play_track(
+    play_search_result(
         &mut app,
         &mut player,
         player_tx.clone(),
@@ -285,14 +290,15 @@ fn test_resolution_failure_when_idle_cleans_up() {
 
     let fail_resp = ResolveResponse {
         generation,
-        index: 0,
+        source: PlaybackSource::SearchResult { index: 0 },
         spotify_id: Some("sp0".into()),
         title: "Idle Fail".into(),
         artist: "Artist".into(),
         result: Err("Network timeout".into()),
     };
 
-    let handled = handle_resolve_response(&mut app, &mut player, &player_tx, fail_resp);
+    let handled =
+        handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, fail_resp);
     assert!(!handled);
     assert!(!app.is_resolving);
     assert!(app.pending_track.is_none());
@@ -304,8 +310,9 @@ fn test_resolution_failure_when_idle_cleans_up() {
 #[test]
 fn test_stale_response_rejected_on_slot_mismatch() {
     let mut app = App::new();
-    let mut player = AudioPlayer::new();
+    let mut player = AudioPlayer::new_mock();
     let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
 
     // Search results replaced while resolution was in-flight
     app.tracks = vec![make_spotify_track(
@@ -319,7 +326,7 @@ fn test_stale_response_rejected_on_slot_mismatch() {
     // Incoming response claims index 0, matching generation, but identity is from old search
     let response = ResolveResponse {
         generation: 1,
-        index: 0,
+        source: PlaybackSource::SearchResult { index: 0 },
         spotify_id: Some("old_id".into()),
         title: "Old Track".into(),
         artist: "Old Artist".into(),
@@ -331,11 +338,80 @@ fn test_stale_response_rejected_on_slot_mismatch() {
         )),
     };
 
-    let handled = handle_resolve_response(&mut app, &mut player, &player_tx, response);
+    let handled = handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, response);
     assert!(!handled, "Mismatched slot identity must reject playback");
     assert_eq!(
         app.tracks[0].title, "Different Track",
         "Slot must not be overwritten by mismatched track"
+    );
+}
+
+#[test]
+fn test_queue_track_resolution_plays_directly_without_touching_search_results() {
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    // Search results present
+    let search_track =
+        make_resolved_track("sp_search", "Search Song", "Search Artist", "yt_search");
+    app.tracks = vec![search_track.clone()];
+    app.playing = Some(0);
+    app.now_playing = Some(search_track);
+
+    // Enqueue an unresolved Spotify track
+    let queue_track = make_spotify_track("sp_queue", "Queued Song", "Queued Artist");
+    let entry_id = app.enqueue(queue_track.clone()).unwrap();
+
+    // Play the queued track
+    play_track(
+        &mut app,
+        &mut player,
+        player_tx.clone(),
+        resolve_tx.clone(),
+        queue_track,
+        PlaybackSource::Queue { entry_id },
+    );
+
+    assert!(app.is_resolving);
+    let generation = app.resolve_generation;
+
+    // Resolution arrives for the queue track
+    let resolved_queue_track =
+        make_resolved_track("sp_queue", "Queued Song", "Queued Artist", "yt_queue");
+    let response = ResolveResponse {
+        generation,
+        source: PlaybackSource::Queue { entry_id },
+        spotify_id: Some("sp_queue".into()),
+        title: "Queued Song".into(),
+        artist: "Queued Artist".into(),
+        result: Ok(resolved_queue_track),
+    };
+
+    let handled = handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, response);
+    assert!(handled, "Queue resolution must be accepted");
+    assert!(!app.is_resolving);
+
+    // Critical assertions:
+    // app.tracks[0] was NOT overwritten by the queue track
+    assert_eq!(app.tracks.len(), 1);
+    assert_eq!(app.tracks[0].title, "Search Song");
+    assert_eq!(
+        app.tracks[0].stream_url,
+        "https://music.youtube.com/watch?v=yt_search"
+    );
+
+    // Queue track is playing directly
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Queued Song")
+    );
+
+    // Queue track is not represented as an index in app.tracks
+    assert_eq!(
+        app.playing, None,
+        "Queued track must have app.playing = None"
     );
 }
 

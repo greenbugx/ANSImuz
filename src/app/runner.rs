@@ -10,7 +10,7 @@ use super::{
     events::handle_key,
     state::{App, Mode},
 };
-use crate::music::{ResolveResponse, SearchResult, Track};
+use crate::music::{PlaybackSource, ResolveResponse, SearchResult, Track};
 use crate::playback::{AudioPlayer, PlayerEvent, Repeat};
 
 pub fn run(
@@ -28,79 +28,22 @@ pub fn run(
 
     loop {
         while let Ok((query, result)) = search_rx.try_recv() {
-            app.loading = false;
-            app.cancel_pending_resolution();
-
-            match result {
-                Ok(tracks) => {
-                    let count = tracks.len();
-                    app.tracks = tracks;
-                    app.last_query = query;
-                    app.mode = Mode::Nav;
-
-                    if let Some(now) = &app.now_playing {
-                        app.playing = app.tracks.iter().position(|t| {
-                            (!now.stream_url.is_empty() && t.stream_url == now.stream_url)
-                                || (now.spotify_id.is_some() && t.spotify_id == now.spotify_id)
-                                || (t.title.eq_ignore_ascii_case(&now.title)
-                                    && t.artist.eq_ignore_ascii_case(&now.artist))
-                        });
-                    }
-
-                    app.selected = app.playing.unwrap_or(0);
-
-                    app.set_status(if count == 0 {
-                        "NO RESULTS".into()
-                    } else {
-                        format!("{} RESULTS ({})", count, app.settings.provider.label())
-                    });
-                }
-                Err(error) => {
-                    app.set_status(format!("SEARCH ERROR: {}", error));
-                }
-            }
+            handle_search_result(&mut app, query, result);
         }
 
         while let Ok(response) = resolve_rx.try_recv() {
-            handle_resolve_response(&mut app, &mut player, &player_tx, response);
+            handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, response);
         }
 
-        if !app.is_resolving && app.now_playing.is_some() && !player.is_playing() {
-            let ended = app.playing;
-
-            let next = match app.repeat {
-                Repeat::One if app.played_once => ended,
-                Repeat::All if app.played_once => ended.and_then(|index| {
-                    if app.shuffle {
-                        app.shuffled_next()
-                    } else if app.tracks.is_empty() {
-                        None
-                    } else {
-                        Some((index + 1) % app.tracks.len())
-                    }
-                }),
-                _ => None,
-            };
-
-            match next {
-                Some(index) => play_track(
-                    &mut app,
-                    &mut player,
-                    player_tx.clone(),
-                    resolve_tx.clone(),
-                    index,
-                ),
-                None => {
-                    app.playing = None;
-                    app.now_playing = None;
-                    app.paused = false;
-
-                    app.set_status(match player.error() {
-                        Some(error) => format!("PLAYER ERROR: {}", error),
-                        None => "PLAYBACK ENDED".to_string(),
-                    });
-                }
-            }
+        if !app.is_resolving
+            && app.now_playing.is_some()
+            && !player.is_playing()
+            && !advance_playback(&mut app, &mut player, player_tx.clone(), resolve_tx.clone())
+        {
+            app.set_status(match player.error() {
+                Some(error) => format!("PLAYER ERROR: {}", error),
+                None => "PLAYBACK ENDED".to_string(),
+            });
         }
 
         let current = player.generation();
@@ -163,20 +106,270 @@ pub fn run(
     Ok(())
 }
 
-pub fn play_track(
+pub fn handle_search_result(app: &mut App, query: String, result: Result<Vec<Track>, String>) {
+    app.loading = false;
+    app.cancel_pending_resolution();
+
+    match result {
+        Ok(tracks) => {
+            let count = tracks.len();
+            app.tracks = tracks;
+            app.last_query = query;
+            app.mode = Mode::Nav;
+
+            if let Some(now) = &app.now_playing {
+                app.playing = app.tracks.iter().position(|t| {
+                    (!now.stream_url.is_empty() && t.stream_url == now.stream_url)
+                        || (now.spotify_id.is_some() && t.spotify_id == now.spotify_id)
+                        || (t.title.eq_ignore_ascii_case(&now.title)
+                            && t.artist.eq_ignore_ascii_case(&now.artist))
+                });
+            } else {
+                app.playing = None;
+            }
+
+            app.selected = app.playing.unwrap_or(0);
+
+            app.set_status(if count == 0 {
+                "NO RESULTS".into()
+            } else {
+                format!("{} RESULTS ({})", count, app.settings.provider.label())
+            });
+        }
+        Err(error) => {
+            app.set_status(format!("SEARCH ERROR: {}", error));
+        }
+    }
+}
+
+pub fn play_search_result(
     app: &mut App,
     player: &mut AudioPlayer,
     player_tx: Sender<PlayerEvent>,
     resolve_tx: Sender<ResolveResponse>,
     index: usize,
-) {
+) -> bool {
     let Some(mut track) = app.tracks.get(index).cloned() else {
-        return;
+        return false;
     };
 
     if let Some(cached) = crate::music::get_cached_track(&track) {
         track = cached.clone();
         if let Some(slot) = app.tracks.get_mut(index) {
+            *slot = cached;
+        }
+    }
+    play_track(
+        app,
+        player,
+        player_tx,
+        resolve_tx,
+        track,
+        PlaybackSource::SearchResult { index },
+    )
+}
+
+pub fn play_queue_item(
+    app: &mut App,
+    player: &mut AudioPlayer,
+    player_tx: Sender<PlayerEvent>,
+    resolve_tx: Sender<ResolveResponse>,
+    index: usize,
+) -> bool {
+    let Some(mut entry) = app.queue.get(index).cloned() else {
+        return false;
+    };
+
+    if let Some(cached) = crate::music::get_cached_track(&entry.track) {
+        entry.track = cached.clone();
+        if let Some(slot) = app.queue.get_mut(index) {
+            slot.track = cached;
+        }
+    }
+
+    if entry.track.stream_url.is_empty() {
+        play_track(
+            app,
+            player,
+            player_tx,
+            resolve_tx,
+            entry.track,
+            PlaybackSource::Queue { entry_id: entry.id },
+        )
+    } else {
+        let Some(removed) = app.remove_queue_item(index) else {
+            return false;
+        };
+        play_track(
+            app,
+            player,
+            player_tx,
+            resolve_tx,
+            removed.track,
+            PlaybackSource::Queue {
+                entry_id: removed.id,
+            },
+        )
+    }
+}
+
+pub(crate) fn refill_queue_from_repeat_all(app: &mut App) -> bool {
+    if app.repeat != Repeat::All {
+        return false;
+    }
+    if app.history.is_empty() && app.now_playing.is_none() {
+        return false;
+    }
+    if let Some(current) = app.now_playing.take() {
+        app.push_history(current);
+    }
+    let history = std::mem::take(&mut app.history);
+    for track in history {
+        app.enqueue(track);
+    }
+    if app.shuffle {
+        app.shuffle_queue();
+    }
+    !app.queue.is_empty()
+}
+
+pub(crate) fn play_next_queued(
+    app: &mut App,
+    player: &mut AudioPlayer,
+    player_tx: Sender<PlayerEvent>,
+    resolve_tx: Sender<ResolveResponse>,
+) -> bool {
+    if !app.queue.is_empty() || refill_queue_from_repeat_all(app) {
+        return play_queue_item(app, player, player_tx, resolve_tx, 0);
+    }
+    false
+}
+
+pub fn play_next(
+    app: &mut App,
+    player: &mut AudioPlayer,
+    player_tx: Sender<PlayerEvent>,
+    resolve_tx: Sender<ResolveResponse>,
+) -> bool {
+    if app.queue.is_empty() && !refill_queue_from_repeat_all(app) {
+        app.set_status("QUEUE IS EMPTY");
+        return false;
+    }
+
+    play_queue_item(app, player, player_tx, resolve_tx, 0)
+}
+
+pub fn play_previous(
+    app: &mut App,
+    player: &mut AudioPlayer,
+    player_tx: Sender<PlayerEvent>,
+    resolve_tx: Sender<ResolveResponse>,
+) -> bool {
+    if let Some(prev) = app.history.pop_back() {
+        if let Some(current) = app.now_playing.take() {
+            app.push_front_queue(current);
+        }
+        play_track(
+            app,
+            player,
+            player_tx,
+            resolve_tx,
+            prev,
+            PlaybackSource::History,
+        );
+        true
+    } else if let Some(current) = app.now_playing.clone() {
+        play_track(
+            app,
+            player,
+            player_tx,
+            resolve_tx,
+            current,
+            PlaybackSource::Current,
+        );
+        app.set_status("REPLAYING TRACK");
+        true
+    } else {
+        app.set_status("NO PREVIOUS TRACK");
+        false
+    }
+}
+
+pub(crate) fn recover_queue_failure(
+    app: &mut App,
+    player: &mut AudioPlayer,
+    player_tx: Sender<PlayerEvent>,
+    resolve_tx: Sender<ResolveResponse>,
+) -> bool {
+    // If more queued items exist, try the next one
+    if !app.queue.is_empty() {
+        return play_queue_item(app, player, player_tx, resolve_tx, 0);
+    }
+
+    // If the previous track is still playing in the audio player, preserve it!
+    if player.is_playing() && app.now_playing.is_some() {
+        return false;
+    }
+
+    // Otherwise (player is not playing), check Repeat::All to loop history
+    if play_next_queued(app, player, player_tx, resolve_tx) {
+        return true;
+    }
+
+    // Idle/stopped: push any ended track to history and clear playback state
+    if let Some(current) = app.now_playing.take() {
+        app.push_history(current);
+    }
+    app.playing = None;
+    app.paused = false;
+    false
+}
+
+pub fn advance_playback(
+    app: &mut App,
+    player: &mut AudioPlayer,
+    player_tx: Sender<PlayerEvent>,
+    resolve_tx: Sender<ResolveResponse>,
+) -> bool {
+    if app.repeat == Repeat::One
+        && app.played_once
+        && let Some(track) = app.now_playing.clone()
+    {
+        play_track(
+            app,
+            player,
+            player_tx,
+            resolve_tx,
+            track,
+            PlaybackSource::Current,
+        );
+        return true;
+    }
+
+    if play_next_queued(app, player, player_tx, resolve_tx) {
+        return true;
+    }
+
+    if let Some(current) = app.now_playing.take() {
+        app.push_history(current);
+    }
+    app.playing = None;
+    app.paused = false;
+    false
+}
+pub fn play_track(
+    app: &mut App,
+    player: &mut AudioPlayer,
+    player_tx: Sender<PlayerEvent>,
+    resolve_tx: Sender<ResolveResponse>,
+    mut track: Track,
+    source: PlaybackSource,
+) -> bool {
+    if let Some(cached) = crate::music::get_cached_track(&track) {
+        track = cached.clone();
+        if let PlaybackSource::SearchResult { index } = source
+            && let Some(slot) = app.tracks.get_mut(index)
+        {
             *slot = cached;
         }
     }
@@ -186,7 +379,18 @@ pub fn play_track(
         let generation = app.resolve_generation;
         app.is_resolving = true;
         app.pending_track = Some(track.clone());
-        app.selected = index;
+        match source {
+            PlaybackSource::SearchResult { index } => {
+                app.selected = index;
+                app.pending_queue_entry_id = None;
+            }
+            PlaybackSource::Queue { entry_id } => {
+                app.pending_queue_entry_id = Some(entry_id);
+            }
+            PlaybackSource::History | PlaybackSource::Current => {
+                app.pending_queue_entry_id = None;
+            }
+        }
         app.set_status(format!("RESOLVING: {} — {}…", track.title, track.artist));
 
         let track_to_resolve = track;
@@ -198,62 +402,90 @@ pub fn play_track(
             let result = crate::music::resolve_playable(&track_to_resolve);
             let _ = resolve_tx.send(ResolveResponse {
                 generation,
-                index,
+                source,
                 spotify_id,
                 title,
                 artist,
                 result,
             });
         });
-        return;
+        return true;
     }
 
     app.cancel_pending_resolution();
-    start_playback(app, player, player_tx, index, track);
+    match start_playback(app, player, player_tx.clone(), track, source) {
+        Ok(()) => true,
+        Err(error) => {
+            if let PlaybackSource::Queue { .. } = source {
+                app.set_status(format!("PLAYER ERROR: {error}"));
+                recover_queue_failure(app, player, player_tx, resolve_tx)
+            } else {
+                false
+            }
+        }
+    }
 }
 
 pub fn start_playback(
     app: &mut App,
     player: &mut AudioPlayer,
     events: Sender<PlayerEvent>,
-    index: usize,
     track: Track,
-) {
-    let source = AudioPlayer::cached_audio(&track.stream_url)
+    source: PlaybackSource,
+) -> Result<(), String> {
+    let audio_source = AudioPlayer::cached_audio(&track.stream_url)
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_else(|| track.stream_url.clone());
 
-    match player.play(&source, app.volume, events) {
+    match player.play(&audio_source, app.volume, events) {
         Ok(()) => {
             app.is_resolving = false;
             app.pending_track = None;
-            app.playing = Some(index);
+            app.pending_queue_entry_id = None;
+            if let Some(old) = app.now_playing.take()
+                && (old.stream_url != track.stream_url || old.title != track.title)
+            {
+                app.push_history(old);
+            }
             app.now_playing = Some(track.clone());
-            app.selected = index;
             app.paused = false;
             app.played_once = false;
             app.set_status(format!("PLAYING: {} — {}", track.title, track.artist));
 
+            match source {
+                PlaybackSource::SearchResult { index } => {
+                    app.playing = Some(index);
+                    app.selected = index;
+                }
+                PlaybackSource::Queue { .. }
+                | PlaybackSource::History
+                | PlaybackSource::Current => {
+                    app.playing = None;
+                }
+            }
+
+            if let Some(next_queue) = app.queue.first() {
+                if app.settings.audio_cache {
+                    player.prefetch_later(&next_queue.track.stream_url, 25);
+                }
+                crate::artwork::prefetch(&next_queue.track.art_url);
+            }
+
             if app.settings.audio_cache {
                 player.prefetch_later(&track.stream_url, 15);
             }
-
-            if app.tracks.len() > 1 {
-                let next = app
-                    .tracks
-                    .get((index + 1) % app.tracks.len())
-                    .expect("index within tracks");
-
-                if app.settings.audio_cache {
-                    player.prefetch_later(&next.stream_url, 25);
-                }
-                crate::artwork::prefetch(&next.art_url);
-            }
+            Ok(())
         }
         Err(error) => {
+            if let Some(old) = app.now_playing.take()
+                && (old.stream_url != track.stream_url || old.title != track.title)
+            {
+                app.push_history(old);
+            }
             app.playing = None;
             app.now_playing = None;
             app.set_status(format!("PLAYER ERROR: {}", error));
+            Err(error)
         }
     }
 }
@@ -288,6 +520,7 @@ pub fn handle_resolve_response(
     app: &mut App,
     player: &mut AudioPlayer,
     player_tx: &Sender<PlayerEvent>,
+    resolve_tx: &Sender<ResolveResponse>,
     response: ResolveResponse,
 ) -> bool {
     if response.generation != app.resolve_generation {
@@ -301,39 +534,106 @@ pub fn handle_resolve_response(
         Ok(resolved) => {
             crate::music::cache_resolved_track(&resolved);
 
-            let Some(slot) = app.tracks.get_mut(response.index) else {
-                app.set_status(if app.now_playing.is_some() && player.is_playing() {
-                    now_playing(app)
-                } else {
-                    "RESOLVE CANCELLED".to_string()
-                });
-                return false;
-            };
+            match response.source {
+                PlaybackSource::SearchResult { index } => {
+                    let Some(slot) = app.tracks.get_mut(index) else {
+                        app.set_status(if app.now_playing.is_some() && player.is_playing() {
+                            now_playing(app)
+                        } else {
+                            "RESOLVE CANCELLED".to_string()
+                        });
+                        return false;
+                    };
 
-            let is_same = match (&slot.spotify_id, &response.spotify_id) {
-                (Some(a), Some(b)) => a == b,
-                _ => {
-                    slot.title.eq_ignore_ascii_case(&response.title)
-                        && slot.artist.eq_ignore_ascii_case(&response.artist)
+                    let is_same = match (&slot.spotify_id, &response.spotify_id) {
+                        (Some(a), Some(b)) => a == b,
+                        _ => {
+                            slot.title.eq_ignore_ascii_case(&response.title)
+                                && slot.artist.eq_ignore_ascii_case(&response.artist)
+                        }
+                    };
+
+                    if !is_same {
+                        app.set_status(if app.now_playing.is_some() && player.is_playing() {
+                            now_playing(app)
+                        } else {
+                            "RESOLVE CANCELLED".to_string()
+                        });
+                        return false;
+                    }
+
+                    *slot = resolved.clone();
+
+                    if let Err(error) = start_playback(
+                        app,
+                        player,
+                        player_tx.clone(),
+                        resolved,
+                        PlaybackSource::SearchResult { index },
+                    ) {
+                        app.set_status(format!("PLAYER ERROR: {error}"));
+                        return false;
+                    }
+                    true
                 }
-            };
+                PlaybackSource::Queue { entry_id } => {
+                    if app.pending_queue_entry_id.is_some()
+                        && app.pending_queue_entry_id != Some(entry_id)
+                    {
+                        return false;
+                    }
+                    app.pending_queue_entry_id = None;
 
-            if !is_same {
-                app.set_status(if app.now_playing.is_some() && player.is_playing() {
-                    now_playing(app)
-                } else {
-                    "RESOLVE CANCELLED".to_string()
-                });
-                return false;
+                    if let Some(pos) = app.queue.iter().position(|e| e.id == entry_id) {
+                        app.remove_queue_item(pos);
+                    }
+
+                    if let Err(error) = start_playback(
+                        app,
+                        player,
+                        player_tx.clone(),
+                        resolved,
+                        PlaybackSource::Queue { entry_id },
+                    ) {
+                        app.set_status(format!("PLAYER ERROR: {error}"));
+                        recover_queue_failure(app, player, player_tx.clone(), resolve_tx.clone());
+                        return false;
+                    }
+                    true
+                }
+                PlaybackSource::History => {
+                    let _ = start_playback(
+                        app,
+                        player,
+                        player_tx.clone(),
+                        resolved,
+                        PlaybackSource::History,
+                    );
+                    true
+                }
+                PlaybackSource::Current => {
+                    let _ = start_playback(
+                        app,
+                        player,
+                        player_tx.clone(),
+                        resolved,
+                        PlaybackSource::Current,
+                    );
+                    true
+                }
             }
-
-            *slot = resolved.clone();
-
-            start_playback(app, player, player_tx.clone(), response.index, resolved);
-            true
         }
         Err(error) => {
             app.set_status(format!("RESOLVE ERROR: {}", error));
+            app.pending_queue_entry_id = None;
+
+            if let PlaybackSource::Queue { entry_id } = response.source {
+                if let Some(pos) = app.queue.iter().position(|e| e.id == entry_id) {
+                    app.remove_queue_item(pos);
+                }
+                recover_queue_failure(app, player, player_tx.clone(), resolve_tx.clone());
+            }
+
             false
         }
     }

@@ -3,8 +3,8 @@ use std::sync::mpsc::Sender;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{
-    runner::{now_playing, play_track},
-    state::{App, Mode},
+    runner::{now_playing, play_next, play_previous, play_queue_item, play_search_result},
+    state::{App, ListFocus, Mode},
 };
 use crate::playback::{AudioPlayer, PlayerEvent, Repeat};
 
@@ -24,6 +24,11 @@ pub enum Action {
     ToggleProvider,
     ClearCache,
     Quit,
+    ToggleFocus,
+    EnqueueTrack,
+    RemoveQueueItem,
+    MoveQueueUp,
+    MoveQueueDown,
 }
 
 pub struct CommandInfo {
@@ -52,7 +57,7 @@ pub const COMMANDS: &[CommandInfo] = &[
     CommandInfo {
         id: Action::PreviousTrack,
         name: "Previous Track",
-        description: "Go back to previous track in queue",
+        description: "Play previously played track",
         shortcut: "←",
         category: "Playback",
     },
@@ -133,6 +138,41 @@ pub const COMMANDS: &[CommandInfo] = &[
         shortcut: "q",
         category: "System",
     },
+    CommandInfo {
+        id: Action::ToggleFocus,
+        name: "Switch Focus (Search / Queue)",
+        description: "Switch list focus between search results and queue",
+        shortcut: "Tab",
+        category: "Navigation",
+    },
+    CommandInfo {
+        id: Action::EnqueueTrack,
+        name: "Enqueue Track",
+        description: "Add highlighted search track to queue",
+        shortcut: "a",
+        category: "Playback",
+    },
+    CommandInfo {
+        id: Action::RemoveQueueItem,
+        name: "Remove from Queue",
+        description: "Remove highlighted track from playback queue",
+        shortcut: "Delete",
+        category: "Playback",
+    },
+    CommandInfo {
+        id: Action::MoveQueueUp,
+        name: "Move Queue Item Up",
+        description: "Move highlighted queue track earlier",
+        shortcut: "Alt+↑",
+        category: "Playback",
+    },
+    CommandInfo {
+        id: Action::MoveQueueDown,
+        name: "Move Queue Item Down",
+        description: "Move highlighted queue track later",
+        shortcut: "Alt+↓",
+        category: "Playback",
+    },
 ];
 
 pub const PANEL_KEYBINDS: &[(&str, &str)] = &[
@@ -140,6 +180,10 @@ pub const PANEL_KEYBINDS: &[(&str, &str)] = &[
     ("ENTER", "PLAY"),
     ("SPACE", "PAUSE"),
     ("←→", "TRACK"),
+    ("TAB", "FOCUS"),
+    ("A", "QUEUE"),
+    ("DEL", "REMOVE"),
+    ("ALT+↑↓", "REORDER"),
     ("X", "SHUFFLE"),
     ("R", "REPEAT"),
     (":", "COMMANDS"),
@@ -152,7 +196,8 @@ pub const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
         "PLAYBACK",
         &[
             ("Space", "Play / Pause playback"),
-            ("← / →", "Previous / Next track"),
+            ("←", "Play previously played track"),
+            ("→", "Next track in queue"),
             ("X", "Toggle shuffle mode"),
             ("R", "Cycle repeat (Off / All / One)"),
             ("+ / -", "Volume up / down (±5%)"),
@@ -161,8 +206,12 @@ pub const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
     (
         "NAVIGATION",
         &[
-            ("↑ / ↓", "Select track in list"),
+            ("Tab", "Switch focus between Search and Queue"),
+            ("↑ / ↓", "Select track in focused list"),
             ("Enter", "Play selected track"),
+            ("A", "Add highlighted search track to queue"),
+            ("Delete", "Remove highlighted track from queue"),
+            ("Alt+↑ / ↓", "Reorder queue item"),
             ("/", "Focus song search input"),
             ("Esc", "Clear search query / Close dialog"),
         ],
@@ -196,6 +245,14 @@ pub fn filtered_commands(query: &str) -> Vec<&'static CommandInfo> {
 }
 
 pub fn action_for_nav_key(key: KeyEvent) -> Option<Action> {
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        return match key.code {
+            KeyCode::Up => Some(Action::MoveQueueUp),
+            KeyCode::Down => Some(Action::MoveQueueDown),
+            _ => None,
+        };
+    }
+
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return match key.code {
             KeyCode::Char('p') | KeyCode::Char('P') => Some(Action::OpenCommandPalette),
@@ -216,6 +273,9 @@ pub fn action_for_nav_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('s') | KeyCode::Char('S') => Some(Action::OpenSettings),
         KeyCode::Char('?') => Some(Action::ToggleHelp),
         KeyCode::Char(':') => Some(Action::OpenCommandPalette),
+        KeyCode::Tab | KeyCode::BackTab => Some(Action::ToggleFocus),
+        KeyCode::Char('a') | KeyCode::Char('A') => Some(Action::EnqueueTrack),
+        KeyCode::Delete => Some(Action::RemoveQueueItem),
         _ => None,
     }
 }
@@ -236,7 +296,7 @@ pub fn dispatch_action(
                 return;
             }
 
-            if app.playing.is_some() {
+            if app.playing.is_some() || app.now_playing.is_some() {
                 match player.toggle_pause() {
                     Ok(()) => {
                         app.paused = !app.paused;
@@ -248,8 +308,16 @@ pub fn dispatch_action(
                     }
                     Err(error) => app.set_status(format!("PLAYER ERROR: {error}")),
                 }
+            } else if app.list_focus == ListFocus::Queue && !app.queue.is_empty() {
+                play_queue_item(
+                    app,
+                    player,
+                    player_tx.clone(),
+                    resolve_tx.clone(),
+                    app.queue_selected,
+                );
             } else if !app.tracks.is_empty() {
-                play_track(
+                play_search_result(
                     app,
                     player,
                     player_tx.clone(),
@@ -260,25 +328,18 @@ pub fn dispatch_action(
         }
 
         Action::NextTrack => {
-            let next = if app.shuffle {
-                app.shuffled_next()
-            } else {
-                app.next_index(1)
-            };
-
-            if let Some(index) = next {
-                play_track(app, player, player_tx.clone(), resolve_tx.clone(), index);
-            }
+            play_next(app, player, player_tx.clone(), resolve_tx.clone());
         }
 
         Action::PreviousTrack => {
-            if let Some(index) = app.next_index(-1) {
-                play_track(app, player, player_tx.clone(), resolve_tx.clone(), index);
-            }
+            play_previous(app, player, player_tx.clone(), resolve_tx.clone());
         }
 
         Action::ToggleShuffle => {
             app.shuffle = !app.shuffle;
+            if app.shuffle {
+                app.shuffle_queue();
+            }
             app.set_status(if app.shuffle {
                 "SHUFFLE ON"
             } else {
@@ -347,6 +408,31 @@ pub fn dispatch_action(
 
         Action::Quit => {
             app.should_quit = true;
+        }
+        Action::ToggleFocus => {
+            app.toggle_focus();
+        }
+        Action::EnqueueTrack => {
+            if app.list_focus == ListFocus::Search {
+                app.enqueue_selected();
+            }
+        }
+        Action::RemoveQueueItem => {
+            if app.list_focus == ListFocus::Queue
+                && let Some(entry) = app.remove_queue_item(app.queue_selected)
+            {
+                app.set_status(format!("REMOVED: {}", entry.track.title));
+            }
+        }
+        Action::MoveQueueUp => {
+            if app.list_focus == ListFocus::Queue {
+                app.move_selected_queue_item(-1);
+            }
+        }
+        Action::MoveQueueDown => {
+            if app.list_focus == ListFocus::Queue {
+                app.move_selected_queue_item(1);
+            }
         }
     }
 }

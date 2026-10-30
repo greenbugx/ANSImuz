@@ -2,14 +2,15 @@ use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph},
 };
 
-use crate::app::{App, Mode};
+use crate::app::{App, ListFocus, Mode};
 use crate::ui::components::{
     controls::render_controls,
     logo::{bitmap_lines, logo_bitmap, scale_bitmap},
     progress::render_progress_bar,
+    queue_list::render_queue_list,
     search_box::render_search_box,
     track_list::render_track_list,
     volume_timer::render_volume_timer,
@@ -216,37 +217,82 @@ pub fn render_player(
     theme: &Theme,
 ) {
     let layout = layout_player(area);
+    let has_queue_panel = layout.col_queue.width >= 8;
+    let is_search_focused = app.list_focus == ListFocus::Search;
+    let is_queue_focused = app.list_focus == ListFocus::Queue;
 
-    // LEFT SECTION: Search Results (top) and Keybinds (bottom)
-    let search_title = if app.last_query.is_empty() {
-        format!(" SEARCH RESULTS ({}) ", app.settings.provider.label())
+    // LEFT LOWER SECTION: Search Results or Queue (when queue panel is hidden)
+    if !has_queue_panel && is_queue_focused {
+        let count = app.queue.len();
+        let queue_title = if layout.search_area.width >= 16 {
+            format!(" UP NEXT ({count}) ")
+        } else if layout.search_area.width >= 10 {
+            format!(" Q ({count}) ")
+        } else {
+            " Q ".to_string()
+        };
+
+        let queue_block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.bold_primary)
+            .title(Line::from(vec![Span::styled(
+                queue_title,
+                theme.bold_primary,
+            )]));
+        let queue_inner = queue_block.inner(layout.search_area);
+        frame.render_widget(queue_block, layout.search_area);
+
+        render_queue_list(
+            frame,
+            queue_inner,
+            &app.queue,
+            app.queue_selected,
+            true,
+            theme,
+        );
     } else {
-        format!(
-            " RESULTS: {} ({}) ",
-            truncate(&app.last_query, 14),
-            app.settings.provider.label()
-        )
-    };
+        let search_title = if app.last_query.is_empty() {
+            format!(" SEARCH RESULTS ({}) ", app.settings.provider.label())
+        } else {
+            format!(
+                " RESULTS: {} ({}) ",
+                truncate(&app.last_query, 14),
+                app.settings.provider.label()
+            )
+        };
 
-    let search_block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(theme.primary)
-        .title(Line::from(vec![Span::styled(
-            search_title,
-            theme.bold_primary,
-        )]));
-    let search_inner = search_block.inner(layout.search_area);
-    frame.render_widget(search_block, layout.search_area);
+        let search_border_style = if is_search_focused || !has_queue_panel {
+            theme.bold_primary
+        } else {
+            theme.dim
+        };
 
-    render_track_list(
-        frame,
-        search_inner,
-        &app.tracks,
-        app.selected,
-        app.loading,
-        &app.last_query,
-        theme,
-    );
+        let search_title_style = if is_search_focused || !has_queue_panel {
+            theme.bold_primary
+        } else {
+            theme.primary
+        };
+
+        let search_block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(search_border_style)
+            .title(Line::from(vec![Span::styled(
+                search_title,
+                search_title_style,
+            )]));
+        let search_inner = search_block.inner(layout.search_area);
+        frame.render_widget(search_block, layout.search_area);
+
+        render_track_list(
+            frame,
+            search_inner,
+            &app.tracks,
+            app.selected,
+            app.loading,
+            &app.last_query,
+            theme,
+        );
+    }
 
     if layout.keybinds_area.height >= 3 {
         let keybinds_block = Block::default()
@@ -264,7 +310,7 @@ pub fn render_player(
                 .iter()
                 .map(|(key, action)| {
                     Line::from(vec![
-                        Span::styled(format!(" {:<7}", key), theme.bold_primary),
+                        Span::styled(format!(" {:<8}", key), theme.bold_primary),
                         Span::styled(*action, theme.dim),
                     ])
                 })
@@ -391,40 +437,45 @@ pub fn render_player(
 
     // RIGHT SECTION: Queue
     // only rendered when wide enough for 3-panel layout
-    if layout.col_queue.width >= 8 {
-        // TODO: add a persistent playback queue
-        let queue_title = if layout.col_queue.width >= 10 {
-            " QUEUE "
+    if has_queue_panel {
+        let count = app.queue.len();
+        let queue_title = if layout.col_queue.width >= 16 {
+            format!(" UP NEXT ({count}) ")
+        } else if layout.col_queue.width >= 10 {
+            format!(" Q ({count}) ")
         } else {
-            " Q "
+            " Q ".to_string()
+        };
+
+        let is_queue_focused = app.list_focus == ListFocus::Queue;
+        let queue_border_style = if is_queue_focused {
+            theme.bold_primary
+        } else {
+            theme.dim
+        };
+        let queue_title_style = if is_queue_focused {
+            theme.bold_primary
+        } else {
+            theme.primary
         };
 
         let queue_block = Block::default()
             .borders(Borders::ALL)
-            .border_style(theme.primary)
+            .border_style(queue_border_style)
             .title(Line::from(vec![Span::styled(
                 queue_title,
-                theme.bold_primary,
+                queue_title_style,
             )]));
         let queue_inner = queue_block.inner(layout.col_queue);
         frame.render_widget(queue_block, layout.col_queue);
 
-        let placeholder = if queue_inner.width >= 24 {
-            "Yet to be in service :)"
-        } else if queue_inner.width >= 16 {
-            "Coming soon :)"
-        } else if queue_inner.width >= 9 {
-            "Soon :)"
-        } else {
-            ":)"
-        };
-
-        frame.render_widget(
-            Paragraph::new(placeholder)
-                .style(theme.dim)
-                .alignment(Alignment::Center)
-                .wrap(Wrap { trim: true }),
+        render_queue_list(
+            frame,
             queue_inner,
+            &app.queue,
+            app.queue_selected,
+            is_queue_focused,
+            theme,
         );
     }
 }
@@ -693,34 +744,233 @@ mod tests {
             let title_row = (layout.col_queue.x..layout.col_queue.x + layout.col_queue.width)
                 .map(|x| buffer[(x, layout.col_queue.y)].symbol())
                 .collect::<String>();
-            if layout.col_queue.width >= 10 {
+            if layout.col_queue.width >= 16 {
                 assert!(
-                    title_row.contains("QUEUE"),
-                    "Must contain QUEUE title at width {width}"
+                    title_row.contains("UP NEXT (0)"),
+                    "Must contain UP NEXT (0) title at width {width}, got {title_row}"
+                );
+            } else if layout.col_queue.width >= 10 {
+                assert!(
+                    title_row.contains("Q (0)"),
+                    "Must contain Q (0) title at width {width}, got {title_row}"
                 );
             } else {
                 assert!(
                     title_row.contains("Q"),
-                    "Must contain Q title at width {width}"
+                    "Must contain Q title at width {width}, got {title_row}"
                 );
             }
 
-            // Check that the inner text contains the smiley without clipping
-            let mut found_smiley = false;
+            // Check that the empty state is rendered
+            let mut found_empty = false;
             for y in layout.col_queue.y + 1..layout.col_queue.y + layout.col_queue.height - 1 {
                 let row_str = (layout.col_queue.x + 1
                     ..layout.col_queue.x + layout.col_queue.width - 1)
                     .map(|x| buffer[(x, y)].symbol())
                     .collect::<String>();
-                if row_str.contains(":)") {
-                    found_smiley = true;
+                if row_str.contains("empty") || row_str.contains("Empty") {
+                    found_empty = true;
                     break;
                 }
             }
             assert!(
-                found_smiley,
-                "Queue placeholder must contain unclipped smiley at width {width}"
+                found_empty,
+                "Queue empty state must render at width {width}"
             );
         }
+    }
+
+    #[test]
+    fn test_render_player_queue_with_items_and_focus() {
+        use crate::music::Track;
+
+        let mut app = App::new();
+        let theme = Theme::new(None);
+        app.enqueue(Track {
+            title: "First Queue Song".into(),
+            artist: "Queue Artist".into(),
+            stream_url: "http://stream/1".into(),
+            art_url: "".into(),
+            spotify_id: None,
+            artists: vec!["Queue Artist".into()],
+            album: None,
+            duration_ms: None,
+        });
+        app.enqueue(Track {
+            title: "Second Queue Song".into(),
+            artist: "Queue Artist 2".into(),
+            stream_url: "http://stream/2".into(),
+            art_url: "".into(),
+            spotify_id: None,
+            artists: vec!["Queue Artist 2".into()],
+            album: None,
+            duration_ms: None,
+        });
+        app.list_focus = ListFocus::Queue;
+
+        let area = Rect::new(0, 0, 140, 30);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                render_player(frame, area, &app, None, &theme);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let layout = layout_player(area);
+
+        // Title must show live count
+        let title_row = (layout.col_queue.x..layout.col_queue.x + layout.col_queue.width)
+            .map(|x| buffer[(x, layout.col_queue.y)].symbol())
+            .collect::<String>();
+        assert!(
+            title_row.contains("UP NEXT (2)"),
+            "Title must show live count UP NEXT (2), got {title_row}"
+        );
+
+        // Inner rows must contain position numbers and track titles
+        let mut found_first = false;
+        let mut found_second = false;
+        for y in layout.col_queue.y + 1..layout.col_queue.y + layout.col_queue.height - 1 {
+            let row_str = (layout.col_queue.x + 1..layout.col_queue.x + layout.col_queue.width - 1)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>();
+            if row_str.contains("1.") && row_str.contains("FIRST QUEUE") {
+                found_first = true;
+            }
+            if row_str.contains("2.") && row_str.contains("SECOND QUEUE") {
+                found_second = true;
+            }
+        }
+        assert!(
+            found_first,
+            "Queue list must render first queued track with position"
+        );
+        assert!(
+            found_second,
+            "Queue list must render second queued track with position"
+        );
+    }
+
+    #[test]
+    fn test_render_player_narrow_fallback_medium_75_to_99() {
+        use crate::music::Track;
+
+        let mut app = App::new();
+        let theme = Theme::new(None);
+        app.enqueue(Track {
+            title: "Queued Item".into(),
+            artist: "Artist".into(),
+            stream_url: "http://stream/q".into(),
+            art_url: "".into(),
+            spotify_id: None,
+            artists: vec!["Artist".into()],
+            album: None,
+            duration_ms: None,
+        });
+
+        let area = Rect::new(0, 0, 85, 30);
+        let layout = layout_player(area);
+        assert_eq!(layout.col_queue.width, 0, "Queue panel hidden at 85 cols");
+
+        // With Search focus, left area renders SEARCH RESULTS
+        app.list_focus = ListFocus::Search;
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_player(frame, area, &app, None, &theme);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+
+        let left_title_row = (layout.search_area.x
+            ..layout.search_area.x + layout.search_area.width)
+            .map(|x| buffer[(x, layout.search_area.y)].symbol())
+            .collect::<String>();
+        assert!(
+            left_title_row.contains("SEARCH"),
+            "Left panel must show SEARCH when focused at 85 cols, got: {left_title_row}"
+        );
+
+        // With Queue focus, left area switches to UP NEXT (1)
+        app.list_focus = ListFocus::Queue;
+        terminal
+            .draw(|frame| {
+                render_player(frame, area, &app, None, &theme);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+
+        let left_title_row = (layout.search_area.x
+            ..layout.search_area.x + layout.search_area.width)
+            .map(|x| buffer[(x, layout.search_area.y)].symbol())
+            .collect::<String>();
+        assert!(
+            left_title_row.contains("UP NEXT (1)"),
+            "Left panel must show UP NEXT (1) when queue is focused at 85 cols, got: {left_title_row}"
+        );
+    }
+
+    #[test]
+    fn test_render_player_compact_fallback_40_to_74() {
+        use crate::music::Track;
+
+        let mut app = App::new();
+        let theme = Theme::new(None);
+        app.enqueue(Track {
+            title: "Compact Queue Song".into(),
+            artist: "Artist".into(),
+            stream_url: "http://stream/cq".into(),
+            art_url: "".into(),
+            spotify_id: None,
+            artists: vec!["Artist".into()],
+            album: None,
+            duration_ms: None,
+        });
+
+        let area = Rect::new(0, 0, 50, 24);
+        let layout = layout_player(area);
+        assert_eq!(layout.col_queue.width, 0, "Queue panel hidden at 50 cols");
+
+        // With Search focus, lower area shows SEARCH
+        app.list_focus = ListFocus::Search;
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_player(frame, area, &app, None, &theme);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+
+        let lower_title_row = (layout.search_area.x
+            ..layout.search_area.x + layout.search_area.width)
+            .map(|x| buffer[(x, layout.search_area.y)].symbol())
+            .collect::<String>();
+        assert!(
+            lower_title_row.contains("SEARCH"),
+            "Lower panel must show SEARCH when focused in compact mode, got: {lower_title_row}"
+        );
+
+        // With Queue focus, lower area switches to UP NEXT (1)
+        app.list_focus = ListFocus::Queue;
+        terminal
+            .draw(|frame| {
+                render_player(frame, area, &app, None, &theme);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+
+        let lower_title_row = (layout.search_area.x
+            ..layout.search_area.x + layout.search_area.width)
+            .map(|x| buffer[(x, layout.search_area.y)].symbol())
+            .collect::<String>();
+        assert!(
+            lower_title_row.contains("UP NEXT (1)"),
+            "Lower panel must switch to UP NEXT (1) when focused in compact mode, got: {lower_title_row}"
+        );
     }
 }
