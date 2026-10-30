@@ -22,23 +22,29 @@ static PREWARMED: LazyLock<()> = LazyLock::new(|| {
 });
 
 fn resolve_frame_path(frame_number: usize) -> Option<PathBuf> {
+    let frame_dir = crate::paths::data_dir().join("assets/frames");
     let filenames = [
+        format!("frame-{frame_number:03}.png"),
+        format!("frame_{frame_number:03}.png"),
+    ];
+
+    for name in &filenames {
+        let p = frame_dir.join(name);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+
+    let rel_filenames = [
         format!("assets/frames/frame-{frame_number:03}.png"),
         format!("assets/frames/frame_{frame_number:03}.png"),
     ];
 
-    for rel in filenames {
+    for rel in rel_filenames {
         // Current working directory
         let p = PathBuf::from(&rel);
         if p.exists() {
             return Some(p);
-        }
-        // Cargo manifest directory
-        if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
-            let p = PathBuf::from(manifest).join(&rel);
-            if p.exists() {
-                return Some(p);
-            }
         }
         // Executable directory ancestors
         if let Ok(exe) = std::env::current_exe()
