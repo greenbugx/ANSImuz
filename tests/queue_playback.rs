@@ -223,6 +223,59 @@ fn test_previous_track_rewinds_history_and_prepends_to_queue() {
 }
 
 #[test]
+fn test_previous_track_preserves_selected_queue_entry_id() {
+    use ansimuz::app::play_previous;
+
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    // History: [Track Prev]
+    // Currently playing: Track Current
+    // Queue:
+    //   0. Track A
+    //   1. Track B  <-- selected
+    app.history.push(make_test_track(
+        "Track Prev",
+        "Artist",
+        "http://stream/prev",
+    ));
+    app.now_playing = Some(make_test_track(
+        "Track Current",
+        "Artist",
+        "http://stream/cur",
+    ));
+    app.enqueue(make_test_track("Track A", "Artist", "http://stream/a"));
+    let track_b_id = app.enqueue(make_test_track("Track B", "Artist", "http://stream/b"));
+
+    app.queue_selected = 1;
+    assert_eq!(app.queue[app.queue_selected].id, track_b_id);
+    assert_eq!(app.queue[app.queue_selected].track.title, "Track B");
+
+    // User presses Previous
+    let prev_ok = play_previous(&mut app, &mut player, player_tx, resolve_tx);
+    assert!(prev_ok);
+
+    // Track Current is prepended to queue:
+    // Queue:
+    //   0. Track Current
+    //   1. Track A
+    //   2. Track B
+    // queue_selected must have shifted to index 2 so Track B remains selected!
+    assert_eq!(app.queue.len(), 3);
+    assert_eq!(app.queue_selected, 2);
+    assert_eq!(
+        app.queue[app.queue_selected].id, track_b_id,
+        "Selected queue entry ID must be preserved after Previous"
+    );
+    assert_eq!(
+        app.queue[app.queue_selected].track.title, "Track B",
+        "Track B must still be the selected entry after Previous"
+    );
+}
+
+#[test]
 fn test_next_and_previous_do_not_operate_on_search_results() {
     use ansimuz::app::play_previous;
 

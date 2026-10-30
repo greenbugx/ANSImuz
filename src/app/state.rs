@@ -265,6 +265,9 @@ impl App {
     }
 
     pub fn push_front_queue(&mut self, track: Track) -> u64 {
+        if !self.queue.is_empty() {
+            self.queue_selected += 1;
+        }
         let id = self.next_queue_id;
         self.next_queue_id = self.next_queue_id.wrapping_add(1);
         self.queue.insert(0, QueueEntry { id, track });
@@ -522,5 +525,23 @@ mod tests {
         app.clear_queue();
         assert!(app.queue.is_empty());
         assert_eq!(app.queue_selected, 0);
+    }
+
+    #[test]
+    fn test_push_front_queue_adjusts_queue_selected() {
+        let mut app = App::new();
+        app.enqueue(sample_track("Track A"));
+        let id_b = app.enqueue(sample_track("Track B"));
+        app.queue_selected = 1;
+
+        assert_eq!(app.queue[app.queue_selected].id, id_b);
+
+        app.push_front_queue(sample_track("Track C"));
+        assert_eq!(app.queue.len(), 3);
+        assert_eq!(app.queue[0].track.title, "Track C");
+        assert_eq!(app.queue[1].track.title, "Track A");
+        assert_eq!(app.queue[2].track.title, "Track B");
+        assert_eq!(app.queue_selected, 2);
+        assert_eq!(app.queue[app.queue_selected].id, id_b);
     }
 }
