@@ -13,6 +13,14 @@ pub fn data_dir() -> PathBuf {
         return PathBuf::from(path);
     }
 
+    // compile-time configured default
+    if let Some(path) = option_env!("ANSIMUZ_DATA_DIR") {
+        let p = PathBuf::from(path);
+        if has_data(&p) {
+            return p;
+        }
+    }
+
     // installed application
     let installed = PathBuf::from("/usr/share/ansimuz");
     if has_data(&installed) {

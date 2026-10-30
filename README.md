@@ -87,6 +87,10 @@ cargo test
 cargo run
 ```
 
+### Environment Variables
+
+- `ANSIMUZ_DATA_DIR`: Path to application runtime data (`backend/` and `assets/`). Packagers can configure this at compile time (`ANSIMUZ_DATA_DIR=/usr/share/ansimuz cargo build --release`) or users can override it at runtime. Defaults to `/usr/share/ansimuz` when installed, or the local project directory during development.
+
 ## Controls
 
 | Key | Context | Action |
