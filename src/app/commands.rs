@@ -105,8 +105,8 @@ pub const COMMANDS: &[CommandInfo] = &[
     },
     CommandInfo {
         id: Action::ToggleHelp,
-        name: "Help",
-        description: "Show keybindings and shortcut help",
+        name: "About",
+        description: "Show information about ANSImuz",
         shortcut: "?",
         category: "System",
     },
@@ -181,44 +181,8 @@ pub const PANEL_KEYBINDS: &[(&str, &str)] = &[
     ("X", "SHUFFLE"),
     ("R", "REPEAT"),
     (":", "COMMANDS"),
-    ("?", "HELP"),
+    ("?", "ABOUT"),
     ("Q", "QUIT"),
-];
-
-pub const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
-    (
-        "PLAYBACK",
-        &[
-            ("Space", "Play / Pause playback"),
-            ("←", "Play previously played track"),
-            ("→", "Next track in queue"),
-            ("X", "Toggle shuffle mode"),
-            ("R", "Cycle repeat (Off / All / One)"),
-            ("+ / -", "Volume up / down (±5%)"),
-        ],
-    ),
-    (
-        "NAVIGATION",
-        &[
-            ("Tab", "Switch focus between Search and Queue"),
-            ("↑ / ↓", "Select track in focused list"),
-            ("Enter", "Play selected track"),
-            ("A", "Add highlighted search track to queue"),
-            ("Delete", "Remove highlighted track from queue"),
-            ("Alt+↑ / ↓", "Reorder queue item"),
-            ("/", "Focus song search input"),
-            ("Esc", "Clear search query / Close dialog"),
-        ],
-    ),
-    (
-        "SYSTEM",
-        &[
-            (": / Ctrl+P", "Open command palette"),
-            ("S", "Open settings screen"),
-            ("?", "Toggle this help overlay"),
-            ("Q / Ctrl+C", "Quit ANSImuz"),
-        ],
-    ),
 ];
 
 pub fn filtered_commands(query: &str) -> Vec<&'static CommandInfo> {

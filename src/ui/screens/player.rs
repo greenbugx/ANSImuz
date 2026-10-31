@@ -333,7 +333,7 @@ pub fn render_player(
                     Span::styled("R:", theme.bold_primary),
                     Span::styled("Repeat  ", theme.dim),
                     Span::styled("?:", theme.bold_primary),
-                    Span::styled("Help  ", theme.dim),
+                    Span::styled("About  ", theme.dim),
                     Span::styled("Q:", theme.bold_primary),
                     Span::styled("Quit", theme.dim),
                 ]),

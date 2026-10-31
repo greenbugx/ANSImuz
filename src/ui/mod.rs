@@ -6,7 +6,7 @@ use ratatui::{Frame, layout::Alignment, widgets::Paragraph};
 
 use crate::app::App;
 use screens::{
-    command_palette::render_command_palette, help::render_help, player::render_player,
+    about::render_about, command_palette::render_command_palette, player::render_player,
     settings::render_settings,
 };
 
@@ -45,7 +45,7 @@ pub fn render(app: &App, frame: &mut Frame, playback: Option<(f64, Option<f64>)>
     }
 
     if app.help_open {
-        render_help(frame, area, &theme);
+        render_about(frame, area, &theme);
     } else if app.command_palette_open {
         render_command_palette(
             frame,

@@ -137,6 +137,31 @@ fn render_hq(frame: &mut Frame, area: Rect, image: &DynamicImage) -> bool {
     true
 }
 
+pub fn render_static_image(frame: &mut Frame, area: Rect, image: &DynamicImage) {
+    if area.width < 2 || area.height < 1 {
+        return;
+    }
+
+    if render_hq(frame, area, image) {
+        return;
+    }
+
+    let side = ((area.height as u32) * 2).min(area.width as u32).max(2) & !1;
+    let (w, h) = image.dimensions();
+    if w == 0 || h == 0 {
+        return;
+    }
+
+    let target_h = (side * h / w.max(1)).max(1);
+    let resized = image.resize_exact(side, target_h, FilterType::Triangle);
+
+    let mut square = DynamicImage::new_rgba8(side, side);
+    let y_offset = (side.saturating_sub(target_h)) / 2;
+    image::imageops::overlay(&mut square, &resized, 0, y_offset as i64);
+
+    render_pixels(frame, area, square, side);
+}
+
 fn render_animated_frame(frame: &mut Frame, art_area: Rect, image: &DynamicImage) {
     // Make animation smaller (~68% of art_area height, at least 4 rows)
     let anim_rows = if art_area.height >= 12 {
