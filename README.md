@@ -2,9 +2,10 @@
   <img src="assets/logo_nobg.png" alt="ANSImuz Logo" width="320" />
   <p>A lightweight terminal music player with retro 8-bit ANSI vibes</p>
   <p>
-    <a href="https://hub.xerj.org/contributors/greenbugx"><img src="https://hub.xerj.org/contributors/greenbugx/badge.svg" alt="XERJ Corpus Hub contributor" /></a>
     <a href="https://github.com/greenbugx/ANSImuz/actions/workflows/ci.yml"><img src="https://github.com/greenbugx/ANSImuz/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
-    <a href="https://copr.fedorainfracloud.org/coprs/greenbugx/ansimuz/package/ansimuz/"><img src="https://copr.fedorainfracloud.org/coprs/greenbugx/ansimuz/package/ansimuz/status_image/last_build.png" alt="COPR build status" /></a>
+    <a href="https://copr.fedorainfracloud.org/coprs/greenbugx/ansimuz/package/ansimuz/"><img src="https://copr.fedorainfracloud.org/coprs/greenbugx/ansimuz/package/ansimuz/status_image/last_build.png" alt="COPR build status" /></a> <br>
+    <a href="https://github.com/greenbugx/ANSImuz/releases/latest"><img src="https://img.shields.io/github/v/release/greenbugx/ANSImuz" alt="Latest version" /></a>
+    <a href="https://hub.xerj.org/contributors/greenbugx"><img src="https://hub.xerj.org/contributors/greenbugx/badge.svg" alt="XERJ Corpus Hub contributor" /></a>
   </p>
 </div>
 
