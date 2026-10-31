@@ -82,7 +82,8 @@ ANSImuz/
 ├── assets/           # Logo and animation frames
 ├── scripts/          # Linux and Windows installer scripts
 ├── packaging/
-│   └── arch/         # PKGBUILD for Arch Linux
+│   ├── arch/         # PKGBUILD for Arch Linux
+│   └── rpm/          # RPM specs for Fedora (COPR)
 ├── tests/            # Integration test suites (queue, queue_playback, resolution, artwork)
 └── .github/          # CI workflows
 ```
@@ -124,6 +125,46 @@ Run the installed binary from a directory outside the repository to confirm sear
 
 ---
 
+## Packaging (Fedora / COPR)
+
+`packaging/fedora/` contains two RPM specs, built in the [`greenbugx/ansimuz`](https://copr.fedorainfracloud.org/coprs/greenbugx/ansimuz/) COPR project:
+
+- `ansimuz.spec` builds ANSImuz from a **pinned commit** (`%global commit`). The version uses a caret snapshot, e.g. `0.1.0^20261031git0abb051`. It installs the binary to `/usr/bin/ansimuz` and `backend/` and `assets/` to `/usr/share/ansimuz/`, and builds with `ANSIMUZ_DATA_DIR=/usr/share/ansimuz`.
+- `python-spotifyscraper.spec` packages `spotifyscraper`, which is not in the Fedora repositories. `ansimuz` requires it as `python3dist(spotifyscraper)`.
+
+Update the specs when you:
+
+- add, remove, or rename a Python or system dependency (keep `Requires` in sync with `requirements.txt`)
+- change how runtime data is located, or add new top-level runtime directories that must be installed
+- change the license or add files that should be installed alongside the binary
+
+To move `ansimuz.spec` to a newer upstream commit:
+
+```bash
+cd packaging/fedora
+NEW=$(git ls-remote https://github.com/greenbugx/ANSImuz HEAD | cut -f1)
+sed -i "s/^%global commit .*/%global commit $NEW/; s/^%global commitdate .*/%global commitdate $(date +%Y%m%d)/" ansimuz.spec
+```
+
+Then add a `%changelog` entry with the new version, and reset `Release` to `1`.
+
+To test a spec before uploading to COPR:
+
+```bash
+rm -f ~/rpmbuild/SRPMS/ansimuz-*.src.rpm    # mock rejects a glob that matches several SRPMs
+spectool -g -R ansimuz.spec
+rpmbuild -bs ansimuz.spec
+mock -r fedora-rawhide-x86_64 --enable-network rebuild ~/rpmbuild/SRPMS/ansimuz-*.src.rpm
+```
+
+Notes for maintainers:
+
+- The COPR project needs **"Enable internet access during builds"** turned on, because `ansimuz.spec` runs `cargo fetch`.
+- Build `python-spotifyscraper` before `ansimuz`, and build both for **every Fedora release enabled in the project**. Packages depend on that release's Python version, so a release missing a build fails to install with `nothing provides python(abi) = ...`.
+- Do not commit `*.rpm`, `*.src.rpm`, or source tarballs.
+
+---
+
 ## Validation Before Submitting
 
 Before submitting a pull request, verify that all local checks pass cleanly:
@@ -145,7 +186,7 @@ cargo test
 python -m py_compile backend/bridge.py backend/artwork/thumbnails.py backend/providers/spotify/spotify.py backend/providers/ytmusic/ytmusic.py
 ```
 
-If your change touches `packaging/arch/`, also run the packaging test described in [Packaging (Arch Linux)](#packaging-arch-linux).
+If your change touches `packaging/arch/` or `packaging/fedora/`, also run the matching packaging test: [Packaging (Arch Linux)](#packaging-arch-linux) or [Packaging (Fedora / COPR)](#packaging-fedora--copr).
 
 ---
 

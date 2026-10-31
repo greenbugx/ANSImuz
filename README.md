@@ -4,7 +4,7 @@
   <p>
     <a href="https://hub.xerj.org/contributors/greenbugx"><img src="https://hub.xerj.org/contributors/greenbugx/badge.svg" alt="XERJ Corpus Hub contributor" /></a>
     <a href="https://github.com/greenbugx/ANSImuz/actions/workflows/ci.yml"><img src="https://github.com/greenbugx/ANSImuz/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
-    <a href="https://copr.fedorainfracloud.org/coprs/greenbugx/ansimuz/package/ansimuz/"><img src="https://copr.fedorainfracloud.org/coprs/greenbugx/ansimuz/package/ansimuz/status_image/last_build.png" /></a>
+    <a href="https://copr.fedorainfracloud.org/coprs/greenbugx/ansimuz/package/ansimuz/"><img src="https://copr.fedorainfracloud.org/coprs/greenbugx/ansimuz/package/ansimuz/status_image/last_build.png" alt="COPR build status" /></a>
   </p>
 </div>
 
@@ -57,7 +57,10 @@ sudo dnf copr enable greenbugx/ansimuz
 sudo dnf install ansimuz
 ```
 
-The package installs the binary to `/usr/bin/ansimuz` and runtime data to `/usr/share/ansimuz`.
+This also installs `python3-spotifyscraper` from the same COPR repository. The package installs the binary to `/usr/bin/ansimuz` and runtime data to `/usr/share/ansimuz`.
+
+> [!NOTE]
+> Packages are built per Fedora release and depend on that release's Python version. If `dnf` fails with `nothing provides python(abi) = ...`, your Fedora release is not built in the COPR yet. Please open an issue and include the output of `grep VERSION_ID /etc/os-release`.
 
 To remove it:
 
@@ -71,9 +74,9 @@ sudo dnf copr remove greenbugx/ansimuz
 > [!NOTE]
 > These setups are intended for **development**. ANSImuz uses a Python virtual environment (`.venv`) for its backend, so you must activate it in every new terminal session before running `cargo run` or the compiled binary. Otherwise the backend (search, streaming, artwork) will not work.
 >
-> On Arch Linux, the [PKGBUILD](#arch-linux-pkgbuild) installs ANSImuz system-wide and needs no virtual environment.
+> On Arch Linux ([PKGBUILD](#arch-linux-pkgbuild)) and Fedora ([COPR](#fedora-copr)), the packages install ANSImuz system-wide.
 
-### Automated Setup (Recommended) 
+### Automated Setup (Recommended)
 
 Run the installer for your operating system. It installs all prerequisites (including `mpv` and `yt-dlp`), creates the Python environment, installs dependencies, and compiles the release binary:
 
