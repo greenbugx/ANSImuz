@@ -358,13 +358,11 @@ pub fn dispatch_action(
         Action::VolumeUp => {
             app.volume = app.volume.saturating_add(5).min(100);
             let _ = player.set_volume(app.volume);
-            app.set_status(format!("VOLUME {}", app.volume));
         }
 
         Action::VolumeDown => {
             app.volume = app.volume.saturating_sub(5);
             let _ = player.set_volume(app.volume);
-            app.set_status(format!("VOLUME {}", app.volume));
         }
 
         Action::FocusSearch => {
