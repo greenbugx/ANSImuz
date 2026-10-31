@@ -141,7 +141,7 @@ Update the specs when you:
 To move `ansimuz.spec` to a newer upstream commit:
 
 ```bash
-cd packaging/fedora
+cd packaging/rpm
 NEW=$(git ls-remote https://github.com/greenbugx/ANSImuz HEAD | cut -f1)
 sed -i "s/^%global commit .*/%global commit $NEW/; s/^%global commitdate .*/%global commitdate $(date +%Y%m%d)/" ansimuz.spec
 ```
