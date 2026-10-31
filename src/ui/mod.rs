@@ -7,7 +7,7 @@ use ratatui::{Frame, layout::Alignment, widgets::Paragraph};
 use crate::app::App;
 use screens::{
     about::render_about, command_palette::render_command_palette, player::render_player,
-    settings::render_settings,
+    quit_dialog::render_quit_dialog, settings::render_settings,
 };
 
 fn current_palette_color(app: &App) -> Option<(u8, u8, u8)> {
@@ -44,7 +44,9 @@ pub fn render(app: &App, frame: &mut Frame, playback: Option<(f64, Option<f64>)>
         render_player(frame, area, app, playback, &theme);
     }
 
-    if app.about_open {
+    if app.quit_dialog_open {
+        render_quit_dialog(frame, area, app.quit_dialog_choice, &theme);
+    } else if app.about_open {
         render_about(frame, area, &theme);
     } else if app.command_palette_open {
         render_command_palette(

@@ -18,6 +18,37 @@ pub fn handle_key(
     player_tx: &Sender<PlayerEvent>,
     resolve_tx: &Sender<crate::music::ResolveResponse>,
 ) {
+    if app.quit_dialog_open {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                app.close_quit_dialog();
+            }
+
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                app.close_quit_dialog();
+                app.should_quit = true;
+            }
+
+            KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab => {
+                app.quit_dialog_choice = match app.quit_dialog_choice {
+                    crate::app::state::QuitChoice::Yes => crate::app::state::QuitChoice::No,
+                    crate::app::state::QuitChoice::No => crate::app::state::QuitChoice::Yes,
+                };
+            }
+
+            KeyCode::Enter => {
+                let choice = app.quit_dialog_choice;
+                app.close_quit_dialog();
+                if choice == crate::app::state::QuitChoice::Yes {
+                    app.should_quit = true;
+                }
+            }
+
+            _ => {}
+        }
+        return;
+    }
+
     if app.command_palette_open {
         match key.code {
             KeyCode::Esc => app.close_command_palette(),
@@ -295,5 +326,95 @@ mod tests {
                 .any(|cmd| cmd.name.eq_ignore_ascii_case("command palette")),
             "Command palette should not list itself"
         );
+    }
+
+    #[test]
+    fn test_quit_dialog_open_on_q_and_cancel_or_confirm() {
+        use crate::app::state::QuitChoice;
+
+        let mut app = App::new();
+        let mut player = AudioPlayer::new_mock();
+        let (player_tx, _player_rx) = channel();
+        let (search_tx, _search_rx) = channel();
+        let (resolve_tx, _resolve_rx) = channel();
+
+        // Pressing 'q' opens quit confirmation dialog instead of directly quitting
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Char('q')),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert!(app.quit_dialog_open, "Quit dialog must open on 'q'");
+        assert!(!app.should_quit, "Must not quit directly");
+        assert_eq!(app.quit_dialog_choice, QuitChoice::Yes);
+
+        // Arrow right toggles to No
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Right),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert_eq!(app.quit_dialog_choice, QuitChoice::No);
+
+        // Enter on No cancels
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Enter),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert!(!app.quit_dialog_open, "Quit dialog must close on cancel");
+        assert!(!app.should_quit, "Must not quit on cancel");
+
+        // Re-open and cancel with Esc
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Char('q')),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert!(app.quit_dialog_open);
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Esc),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert!(!app.quit_dialog_open);
+        assert!(!app.should_quit);
+
+        // Re-open and confirm with Enter on Yes
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Char('q')),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert!(app.quit_dialog_open);
+        assert_eq!(app.quit_dialog_choice, QuitChoice::Yes);
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Enter),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert!(!app.quit_dialog_open);
+        assert!(app.should_quit, "Must quit on confirming Yes");
     }
 }

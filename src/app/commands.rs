@@ -363,7 +363,7 @@ pub fn dispatch_action(
         }
 
         Action::Quit => {
-            app.should_quit = true;
+            app.open_quit_dialog();
         }
         Action::ToggleFocus => {
             app.toggle_focus();
