@@ -127,7 +127,7 @@ Run the installed binary from a directory outside the repository to confirm sear
 
 ## Packaging (Fedora / COPR)
 
-`packaging/fedora/` contains two RPM specs, built in the [`greenbugx/ansimuz`](https://copr.fedorainfracloud.org/coprs/greenbugx/ansimuz/) COPR project:
+`packaging/rpm/` contains two RPM specs, built in the [`greenbugx/ansimuz`](https://copr.fedorainfracloud.org/coprs/greenbugx/ansimuz/) COPR project:
 
 - `ansimuz.spec` builds ANSImuz from a **pinned commit** (`%global commit`). The version uses a caret snapshot, e.g. `0.1.0^20261031git0abb051`. It installs the binary to `/usr/bin/ansimuz` and `backend/` and `assets/` to `/usr/share/ansimuz/`, and builds with `ANSIMUZ_DATA_DIR=/usr/share/ansimuz`.
 - `python-spotifyscraper.spec` packages `spotifyscraper`, which is not in the Fedora repositories. `ansimuz` requires it as `python3dist(spotifyscraper)`.
@@ -186,7 +186,7 @@ cargo test
 python -m py_compile backend/bridge.py backend/artwork/thumbnails.py backend/providers/spotify/spotify.py backend/providers/ytmusic/ytmusic.py
 ```
 
-If your change touches `packaging/arch/` or `packaging/fedora/`, also run the matching packaging test: [Packaging (Arch Linux)](#packaging-arch-linux) or [Packaging (Fedora / COPR)](#packaging-fedora--copr).
+If your change touches `packaging/arch/` or `packaging/rpm/`, also run the matching packaging test: [Packaging (Arch Linux)](#packaging-arch-linux) or [Packaging (Fedora / COPR)](#packaging-fedora--copr).
 
 ---
 
