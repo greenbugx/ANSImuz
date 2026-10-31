@@ -90,7 +90,7 @@ pub fn layout_player(area: Rect) -> PlayerLayout {
 
     let keybinds_height = if col_left.height >= 16 {
         (crate::app::commands::PANEL_KEYBINDS.len() as u16 + 2)
-            .min(col_left.height.saturating_sub(6))
+            .min(col_left.height.saturating_sub(4))
     } else if col_left.height >= 8 {
         4
     } else {

@@ -181,6 +181,7 @@ pub const PANEL_KEYBINDS: &[(&str, &str)] = &[
     ("SPACE", "PAUSE"),
     ("←→", "TRACK"),
     ("TAB", "FOCUS"),
+    ("/", "SEARCH"),
     ("A", "QUEUE"),
     ("DEL", "REMOVE"),
     ("ALT+↑↓", "REORDER"),
