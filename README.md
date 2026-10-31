@@ -4,6 +4,7 @@
   <p>
     <a href="https://hub.xerj.org/contributors/greenbugx"><img src="https://hub.xerj.org/contributors/greenbugx/badge.svg" alt="XERJ Corpus Hub contributor" /></a>
     <a href="https://github.com/greenbugx/ANSImuz/actions/workflows/ci.yml"><img src="https://github.com/greenbugx/ANSImuz/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+    <a href="https://copr.fedorainfracloud.org/coprs/greenbugx/ansimuz/package/ansimuz/"><img src="https://copr.fedorainfracloud.org/coprs/greenbugx/ansimuz/package/ansimuz/status_image/last_build.png" /></a>
   </p>
 </div>
 
@@ -47,6 +48,22 @@ paru -S python-spotifyscraper    # or yay -S, or build it manually from the AUR
 git clone https://github.com/greenbugx/ANSImuz.git
 cd ANSImuz/packaging/arch
 makepkg -si
+```
+
+### Fedora (COPR)
+
+```bash
+sudo dnf copr enable greenbugx/ansimuz
+sudo dnf install ansimuz
+```
+
+The package installs the binary to `/usr/bin/ansimuz` and runtime data to `/usr/share/ansimuz`.
+
+To remove it:
+
+```bash
+sudo dnf remove ansimuz
+sudo dnf copr remove greenbugx/ansimuz
 ```
 
 ## Development Setup
