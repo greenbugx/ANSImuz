@@ -54,32 +54,6 @@ pub fn render_about(frame: &mut Frame, area: Rect, theme: &Theme) {
 
     let logo_w = (logo_h * 2).min(inner.width);
 
-    let spacing = if logo_h > 0 { 1 } else { 0 };
-    let text_lines_count = 8;
-    let total_used = logo_h + spacing + text_lines_count;
-    let y_pad = (inner.height.saturating_sub(total_used)) / 2;
-
-    if logo_h > 0
-        && let Some(logo) = LOGO_IMAGE.as_ref()
-    {
-        let logo_rect = Rect {
-            x: inner.x + (inner.width.saturating_sub(logo_w)) / 2,
-            y: inner.y + y_pad,
-            width: logo_w,
-            height: logo_h,
-        };
-        render_static_image(frame, logo_rect, logo);
-    }
-
-    let text_y = inner.y + y_pad + logo_h + spacing;
-    let text_h = inner.height.saturating_sub(text_y - inner.y);
-    let text_rect = Rect {
-        x: inner.x,
-        y: text_y,
-        width: inner.width,
-        height: text_h,
-    };
-
     let lines = vec![
         Line::from(vec![Span::styled(
             "A lightweight fast TUI to stream your favourite music",
@@ -108,6 +82,32 @@ pub fn render_about(frame: &mut Frame, area: Rect, theme: &Theme) {
         Line::raw(""),
         Line::from(vec![Span::styled("Press '?' or 'Esc' to close", theme.dim)]),
     ];
+
+    let spacing = if logo_h > 0 { 1 } else { 0 };
+    let text_lines_count = lines.len() as u16;
+    let total_used = logo_h + spacing + text_lines_count;
+    let y_pad = (inner.height.saturating_sub(total_used)) / 2;
+
+    if logo_h > 0
+        && let Some(logo) = LOGO_IMAGE.as_ref()
+    {
+        let logo_rect = Rect {
+            x: inner.x + (inner.width.saturating_sub(logo_w)) / 2,
+            y: inner.y + y_pad,
+            width: logo_w,
+            height: logo_h,
+        };
+        render_static_image(frame, logo_rect, logo);
+    }
+
+    let text_y = inner.y + y_pad + logo_h + spacing;
+    let text_h = inner.height.saturating_sub(text_y - inner.y);
+    let text_rect = Rect {
+        x: inner.x,
+        y: text_y,
+        width: inner.width,
+        height: text_h,
+    };
 
     frame.render_widget(
         Paragraph::new(lines).alignment(Alignment::Center),
