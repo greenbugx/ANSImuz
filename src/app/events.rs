@@ -23,13 +23,24 @@ pub fn handle_key(
             KeyCode::Esc => app.close_command_palette(),
 
             KeyCode::Up => {
-                app.command_palette_cursor = app.command_palette_cursor.saturating_sub(1);
+                let count = filtered_commands(&app.command_palette_query).len();
+                if count > 0 {
+                    if app.command_palette_cursor == 0 {
+                        app.command_palette_cursor = count - 1;
+                    } else {
+                        app.command_palette_cursor -= 1;
+                    }
+                }
             }
 
             KeyCode::Down => {
                 let count = filtered_commands(&app.command_palette_query).len();
                 if count > 0 {
-                    app.command_palette_cursor = (app.command_palette_cursor + 1).min(count - 1);
+                    if app.command_palette_cursor + 1 >= count {
+                        app.command_palette_cursor = 0;
+                    } else {
+                        app.command_palette_cursor += 1;
+                    }
                 }
             }
 
@@ -195,5 +206,94 @@ pub fn handle_key(
                 _ => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+    use std::sync::mpsc::channel;
+
+    use super::*;
+    use crate::app::App;
+    use crate::playback::AudioPlayer;
+
+    fn make_key(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::empty(),
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        }
+    }
+
+    #[test]
+    fn test_command_palette_wrap_around() {
+        let mut app = App::new();
+        let mut player = AudioPlayer::new_mock();
+        let (player_tx, _player_rx) = channel();
+        let (search_tx, _search_rx) = channel();
+        let (resolve_tx, _resolve_rx) = channel();
+
+        app.open_command_palette();
+        assert_eq!(app.command_palette_cursor, 0);
+
+        let count = crate::app::commands::filtered_commands("").len();
+        assert!(count > 1);
+
+        // Up at top wraps to bottom
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Up),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert_eq!(app.command_palette_cursor, count - 1);
+
+        // Down at bottom wraps to top
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Down),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert_eq!(app.command_palette_cursor, 0);
+
+        // Down moves to 1
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Down),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert_eq!(app.command_palette_cursor, 1);
+
+        // Up moves back to 0
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Up),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert_eq!(app.command_palette_cursor, 0);
+    }
+
+    #[test]
+    fn test_command_palette_no_redundant_palette_option() {
+        let commands = crate::app::commands::filtered_commands("");
+        assert!(
+            !commands
+                .iter()
+                .any(|cmd| cmd.name.eq_ignore_ascii_case("command palette")),
+            "Command palette should not list itself"
+        );
     }
 }

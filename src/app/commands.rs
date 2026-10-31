@@ -111,13 +111,6 @@ pub const COMMANDS: &[CommandInfo] = &[
         category: "System",
     },
     CommandInfo {
-        id: Action::OpenCommandPalette,
-        name: "Command Palette",
-        description: "Open searchable command palette",
-        shortcut: ":",
-        category: "System",
-    },
-    CommandInfo {
         id: Action::ClearCache,
         name: "Clear Cache",
         description: "Remove cached artwork and audio from disk",
