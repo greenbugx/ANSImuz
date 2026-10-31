@@ -33,14 +33,30 @@ ANSImuz is built with Rust, Ratatui, Python, [`ytmusicapi`](https://github.com/s
 
 ## Installation
 
-Clone the repository:
+### Arch Linux (PKGBUILD)
+
+> [!WARNING]
+> Review any AUR package before installing it, including `python-spotifyscraper`.
+
+A `PKGBUILD` is available in [`packaging/arch`](packaging/arch). It builds the latest `main` and installs ANSImuz system-wide (binary in `/usr/bin`, runtime data in `/usr/share/ansimuz`).
+
+`python-spotifyscraper` is an AUR package, so install it first:
 
 ```bash
+paru -S python-spotifyscraper    # or yay -S, or build it manually from the AUR
 git clone https://github.com/greenbugx/ANSImuz.git
-cd ANSImuz
+cd ANSImuz/packaging/arch
+makepkg -si
 ```
 
-### Automated Setup (Recommended)
+## Development Setup
+
+> [!NOTE]
+> These setups are intended for **development**. ANSImuz uses a Python virtual environment (`.venv`) for its backend, so you must activate it in every new terminal session before running `cargo run` or the compiled binary. Otherwise the backend (search, streaming, artwork) will not work.
+>
+> On Arch Linux, the [PKGBUILD](#arch-linux-pkgbuild) installs ANSImuz system-wide and needs no virtual environment.
+
+### Automated Setup (Recommended) 
 
 Run the installer for your operating system. It installs all prerequisites (including `mpv` and `yt-dlp`), creates the Python environment, installs dependencies, and compiles the release binary:
 
@@ -91,6 +107,14 @@ cargo run
 
 - `ANSIMUZ_DATA_DIR`: Path to application runtime data (`backend/` and `assets/`). Packagers can configure this at compile time (`ANSIMUZ_DATA_DIR=/usr/share/ansimuz cargo build --release`) or users can override it at runtime. Defaults to `/usr/share/ansimuz` when installed, or the local project directory during development.
 
+The data directory is resolved in this order:
+
+1. `ANSIMUZ_DATA_DIR` set at runtime (used as-is)
+2. `ANSIMUZ_DATA_DIR` set at compile time (if it contains `backend/` and `assets/`)
+3. `/usr/share/ansimuz` (if it contains `backend/` and `assets/`)
+4. The current working directory (if it contains `backend/` and `assets/`)
+5. The executable's directory and its parents, e.g. `target/release/` (if one contains `backend/` and `assets/`)
+
 ## Controls
 
 | Key | Context | Action |
@@ -113,6 +137,7 @@ cargo run
 | `?` | Nav | Toggle help overlay |
 | `Esc` | Any | Clear search query / close overlay / cancel resolution |
 | `Q` / `Ctrl+C` | Nav | Quit ANSImuz |
+
 ## License
 
 See [LICENSE](LICENSE) for license information.
