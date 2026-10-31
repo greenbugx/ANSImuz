@@ -18,18 +18,60 @@ pub fn handle_key(
     player_tx: &Sender<PlayerEvent>,
     resolve_tx: &Sender<crate::music::ResolveResponse>,
 ) {
+    if app.quit_dialog_open {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                app.close_quit_dialog();
+            }
+
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                app.close_quit_dialog();
+                app.should_quit = true;
+            }
+
+            KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab => {
+                app.quit_dialog_choice = match app.quit_dialog_choice {
+                    crate::app::state::QuitChoice::Yes => crate::app::state::QuitChoice::No,
+                    crate::app::state::QuitChoice::No => crate::app::state::QuitChoice::Yes,
+                };
+            }
+
+            KeyCode::Enter => {
+                let choice = app.quit_dialog_choice;
+                app.close_quit_dialog();
+                if choice == crate::app::state::QuitChoice::Yes {
+                    app.should_quit = true;
+                }
+            }
+
+            _ => {}
+        }
+        return;
+    }
+
     if app.command_palette_open {
         match key.code {
             KeyCode::Esc => app.close_command_palette(),
 
             KeyCode::Up => {
-                app.command_palette_cursor = app.command_palette_cursor.saturating_sub(1);
+                let count = filtered_commands(&app.command_palette_query).len();
+                if count > 0 {
+                    if app.command_palette_cursor == 0 {
+                        app.command_palette_cursor = count - 1;
+                    } else {
+                        app.command_palette_cursor -= 1;
+                    }
+                }
             }
 
             KeyCode::Down => {
                 let count = filtered_commands(&app.command_palette_query).len();
                 if count > 0 {
-                    app.command_palette_cursor = (app.command_palette_cursor + 1).min(count - 1);
+                    if app.command_palette_cursor + 1 >= count {
+                        app.command_palette_cursor = 0;
+                    } else {
+                        app.command_palette_cursor += 1;
+                    }
                 }
             }
 
@@ -57,7 +99,7 @@ pub fn handle_key(
         return;
     }
 
-    if app.help_open {
+    if app.about_open {
         match key.code {
             KeyCode::Esc
             | KeyCode::Char('?')
@@ -65,7 +107,7 @@ pub fn handle_key(
             | KeyCode::Char('Q')
             | KeyCode::Enter
             | KeyCode::Char(' ') => {
-                app.help_open = false;
+                app.about_open = false;
             }
             _ => {}
         }
@@ -93,7 +135,7 @@ pub fn handle_key(
                 app.mode = Mode::Nav;
             }
             KeyCode::Char('?') => {
-                app.toggle_help();
+                app.toggle_about();
             }
             KeyCode::Char(':') => {
                 app.open_command_palette();
@@ -195,5 +237,184 @@ pub fn handle_key(
                 _ => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+    use std::sync::mpsc::channel;
+
+    use super::*;
+    use crate::app::App;
+    use crate::playback::AudioPlayer;
+
+    fn make_key(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::empty(),
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        }
+    }
+
+    #[test]
+    fn test_command_palette_wrap_around() {
+        let mut app = App::new();
+        let mut player = AudioPlayer::new_mock();
+        let (player_tx, _player_rx) = channel();
+        let (search_tx, _search_rx) = channel();
+        let (resolve_tx, _resolve_rx) = channel();
+
+        app.open_command_palette();
+        assert_eq!(app.command_palette_cursor, 0);
+
+        let count = crate::app::commands::filtered_commands("").len();
+        assert!(count > 1);
+
+        // Up at top wraps to bottom
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Up),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert_eq!(app.command_palette_cursor, count - 1);
+
+        // Down at bottom wraps to top
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Down),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert_eq!(app.command_palette_cursor, 0);
+
+        // Down moves to 1
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Down),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert_eq!(app.command_palette_cursor, 1);
+
+        // Up moves back to 0
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Up),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert_eq!(app.command_palette_cursor, 0);
+    }
+
+    #[test]
+    fn test_command_palette_no_redundant_palette_option() {
+        let commands = crate::app::commands::filtered_commands("");
+        assert!(
+            !commands
+                .iter()
+                .any(|cmd| cmd.name.eq_ignore_ascii_case("command palette")),
+            "Command palette should not list itself"
+        );
+    }
+
+    #[test]
+    fn test_quit_dialog_open_on_q_and_cancel_or_confirm() {
+        use crate::app::state::QuitChoice;
+
+        let mut app = App::new();
+        let mut player = AudioPlayer::new_mock();
+        let (player_tx, _player_rx) = channel();
+        let (search_tx, _search_rx) = channel();
+        let (resolve_tx, _resolve_rx) = channel();
+
+        // Pressing 'q' opens quit confirmation dialog instead of directly quitting
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Char('q')),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert!(app.quit_dialog_open, "Quit dialog must open on 'q'");
+        assert!(!app.should_quit, "Must not quit directly");
+        assert_eq!(app.quit_dialog_choice, QuitChoice::Yes);
+
+        // Arrow right toggles to No
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Right),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert_eq!(app.quit_dialog_choice, QuitChoice::No);
+
+        // Enter on No cancels
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Enter),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert!(!app.quit_dialog_open, "Quit dialog must close on cancel");
+        assert!(!app.should_quit, "Must not quit on cancel");
+
+        // Re-open and cancel with Esc
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Char('q')),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert!(app.quit_dialog_open);
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Esc),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert!(!app.quit_dialog_open);
+        assert!(!app.should_quit);
+
+        // Re-open and confirm with Enter on Yes
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Char('q')),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert!(app.quit_dialog_open);
+        assert_eq!(app.quit_dialog_choice, QuitChoice::Yes);
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Enter),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert!(!app.quit_dialog_open);
+        assert!(app.should_quit, "Must quit on confirming Yes");
     }
 }

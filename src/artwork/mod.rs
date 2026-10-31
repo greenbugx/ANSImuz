@@ -7,4 +7,4 @@ pub mod render;
 pub use animation::{current_animation_frame, current_frame_index, get_animation_frame};
 pub use cache::{clear_memory_cache, prefetch};
 pub use palette::dominant_color;
-pub use render::{init_picker, loading_moons, render_art};
+pub use render::{init_picker, loading_moons, render_art, render_static_image};

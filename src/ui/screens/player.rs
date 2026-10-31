@@ -90,7 +90,7 @@ pub fn layout_player(area: Rect) -> PlayerLayout {
 
     let keybinds_height = if col_left.height >= 16 {
         (crate::app::commands::PANEL_KEYBINDS.len() as u16 + 2)
-            .min(col_left.height.saturating_sub(6))
+            .min(col_left.height.saturating_sub(4))
     } else if col_left.height >= 8 {
         4
     } else {
@@ -333,7 +333,7 @@ pub fn render_player(
                     Span::styled("R:", theme.bold_primary),
                     Span::styled("Repeat  ", theme.dim),
                     Span::styled("?:", theme.bold_primary),
-                    Span::styled("Help  ", theme.dim),
+                    Span::styled("About  ", theme.dim),
                     Span::styled("Q:", theme.bold_primary),
                     Span::styled("Quit", theme.dim),
                 ]),
@@ -877,6 +877,11 @@ mod tests {
             search_selected_cell.bg,
             theme.highlight.bg.unwrap(),
             "Unfocused Search panel must NOT have the highlight box on selected item"
+        );
+        assert_eq!(
+            search_selected_cell.fg,
+            theme.dim.fg.unwrap(),
+            "Unfocused Search panel must render selected item in dim text without highlight"
         );
     }
 

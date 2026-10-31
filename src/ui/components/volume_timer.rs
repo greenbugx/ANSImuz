@@ -25,6 +25,7 @@ pub fn render_volume_timer(
     let vol_line = Line::from(vec![
         Span::styled("VOL ", primary),
         Span::styled(bars, bold_primary),
+        Span::styled(format!(" {}%", volume), bold_primary),
     ]);
     let clock_width = (clock.chars().count() as u16 + 1).max(6);
     let cols =
@@ -37,4 +38,45 @@ pub fn render_volume_timer(
         Paragraph::new(time_line).alignment(Alignment::Right),
         cols[1],
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    #[test]
+    fn test_volume_timer_renders_percentage() {
+        let backend = TestBackend::new(40, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                render_volume_timer(
+                    frame,
+                    frame.area(),
+                    85,
+                    None,
+                    Style::default(),
+                    Style::default(),
+                );
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let content = (0..40).map(|x| buffer[(x, 0)].symbol()).collect::<String>();
+        assert!(
+            content.contains("VOL"),
+            "Must render VOL prefix, got: {content}"
+        );
+        assert!(
+            content.contains("85%"),
+            "Must render percentage next to volume, got: {content}"
+        );
+        assert!(
+            content.contains("--:--"),
+            "Must render clock placeholder, got: {content}"
+        );
+    }
 }

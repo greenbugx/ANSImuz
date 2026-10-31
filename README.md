@@ -23,7 +23,7 @@ ANSImuz is built with Rust, Ratatui, Python, [`ytmusicapi`](https://github.com/s
 - Dynamic color themes based on album art
 - Shuffle and repeat modes (Repeat One / Repeat All)
 - Full playback controls with keyboard shortcuts
-- Quick command palette and built-in help screen
+- Quick command palette
 
 ## Requirements
 
@@ -154,7 +154,7 @@ The data directory is resolved in this order:
 | `/` | Nav | Focus search bar |
 | `S` | Nav | Open settings screen |
 | `:` | Nav | Open command palette |
-| `?` | Nav | Toggle help overlay |
+| `?` | Nav | Toggle About overlay |
 | `Esc` | Any | Clear search query / close overlay / cancel resolution |
 | `Q` / `Ctrl+C` | Nav | Quit ANSImuz |
 

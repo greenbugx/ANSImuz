@@ -53,7 +53,17 @@ pub fn render_queue_list(
             vec![Line::from("…").centered().style(theme.dim)]
         };
 
-        frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), area);
+        let y_offset = area.height.saturating_sub(lines.len() as u16) / 2;
+        let centered_area = Rect {
+            x: area.x,
+            y: area.y + y_offset,
+            width: area.width,
+            height: area.height.saturating_sub(y_offset),
+        };
+        frame.render_widget(
+            Paragraph::new(lines).alignment(Alignment::Center),
+            centered_area,
+        );
         return;
     }
 
@@ -73,14 +83,12 @@ pub fn render_queue_list(
                 format!(" {:>2}. {}", i + 1, title)
             };
 
-            let style = if i == selected_idx {
-                if is_focused {
+            let style = if is_focused {
+                if i == selected_idx {
                     theme.highlight
                 } else {
-                    theme.bold_primary
+                    theme.primary
                 }
-            } else if is_focused {
-                theme.primary
             } else {
                 theme.dim
             };
@@ -93,4 +101,40 @@ pub fn render_queue_list(
     list_state.select(Some(selected_idx.min(queue.len() - 1)));
 
     frame.render_stateful_widget(List::new(items), area, &mut list_state);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    #[test]
+    fn test_empty_queue_vertically_centered() {
+        let theme = Theme::new(None);
+        let backend = TestBackend::new(30, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                render_queue_list(frame, frame.area(), &[], 0, false, &theme);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+
+        // Row 0 should NOT contain "Queue is empty" because it is vertically centered
+        let row_0 = (0..30).map(|x| buffer[(x, 0)].symbol()).collect::<String>();
+        assert!(
+            !row_0.contains("Queue is empty"),
+            "Top row 0 must not contain empty text when centered, got: {row_0}"
+        );
+
+        // Center row (around row 4) should contain "Queue is empty"
+        let center_row = (0..30).map(|x| buffer[(x, 4)].symbol()).collect::<String>();
+        assert!(
+            center_row.contains("Queue is empty"),
+            "Center row 4 must contain 'Queue is empty', got: {center_row}"
+        );
+    }
 }

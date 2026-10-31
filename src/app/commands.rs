@@ -19,7 +19,7 @@ pub enum Action {
     VolumeDown,
     FocusSearch,
     OpenSettings,
-    ToggleHelp,
+    ToggleAbout,
     OpenCommandPalette,
     ToggleProvider,
     ClearCache,
@@ -104,17 +104,10 @@ pub const COMMANDS: &[CommandInfo] = &[
         category: "Navigation",
     },
     CommandInfo {
-        id: Action::ToggleHelp,
-        name: "Help",
-        description: "Show keybindings and shortcut help",
+        id: Action::ToggleAbout,
+        name: "About",
+        description: "Show information about ANSImuz",
         shortcut: "?",
-        category: "System",
-    },
-    CommandInfo {
-        id: Action::OpenCommandPalette,
-        name: "Command Palette",
-        description: "Open searchable command palette",
-        shortcut: ":",
         category: "System",
     },
     CommandInfo {
@@ -181,50 +174,15 @@ pub const PANEL_KEYBINDS: &[(&str, &str)] = &[
     ("SPACE", "PAUSE"),
     ("←→", "TRACK"),
     ("TAB", "FOCUS"),
+    ("/", "SEARCH"),
     ("A", "QUEUE"),
     ("DEL", "REMOVE"),
     ("ALT+↑↓", "REORDER"),
     ("X", "SHUFFLE"),
     ("R", "REPEAT"),
     (":", "COMMANDS"),
-    ("?", "HELP"),
+    ("?", "ABOUT"),
     ("Q", "QUIT"),
-];
-
-pub const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
-    (
-        "PLAYBACK",
-        &[
-            ("Space", "Play / Pause playback"),
-            ("←", "Play previously played track"),
-            ("→", "Next track in queue"),
-            ("X", "Toggle shuffle mode"),
-            ("R", "Cycle repeat (Off / All / One)"),
-            ("+ / -", "Volume up / down (±5%)"),
-        ],
-    ),
-    (
-        "NAVIGATION",
-        &[
-            ("Tab", "Switch focus between Search and Queue"),
-            ("↑ / ↓", "Select track in focused list"),
-            ("Enter", "Play selected track"),
-            ("A", "Add highlighted search track to queue"),
-            ("Delete", "Remove highlighted track from queue"),
-            ("Alt+↑ / ↓", "Reorder queue item"),
-            ("/", "Focus song search input"),
-            ("Esc", "Clear search query / Close dialog"),
-        ],
-    ),
-    (
-        "SYSTEM",
-        &[
-            (": / Ctrl+P", "Open command palette"),
-            ("S", "Open settings screen"),
-            ("?", "Toggle this help overlay"),
-            ("Q / Ctrl+C", "Quit ANSImuz"),
-        ],
-    ),
 ];
 
 pub fn filtered_commands(query: &str) -> Vec<&'static CommandInfo> {
@@ -271,7 +229,7 @@ pub fn action_for_nav_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('-') => Some(Action::VolumeDown),
         KeyCode::Char('/') => Some(Action::FocusSearch),
         KeyCode::Char('s') | KeyCode::Char('S') => Some(Action::OpenSettings),
-        KeyCode::Char('?') => Some(Action::ToggleHelp),
+        KeyCode::Char('?') => Some(Action::ToggleAbout),
         KeyCode::Char(':') => Some(Action::OpenCommandPalette),
         KeyCode::Tab | KeyCode::BackTab => Some(Action::ToggleFocus),
         KeyCode::Char('a') | KeyCode::Char('A') => Some(Action::EnqueueTrack),
@@ -364,30 +322,28 @@ pub fn dispatch_action(
         Action::VolumeUp => {
             app.volume = app.volume.saturating_add(5).min(100);
             let _ = player.set_volume(app.volume);
-            app.set_status(format!("VOLUME {}", app.volume));
         }
 
         Action::VolumeDown => {
             app.volume = app.volume.saturating_sub(5);
             let _ = player.set_volume(app.volume);
-            app.set_status(format!("VOLUME {}", app.volume));
         }
 
         Action::FocusSearch => {
             app.close_command_palette();
-            app.help_open = false;
+            app.about_open = false;
             app.settings_open = false;
             app.mode = Mode::Type;
         }
 
         Action::OpenSettings => {
             app.close_command_palette();
-            app.help_open = false;
+            app.about_open = false;
             app.settings_open = true;
         }
 
-        Action::ToggleHelp => {
-            app.toggle_help();
+        Action::ToggleAbout => {
+            app.toggle_about();
         }
 
         Action::OpenCommandPalette => {
@@ -407,7 +363,7 @@ pub fn dispatch_action(
         }
 
         Action::Quit => {
-            app.should_quit = true;
+            app.open_quit_dialog();
         }
         Action::ToggleFocus => {
             app.toggle_focus();
