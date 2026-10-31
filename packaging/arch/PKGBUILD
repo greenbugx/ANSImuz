@@ -1,7 +1,7 @@
 # Maintainer: greenbugx <jesuschetia.gg@gmail.com>
 pkgname=ansimuz-git
 _name=ANSImuz
-pkgver=0.1.0.r4.g8b4252f
+pkgver=0.1.1.r0.gddf1710
 pkgrel=1
 pkgdesc="A lightweight fast TUI to stream your favourite music with pure 8-bit ANSI vibes"
 arch=('x86_64')

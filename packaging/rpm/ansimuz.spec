@@ -1,13 +1,10 @@
-%global commit 0abb05156e8e81ae9a01ad6e3650202979db16b7
-%global shortcommit %(c=%{commit}; echo ${c:0:7})
-%global commitdate 20261031
+%global commit ddf1710df8883f54b97828b6fb81a2279d740be0
 
 # Keep distro LTO flags out of the aws-lc-sys C build (breaks linking with rust-lld).
 %global _lto_cflags %{nil}
 
 Name:           ansimuz
-# Post-release snapshot of upstream v0.1.0 (caret sorts after 0.1.0, before 0.1.1)
-Version:        0.1.0^%{commitdate}git%{shortcommit}
+Version:        0.1.1
 Release:        1%{?dist}
 Summary:        A lightweight fast TUI to stream your favourite music with pure 8-bit ANSI vibes
 
@@ -62,5 +59,5 @@ cp -a backend assets \
 %{_datadir}/ansimuz/
 
 %changelog
-* Sat Oct 31 2026 Greenbugx <jesuschetia.gg@gmail.com> - 0.1.0^20261031git0abb051-1
-- Initial Fedora package (snapshot of commit 0abb051)
+* Sun Nov 01 2026 Greenbugx <jesuschetia.gg@gmail.com> - 0.1.1-1
+- Release ANSImuz v0.1.1
