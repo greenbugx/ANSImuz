@@ -48,7 +48,7 @@ pub struct App {
     pub settings_open: bool,
     pub settings_cursor: usize,
     pub should_quit: bool,
-    pub help_open: bool,
+    pub about_open: bool,
     pub command_palette_open: bool,
     pub command_palette_query: String,
     pub command_palette_cursor: usize,
@@ -90,7 +90,7 @@ impl App {
             settings_open: false,
             settings_cursor: 0,
             should_quit: false,
-            help_open: false,
+            about_open: false,
             command_palette_open: false,
             command_palette_query: String::new(),
             command_palette_cursor: 0,
@@ -109,7 +109,7 @@ impl App {
         self.command_palette_open = true;
         self.command_palette_query.clear();
         self.command_palette_cursor = 0;
-        self.help_open = false;
+        self.about_open = false;
     }
 
     pub fn close_command_palette(&mut self) {
@@ -125,9 +125,9 @@ impl App {
         self.pending_queue_entry_id = None;
     }
 
-    pub fn toggle_help(&mut self) {
-        self.help_open = !self.help_open;
-        if self.help_open {
+    pub fn toggle_about(&mut self) {
+        self.about_open = !self.about_open;
+        if self.about_open {
             self.command_palette_open = false;
         }
     }

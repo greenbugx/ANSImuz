@@ -68,7 +68,7 @@ pub fn handle_key(
         return;
     }
 
-    if app.help_open {
+    if app.about_open {
         match key.code {
             KeyCode::Esc
             | KeyCode::Char('?')
@@ -76,7 +76,7 @@ pub fn handle_key(
             | KeyCode::Char('Q')
             | KeyCode::Enter
             | KeyCode::Char(' ') => {
-                app.help_open = false;
+                app.about_open = false;
             }
             _ => {}
         }
@@ -104,7 +104,7 @@ pub fn handle_key(
                 app.mode = Mode::Nav;
             }
             KeyCode::Char('?') => {
-                app.toggle_help();
+                app.toggle_about();
             }
             KeyCode::Char(':') => {
                 app.open_command_palette();

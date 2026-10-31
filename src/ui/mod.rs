@@ -44,7 +44,7 @@ pub fn render(app: &App, frame: &mut Frame, playback: Option<(f64, Option<f64>)>
         render_player(frame, area, app, playback, &theme);
     }
 
-    if app.help_open {
+    if app.about_open {
         render_about(frame, area, &theme);
     } else if app.command_palette_open {
         render_command_palette(

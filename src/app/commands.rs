@@ -19,7 +19,7 @@ pub enum Action {
     VolumeDown,
     FocusSearch,
     OpenSettings,
-    ToggleHelp,
+    ToggleAbout,
     OpenCommandPalette,
     ToggleProvider,
     ClearCache,
@@ -104,7 +104,7 @@ pub const COMMANDS: &[CommandInfo] = &[
         category: "Navigation",
     },
     CommandInfo {
-        id: Action::ToggleHelp,
+        id: Action::ToggleAbout,
         name: "About",
         description: "Show information about ANSImuz",
         shortcut: "?",
@@ -229,7 +229,7 @@ pub fn action_for_nav_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('-') => Some(Action::VolumeDown),
         KeyCode::Char('/') => Some(Action::FocusSearch),
         KeyCode::Char('s') | KeyCode::Char('S') => Some(Action::OpenSettings),
-        KeyCode::Char('?') => Some(Action::ToggleHelp),
+        KeyCode::Char('?') => Some(Action::ToggleAbout),
         KeyCode::Char(':') => Some(Action::OpenCommandPalette),
         KeyCode::Tab | KeyCode::BackTab => Some(Action::ToggleFocus),
         KeyCode::Char('a') | KeyCode::Char('A') => Some(Action::EnqueueTrack),
@@ -331,19 +331,19 @@ pub fn dispatch_action(
 
         Action::FocusSearch => {
             app.close_command_palette();
-            app.help_open = false;
+            app.about_open = false;
             app.settings_open = false;
             app.mode = Mode::Type;
         }
 
         Action::OpenSettings => {
             app.close_command_palette();
-            app.help_open = false;
+            app.about_open = false;
             app.settings_open = true;
         }
 
-        Action::ToggleHelp => {
-            app.toggle_help();
+        Action::ToggleAbout => {
+            app.toggle_about();
         }
 
         Action::OpenCommandPalette => {
