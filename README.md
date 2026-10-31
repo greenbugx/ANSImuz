@@ -156,7 +156,7 @@ The data directory is resolved in this order:
 | `:` | Nav | Open command palette |
 | `?` | Nav | Toggle About overlay |
 | `Esc` | Any | Clear search query / close overlay / cancel resolution |
-| `Q` / `Ctrl+C` | Nav | Quit ANSImuz |
+| `Q` | Nav | Quit ANSImuz |
 
 ## License
 
