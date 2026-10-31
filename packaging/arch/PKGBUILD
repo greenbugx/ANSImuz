@@ -1,0 +1,68 @@
+# Maintainer: greenbugx <jesuschetia.gg@gmail.com>
+pkgname=ansimuz-git
+_name=ANSImuz
+pkgver=0.1.0.r4.g8b4252f
+pkgrel=1
+pkgdesc="A lightweight fast TUI to stream your favourite music with pure 8-bit ANSI vibes"
+arch=('x86_64')
+url="https://github.com/greenbugx/ANSImuz"
+license=('MIT')
+
+depends=(
+    'gcc-libs'
+    'glibc'
+    'mpv'
+    'yt-dlp'
+    'python'
+    'python-ytmusicapi'
+    'python-spotifyscraper' #AUR
+    'python-pillow'
+    'python-requests'
+)
+
+makedepends=('git' 'cargo' 'cmake')
+
+provides=('ansimuz')
+conflicts=('ansimuz')
+
+options=('!lto' '!debug')
+
+source=("$_name::git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd "$srcdir/$_name"
+    git describe --long --tags 2>/dev/null | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g' \
+      || printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+    cd "$srcdir/$_name"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$srcdir/$_name"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    export PYO3_PYTHON=/usr/bin/python
+    export ANSIMUZ_DATA_DIR=/usr/share/ansimuz
+    unset VIRTUAL_ENV
+
+    # strip $srcdir from embedded paths (Rust and C code)
+    export RUSTFLAGS="$RUSTFLAGS --remap-path-prefix=$srcdir=/build"
+    export CFLAGS="$CFLAGS -ffile-prefix-map=$srcdir=/build"
+    export CXXFLAGS="$CXXFLAGS -ffile-prefix-map=$srcdir=/build"
+
+    cargo build --frozen --release
+}
+
+package() {
+    cd "$srcdir/$_name"
+    install -Dm755 target/release/ansimuz "$pkgdir/usr/bin/ansimuz"
+    install -d "$pkgdir/usr/share/ansimuz"
+    cp -a backend assets "$pkgdir/usr/share/ansimuz/"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/ansimuz/LICENSE"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/ansimuz/README.md"
+}
