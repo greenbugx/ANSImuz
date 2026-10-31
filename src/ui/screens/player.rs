@@ -878,6 +878,11 @@ mod tests {
             theme.highlight.bg.unwrap(),
             "Unfocused Search panel must NOT have the highlight box on selected item"
         );
+        assert_eq!(
+            search_selected_cell.fg,
+            theme.dim.fg.unwrap(),
+            "Unfocused Search panel must render selected item in dim text without highlight"
+        );
     }
 
     #[test]

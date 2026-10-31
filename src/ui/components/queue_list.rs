@@ -73,14 +73,12 @@ pub fn render_queue_list(
                 format!(" {:>2}. {}", i + 1, title)
             };
 
-            let style = if i == selected_idx {
-                if is_focused {
+            let style = if is_focused {
+                if i == selected_idx {
                     theme.highlight
                 } else {
-                    theme.bold_primary
+                    theme.primary
                 }
-            } else if is_focused {
-                theme.primary
             } else {
                 theme.dim
             };
