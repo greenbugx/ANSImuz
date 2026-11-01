@@ -3,10 +3,7 @@ use std::{
     fs,
     io::Read,
     path::PathBuf,
-    sync::{
-        Arc, LazyLock, Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, LazyLock, Mutex},
     thread,
     time::{Duration, Instant},
 };
@@ -16,7 +13,6 @@ use image::{DynamicImage, imageops::FilterType};
 use super::decode::{MAX_IMAGE_BYTES, decode_artwork};
 
 const RETRY_COOLDOWN: Duration = Duration::from_secs(5);
-static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
 pub enum CacheEntry {
@@ -123,25 +119,12 @@ pub fn load_image(url: &str) -> Result<DynamicImage, String> {
 
     let image = decode_artwork(&bytes)?;
 
-    // Atomic cache write: write to a temporary file on the same filesystem and rename
-    let _ = fs::create_dir_all(cache_dir());
-    let temp_id = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let temp_path = cache_dir().join(format!(
-        "{}.tmp-{}-{}.part",
-        final_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("art"),
-        std::process::id(),
-        temp_id
-    ));
-
-    if let Ok(()) = fs::write(&temp_path, &bytes)
-        && fs::rename(&temp_path, &final_path).is_err()
-    {
-        let _ = fs::remove_file(&temp_path);
-    }
-
+    // Centralized atomic cache write
+    let file_stem = final_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("art");
+    let _ = crate::config::write_cache_atomic(&cache_dir(), file_stem, "img", &bytes);
     Ok(image)
 }
 
