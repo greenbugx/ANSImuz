@@ -1,6 +1,6 @@
 use image::GenericImageView;
 
-use super::cache::art_cache;
+use super::cache::{CacheEntry, art_cache};
 
 pub fn dominant_color(url: &str) -> Option<(u8, u8, u8)> {
     let guard = art_cache().lock().ok()?;
@@ -10,7 +10,7 @@ pub fn dominant_color(url: &str) -> Option<(u8, u8, u8)> {
             continue;
         }
 
-        if let Ok(image) = entry {
+        if let CacheEntry::Ready(image) = entry {
             let (width, height) = image.dimensions();
             let (mut sum_r, mut sum_g, mut sum_b, mut count) = (0u64, 0u64, 0u64, 0u64);
 
