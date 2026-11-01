@@ -60,19 +60,18 @@ pub fn run(
         }
 
         if !app.is_resolving && app.now_playing.is_some() && !player.is_playing() {
-            if let Some(error) = player.error() {
-                app.set_status(format!("PLAYER ERROR: {}", error));
-                if let Some(current) = app.now_playing.take() {
-                    app.push_history(current);
-                }
+            let error = player.error().map(|e| e.to_string());
+            if error.is_some()
+                && let Some(current) = app.now_playing.take()
+            {
+                app.push_history(current);
+            }
+            if !advance_playback(&mut app, &mut player, player_tx.clone(), resolve_tx.clone()) {
                 app.set_stopped();
-            } else if !advance_playback(
-                &mut app,
-                &mut player,
-                player_tx.clone(),
-                resolve_tx.clone(),
-            ) {
-                app.set_status("PLAYBACK ENDED".to_string());
+                app.set_status(match error {
+                    Some(err) => format!("PLAYER ERROR: {}", err),
+                    None => "PLAYBACK ENDED".to_string(),
+                });
             }
         }
 
@@ -254,7 +253,8 @@ pub(crate) fn play_next_queued(
     player_tx: Sender<PlayerEvent>,
     resolve_tx: Sender<ResolveResponse>,
 ) -> bool {
-    if !app.queue.is_empty() || refill_queue_from_repeat_all(app) {
+    let can_refill = player.error().is_none() && refill_queue_from_repeat_all(app);
+    if !app.queue.is_empty() || can_refill {
         return play_queue_item(app, player, player_tx, resolve_tx, 0);
     }
     false
