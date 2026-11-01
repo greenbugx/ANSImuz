@@ -243,7 +243,7 @@ pub fn dispatch_action(
     app: &mut App,
     player: &mut AudioPlayer,
     player_tx: &Sender<PlayerEvent>,
-    search_tx: &Sender<crate::music::SearchResult>,
+    search_tx: &Sender<crate::music::SearchResponse>,
     resolve_tx: &Sender<crate::music::ResolveResponse>,
 ) {
     match action {

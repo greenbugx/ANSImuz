@@ -7,14 +7,14 @@ use super::{
     runner::{play_queue_item, play_search_result},
     state::{App, ListFocus, Mode},
 };
-use crate::music::{SearchResult, search_music};
+use crate::music::{SearchResponse, search_music};
 use crate::playback::{AudioPlayer, PlayerEvent};
 
 pub fn handle_key(
     app: &mut App,
     player: &mut AudioPlayer,
     key: KeyEvent,
-    search_tx: &Sender<SearchResult>,
+    search_tx: &Sender<SearchResponse>,
     player_tx: &Sender<PlayerEvent>,
     resolve_tx: &Sender<crate::music::ResolveResponse>,
 ) {
@@ -159,10 +159,18 @@ pub fn handle_key(
                     app.loading = true;
                     app.set_status("SEARCHING…");
 
+                    app.search_generation = app.search_generation.wrapping_add(1);
+                    let generation = app.search_generation;
+
                     let tx = search_tx.clone();
 
                     std::thread::spawn(move || {
-                        let _ = tx.send(search_music(query, provider));
+                        let (q, result) = search_music(query, provider);
+                        let _ = tx.send(SearchResponse {
+                            generation,
+                            query: q,
+                            result,
+                        });
                     });
                 } else {
                     play_search_result(

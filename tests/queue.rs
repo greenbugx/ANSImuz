@@ -2,7 +2,7 @@ use std::sync::mpsc;
 
 use ansimuz::app::events::handle_key;
 use ansimuz::app::{App, ListFocus, Mode};
-use ansimuz::music::{ResolveResponse, SearchResult, Track};
+use ansimuz::music::{ResolveResponse, SearchResponse, Track};
 use ansimuz::playback::{AudioPlayer, PlayerEvent};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
@@ -157,7 +157,7 @@ fn test_focus_switching_preserves_selections() {
 fn test_focus_aware_keyboard_navigation_and_controls() {
     let mut app = App::new();
     let mut player = AudioPlayer::new_mock();
-    let (search_tx, _search_rx) = mpsc::channel::<SearchResult>();
+    let (search_tx, _search_rx) = mpsc::channel::<SearchResponse>();
     let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
     let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
 
@@ -312,7 +312,7 @@ fn test_focus_aware_keyboard_navigation_and_controls() {
 fn test_stage_4_connected_interactions() {
     let mut app = App::new();
     let mut player = AudioPlayer::new_mock();
-    let (search_tx, _search_rx) = mpsc::channel::<SearchResult>();
+    let (search_tx, _search_rx) = mpsc::channel::<SearchResponse>();
     let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
     let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
 
@@ -463,7 +463,7 @@ fn test_stage_4_connected_interactions() {
 fn test_queue_mutations_ignored_when_search_focused() {
     let mut app = App::new();
     let mut player = AudioPlayer::new_mock();
-    let (search_tx, _search_rx) = mpsc::channel::<SearchResult>();
+    let (search_tx, _search_rx) = mpsc::channel::<SearchResponse>();
     let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
     let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
 

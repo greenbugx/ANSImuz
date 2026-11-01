@@ -11,6 +11,12 @@ use crate::config::Provider;
 
 pub type SearchResult = (String, Result<Vec<Track>, String>);
 
+#[derive(Clone, Debug)]
+pub struct SearchResponse {
+    pub generation: u64,
+    pub query: String,
+    pub result: Result<Vec<Track>, String>,
+}
 #[derive(Debug)]
 pub struct ResolveResponse {
     pub generation: u64,

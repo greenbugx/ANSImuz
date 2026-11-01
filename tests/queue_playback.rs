@@ -4,7 +4,7 @@ use ansimuz::app::{
     advance_playback, handle_resolve_response, handle_search_result, play_next, play_queue_item,
     play_search_result, play_track, state::App,
 };
-use ansimuz::music::{PlaybackSource, ResolveResponse, SearchResult, Track};
+use ansimuz::music::{PlaybackSource, ResolveResponse, SearchResponse, Track};
 use ansimuz::playback::{AudioPlayer, PlayerEvent, Repeat};
 
 fn make_test_track(title: &str, artist: &str, stream: &str) -> Track {
@@ -614,7 +614,15 @@ fn test_new_search_does_not_affect_active_queue_playback() {
         make_test_track("New Search 0", "Artist", "http://stream/new0"),
         make_test_track("New Search 1", "Artist", "http://stream/new1"),
     ];
-    handle_search_result(&mut app, "new query".to_string(), Ok(new_tracks));
+    let search_gen = app.search_generation;
+    handle_search_result(
+        &mut app,
+        SearchResponse {
+            generation: search_gen,
+            query: "new query".to_string(),
+            result: Ok(new_tracks),
+        },
+    );
 
     // Q0 continues playing unaffected
     assert_eq!(
@@ -722,7 +730,7 @@ fn test_shuffle_once_strategy_predictably_plays_head_of_queue() {
 
     let mut app = App::new();
     let mut player = AudioPlayer::new_mock();
-    let (search_tx, _search_rx) = mpsc::channel::<SearchResult>();
+    let (search_tx, _search_rx) = mpsc::channel::<SearchResponse>();
     let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
     let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
 
@@ -901,7 +909,15 @@ fn test_cancellation_during_resolution_preserves_queue_entry() {
 
     // User submits a search or changes provider, cancelling the pending resolution
     let new_search_results = vec![make_test_track("Search Song", "Artist", "http://stream/s")];
-    handle_search_result(&mut app, "query".into(), Ok(new_search_results));
+    let search_gen = app.search_generation;
+    handle_search_result(
+        &mut app,
+        SearchResponse {
+            generation: search_gen,
+            query: "query".into(),
+            result: Ok(new_search_results),
+        },
+    );
     assert!(!app.is_resolving);
     assert_eq!(app.resolve_generation, generation + 1);
 
@@ -931,4 +947,254 @@ fn test_cancellation_during_resolution_preserves_queue_entry() {
     assert!(!handled, "Stale resolution must be rejected");
     assert_eq!(app.queue.len(), 1, "Track must remain safely in queue");
     assert_eq!(app.queue[0].id, entry_id);
+}
+
+#[test]
+fn test_stale_search_response_rejected_and_search_failure_preserves_results() {
+    let mut app = App::new();
+
+    // Initial search: generation 1
+    app.search_generation = 1;
+    let initial_tracks = vec![make_test_track("Initial Song", "Artist", "http://stream/1")];
+    let res1 = handle_search_result(
+        &mut app,
+        SearchResponse {
+            generation: 1,
+            query: "query1".into(),
+            result: Ok(initial_tracks),
+        },
+    );
+    assert!(res1);
+    assert_eq!(app.tracks.len(), 1);
+    assert_eq!(app.tracks[0].title, "Initial Song");
+    assert_eq!(app.last_query, "query1");
+
+    // Search generation advanced to 2
+    app.search_generation = 2;
+
+    // Stale generation 1 response arrives -> rejected!
+    let stale_tracks = vec![make_test_track(
+        "Stale Song",
+        "Artist",
+        "http://stream/stale",
+    )];
+    let res_stale = handle_search_result(
+        &mut app,
+        SearchResponse {
+            generation: 1,
+            query: "query_stale".into(),
+            result: Ok(stale_tracks),
+        },
+    );
+    assert!(!res_stale, "Stale search response must be rejected");
+    assert_eq!(app.tracks[0].title, "Initial Song");
+    assert_eq!(app.last_query, "query1");
+
+    // Search generation 2 succeeds -> accepted!
+    let fresh_tracks = vec![make_test_track("Fresh Song", "Artist", "http://stream/2")];
+    let res2 = handle_search_result(
+        &mut app,
+        SearchResponse {
+            generation: 2,
+            query: "query2".into(),
+            result: Ok(fresh_tracks),
+        },
+    );
+    assert!(res2);
+    assert_eq!(app.tracks[0].title, "Fresh Song");
+    assert_eq!(app.last_query, "query2");
+
+    // Search generation 3 fails -> failure must preserve latest valid results!
+    app.search_generation = 3;
+    let res3 = handle_search_result(
+        &mut app,
+        SearchResponse {
+            generation: 3,
+            query: "query3".into(),
+            result: Err("Connection refused".into()),
+        },
+    );
+    assert!(!res3);
+    assert_eq!(
+        app.tracks[0].title, "Fresh Song",
+        "Failed search must preserve previous valid tracks"
+    );
+    assert_eq!(
+        app.last_query, "query2",
+        "Failed search must preserve previous valid query"
+    );
+    assert!(app.status.contains("SEARCH ERROR"));
+}
+
+#[test]
+fn test_queue_failure_does_not_cause_endless_repeat_all_retries() {
+    use ansimuz::app::recover_queue_failure;
+
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    app.repeat = Repeat::All;
+    let song = make_test_track("Queue Fail", "Artist", "http://stream/fail");
+    app.enqueue(song);
+
+    // Previously played song in history
+    app.push_history(make_test_track(
+        "History Song",
+        "Artist",
+        "http://stream/hist",
+    ));
+
+    // Attempting to play the queued song fails (simulate startup failure)
+    player.set_mock_fail(true);
+    let id = app.queue[0].id;
+    app.pending_queue_entry_id = Some(id);
+
+    // Call recover_queue_failure when the only queued song fails
+    app.remove_queue_item(0);
+    let recovered = recover_queue_failure(&mut app, &mut player, player_tx, resolve_tx);
+
+    // Must NOT loop endlessly by refilling history!
+    assert!(
+        !recovered,
+        "Queue failure recovery must not endlessly retry via Repeat::All"
+    );
+    assert!(
+        app.queue.is_empty(),
+        "Queue must not be refilled on failure"
+    );
+    assert!(app.now_playing.is_none());
+}
+
+#[test]
+fn test_repeat_all_history_to_queue_refill_and_duplicate_handling() {
+    use ansimuz::app::refill_queue_from_repeat_all;
+
+    let mut app = App::new();
+    app.repeat = Repeat::All;
+
+    let track_a = make_test_track("Track A", "Artist", "http://stream/a");
+    let track_b = make_test_track("Track B", "Artist", "http://stream/b");
+    let track_c = make_test_track("Track C", "Artist", "http://stream/c");
+
+    // History has duplicates of Track A and Track B
+    app.push_history(track_a.clone());
+    app.push_history(track_b.clone());
+    app.push_history(track_a.clone()); // duplicate
+    app.push_history(track_c.clone());
+    app.push_history(track_b.clone()); // duplicate
+
+    let current = make_test_track("Current Track", "Artist", "http://stream/cur");
+    app.now_playing = Some(current.clone());
+
+    let refilled = refill_queue_from_repeat_all(&mut app);
+    assert!(refilled);
+
+    // Queue must contain all distinct tracks without duplicates
+    assert_eq!(app.queue.len(), 4);
+    let titles: Vec<&str> = app.queue.iter().map(|e| e.track.title.as_str()).collect();
+    assert!(titles.contains(&"Track A"));
+    assert!(titles.contains(&"Track B"));
+    assert!(titles.contains(&"Track C"));
+    assert!(titles.contains(&"Current Track"));
+
+    // Now playing should have been cleared
+    assert!(app.now_playing.is_none());
+    // History should have been consumed
+    assert!(app.history.is_empty());
+}
+
+#[test]
+fn test_resolution_cancellation_switching_removing_and_cancelling() {
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    // Switching tracks while resolving
+    let track0 = make_test_track("Track 0", "Artist", "");
+    let track1 = make_test_track("Track 1", "Artist", "http://stream/1");
+    app.tracks = vec![track0.clone(), track1.clone()];
+
+    play_search_result(
+        &mut app,
+        &mut player,
+        player_tx.clone(),
+        resolve_tx.clone(),
+        0,
+    );
+    assert!(app.is_resolving);
+    let gen_first = app.resolve_generation;
+
+    // Switch to track 1
+    play_search_result(
+        &mut app,
+        &mut player,
+        player_tx.clone(),
+        resolve_tx.clone(),
+        1,
+    );
+    assert!(!app.is_resolving);
+    assert_eq!(app.resolve_generation, gen_first + 1);
+
+    // Late response for track 0 arrives
+    let late_resp = ResolveResponse {
+        generation: gen_first,
+        source: PlaybackSource::SearchResult { index: 0 },
+        spotify_id: None,
+        title: "Track 0".into(),
+        artist: "Artist".into(),
+        result: Ok(make_test_track(
+            "Track 0",
+            "Artist",
+            "http://stream/resolved0",
+        )),
+    };
+    let handled =
+        handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, late_resp);
+    assert!(!handled, "Late resolution must be rejected on track switch");
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Track 1")
+    );
+
+    // Removing queue entry while resolving
+    let unresolved_q = make_test_track("Queued Unresolved", "Artist", "");
+    let q_id = app.enqueue(unresolved_q).unwrap();
+    play_queue_item(
+        &mut app,
+        &mut player,
+        player_tx.clone(),
+        resolve_tx.clone(),
+        0,
+    );
+    assert!(app.is_resolving);
+    assert_eq!(app.pending_queue_entry_id, Some(q_id));
+
+    // Remove the queue item being resolved
+    let removed = app.remove_queue_item(0);
+    assert!(removed.is_some());
+    assert!(
+        !app.is_resolving,
+        "Resolution must be cancelled on removing queue item"
+    );
+    assert_eq!(app.status, "RESOLVE CANCELLED");
+
+    // Cancelling resolution via cancel_pending_resolution
+    let unresolved2 = make_test_track("Unresolved 2", "Artist", "");
+    app.tracks = vec![unresolved2];
+    play_search_result(
+        &mut app,
+        &mut player,
+        player_tx.clone(),
+        resolve_tx.clone(),
+        0,
+    );
+    assert!(app.is_resolving);
+    let gen_cancel = app.resolve_generation;
+
+    app.cancel_pending_resolution();
+    assert!(!app.is_resolving);
+    assert_eq!(app.resolve_generation, gen_cancel + 1);
 }

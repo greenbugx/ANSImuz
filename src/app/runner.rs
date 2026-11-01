@@ -10,7 +10,7 @@ use super::{
     events::handle_key,
     state::{App, Mode},
 };
-use crate::music::{PlaybackSource, ResolveResponse, SearchResult, Track};
+use crate::music::{PlaybackSource, ResolveResponse, SearchResponse, Track};
 use crate::playback::{AudioPlayer, PlayerEvent, Repeat};
 
 pub fn run(
@@ -19,7 +19,8 @@ pub fn run(
     let mut app = App::new();
     let mut player = AudioPlayer::new();
 
-    let (search_tx, search_rx): (Sender<SearchResult>, Receiver<SearchResult>) = mpsc::channel();
+    let (search_tx, search_rx): (Sender<SearchResponse>, Receiver<SearchResponse>) =
+        mpsc::channel();
     let (player_tx, player_rx): (Sender<PlayerEvent>, Receiver<PlayerEvent>) = mpsc::channel();
     let (resolve_tx, resolve_rx): (Sender<ResolveResponse>, Receiver<ResolveResponse>) =
         mpsc::channel();
@@ -27,8 +28,8 @@ pub fn run(
     let mut playback: Option<(f64, Option<f64>)> = None;
 
     loop {
-        while let Ok((query, result)) = search_rx.try_recv() {
-            handle_search_result(&mut app, query, result);
+        while let Ok(response) = search_rx.try_recv() {
+            handle_search_result(&mut app, response);
         }
 
         while let Ok(response) = resolve_rx.try_recv() {
@@ -114,15 +115,19 @@ pub fn run(
     Ok(())
 }
 
-pub fn handle_search_result(app: &mut App, query: String, result: Result<Vec<Track>, String>) {
+pub fn handle_search_result(app: &mut App, response: SearchResponse) -> bool {
+    if response.generation != app.search_generation {
+        return false;
+    }
+
     app.loading = false;
     app.cancel_pending_resolution();
 
-    match result {
+    match response.result {
         Ok(tracks) => {
             let count = tracks.len();
             app.tracks = tracks;
-            app.last_query = query;
+            app.last_query = response.query;
             app.mode = Mode::Nav;
 
             if let Some(now) = &app.now_playing {
@@ -143,9 +148,12 @@ pub fn handle_search_result(app: &mut App, query: String, result: Result<Vec<Tra
             } else {
                 format!("{} RESULTS ({})", count, app.settings.provider.label())
             });
+            true
         }
         Err(error) => {
+            // Preserve the latest valid results when a newer search fails
             app.set_status(format!("SEARCH ERROR: {}", error));
+            false
         }
     }
 }
@@ -221,7 +229,7 @@ pub fn play_queue_item(
     }
 }
 
-pub(crate) fn refill_queue_from_repeat_all(app: &mut App) -> bool {
+pub fn refill_queue_from_repeat_all(app: &mut App) -> bool {
     if app.repeat != Repeat::All {
         return false;
     }
@@ -303,7 +311,7 @@ pub fn play_previous(
     }
 }
 
-pub(crate) fn recover_queue_failure(
+pub fn recover_queue_failure(
     app: &mut App,
     player: &mut AudioPlayer,
     player_tx: Sender<PlayerEvent>,
@@ -319,11 +327,7 @@ pub(crate) fn recover_queue_failure(
         return false;
     }
 
-    // Otherwise (player is not playing), check Repeat::All to loop history
-    if play_next_queued(app, player, player_tx, resolve_tx) {
-        return true;
-    }
-
+    // Queue is exhausted after failures: do NOT refill from Repeat::All to avoid endless retries!
     // Idle/stopped: push any ended track to history and clear playback state
     if let Some(current) = app.now_playing.take() {
         app.push_history(current);
@@ -506,7 +510,7 @@ pub fn now_playing(app: &App) -> String {
         .unwrap_or_else(|| "PLAYING".into())
 }
 
-pub fn refetch_if_needed(app: &mut App, search_tx: &Sender<SearchResult>) {
+pub fn refetch_if_needed(app: &mut App, search_tx: &Sender<SearchResponse>) {
     let query = if !app.last_query.is_empty() {
         app.last_query.clone()
     } else {
@@ -518,9 +522,18 @@ pub fn refetch_if_needed(app: &mut App, search_tx: &Sender<SearchResult>) {
         app.loading = true;
         let provider = app.settings.provider;
         app.set_status(format!("REFETCHING ({})…", provider.label()));
+
+        app.search_generation = app.search_generation.wrapping_add(1);
+        let generation = app.search_generation;
+
         let tx = search_tx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(crate::music::search_music(query, provider));
+            let (q, result) = crate::music::search_music(query, provider);
+            let _ = tx.send(SearchResponse {
+                generation,
+                query: q,
+                result,
+            });
         });
     }
 }
