@@ -11,6 +11,12 @@ use crate::config::Provider;
 
 pub type SearchResult = (String, Result<Vec<Track>, String>);
 
+#[derive(Clone, Debug)]
+pub struct SearchResponse {
+    pub generation: u64,
+    pub query: String,
+    pub result: Result<Vec<Track>, String>,
+}
 #[derive(Debug)]
 pub struct ResolveResponse {
     pub generation: u64,
@@ -158,6 +164,22 @@ pub fn search_music(query: String, provider: Provider) -> SearchResult {
     .map_err(|error| error.to_string());
 
     (query, result)
+}
+
+pub fn spawn_search(
+    query: String,
+    provider: Provider,
+    generation: u64,
+    tx: std::sync::mpsc::Sender<SearchResponse>,
+) {
+    std::thread::spawn(move || {
+        let (q, result) = search_music(query, provider);
+        let _ = tx.send(SearchResponse {
+            generation,
+            query: q,
+            result,
+        });
+    });
 }
 
 pub fn resolve_playable(track: &Track) -> Result<Track, String> {

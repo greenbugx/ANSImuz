@@ -1,23 +1,43 @@
 use std::{
     collections::HashMap,
     fs,
+    io::Read,
     path::PathBuf,
-    sync::{LazyLock, Mutex},
+    sync::{Arc, LazyLock, Mutex},
     thread,
+    time::{Duration, Instant},
 };
 
 use image::{DynamicImage, imageops::FilterType};
 
 use super::decode::{MAX_IMAGE_BYTES, decode_artwork};
 
+const RETRY_COOLDOWN: Duration = Duration::from_secs(5);
+
+#[derive(Clone)]
+pub enum CacheEntry {
+    Loading,
+    Ready(Arc<DynamicImage>),
+    Failed { error: String, failed_at: Instant },
+}
+
+type ArtCache = Mutex<HashMap<(String, u32), CacheEntry>>;
+
+pub fn art_cache() -> &'static ArtCache {
+    static CACHE: LazyLock<ArtCache> = LazyLock::new(|| Mutex::new(HashMap::new()));
+    &CACHE
+}
+
 pub fn cache_dir() -> PathBuf {
     crate::config::artwork_cache_dir()
 }
 
 pub fn clear_memory_cache() {
-    if let Ok(mut guard) = art_cache().lock() {
-        guard.clear();
-    }
+    let mut guard = match art_cache().lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.clear();
 }
 
 pub fn cache_path(url: &str) -> PathBuf {
@@ -33,19 +53,19 @@ pub fn load_image(url: &str) -> Result<DynamicImage, String> {
         return Err("No artwork URL".into());
     }
 
-    let path = cache_path(url);
+    let final_path = cache_path(url);
 
-    if path.exists() {
-        if let Ok(bytes) = fs::read(&path)
+    if final_path.exists() {
+        if let Ok(bytes) = fs::read(&final_path)
             && let Ok(image) = decode_artwork(&bytes)
         {
             return Ok(image);
         }
-        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&final_path);
     }
 
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(8))
+        .timeout(Duration::from_secs(8))
         .user_agent("ANSIMUZ/0.1")
         .build()
         .map_err(|e| e.to_string())?;
@@ -75,19 +95,36 @@ pub fn load_image(url: &str) -> Result<DynamicImage, String> {
         return Err("Artwork image is too large".into());
     }
 
-    let bytes = response
-        .bytes()
-        .map_err(|e| format!("Cannot read artwork: {e}"))?;
+    // Enforce download limits while streaming chunks, not after downloading everything
+    let initial_cap = response
+        .content_length()
+        .map(|len| (len as usize).min(MAX_IMAGE_BYTES))
+        .unwrap_or(0);
+    let mut bytes = Vec::with_capacity(initial_cap);
+    let mut buffer = [0u8; 8192];
+    let mut reader = response;
 
-    if bytes.len() > MAX_IMAGE_BYTES {
-        return Err("Artwork image is too large".into());
+    loop {
+        let n = reader
+            .read(&mut buffer)
+            .map_err(|e| format!("Cannot read artwork: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        if bytes.len() + n > MAX_IMAGE_BYTES {
+            return Err("Artwork image is too large".into());
+        }
+        bytes.extend_from_slice(&buffer[..n]);
     }
 
     let image = decode_artwork(&bytes)?;
 
-    let _ = fs::create_dir_all(cache_dir());
-    let _ = fs::write(path, &bytes);
-
+    // Centralized atomic cache write
+    let file_stem = final_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("art");
+    let _ = crate::config::write_cache_atomic(&cache_dir(), file_stem, "img", &bytes);
     Ok(image)
 }
 
@@ -96,39 +133,64 @@ fn thumbnail_fallback(url: &str) -> Option<String> {
         .then(|| url.replace("maxresdefault", "hqdefault"))
 }
 
-type ArtCache = Mutex<HashMap<(String, u32), Result<DynamicImage, String>>>;
+pub fn request_art(url: &str, side: u32) -> Result<Arc<DynamicImage>, String> {
+    if url.trim().is_empty() {
+        return Err("No artwork URL".into());
+    }
 
-pub fn art_cache() -> &'static ArtCache {
-    static CACHE: LazyLock<ArtCache> = LazyLock::new(|| Mutex::new(HashMap::new()));
-    &CACHE
-}
-
-pub fn request_art(url: &str, side: u32) -> Result<DynamicImage, String> {
     let key = (url.to_string(), side);
+    let mut guard = match art_cache().lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
 
-    if let Ok(guard) = art_cache().lock()
-        && let Some(image) = guard.get(&key)
-    {
-        return image.clone();
+    if let Some(entry) = guard.get(&key) {
+        match entry {
+            CacheEntry::Ready(img) => return Ok(Arc::clone(img)),
+            CacheEntry::Loading => return Err("loading".into()),
+            CacheEntry::Failed { error, failed_at } => {
+                if failed_at.elapsed() < RETRY_COOLDOWN {
+                    return Err(error.clone());
+                }
+                // Cooldown elapsed: proceed to retry
+            }
+        }
     }
 
-    if let Ok(mut guard) = art_cache().lock() {
-        guard.insert(key.clone(), Err("loading".into()));
-    }
+    // Atomically insert Loading so duplicate requests don't start multiple downloads
+    guard.insert(key.clone(), CacheEntry::Loading);
+    drop(guard);
 
     let owned_url = url.to_string();
 
     thread::spawn(move || {
         let result = load_image(&owned_url).map(|image| {
             if side == 0 {
-                image
+                Arc::new(image)
             } else {
-                image.resize_exact(side, side, FilterType::Triangle)
+                Arc::new(image.resize_exact(side, side, FilterType::Triangle))
             }
         });
 
-        if let Ok(mut guard) = art_cache().lock() {
-            guard.insert(key, result);
+        let mut guard = match art_cache().lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        match result {
+            Ok(arc_image) => {
+                guard.insert(key, CacheEntry::Ready(arc_image));
+            }
+            Err(error) => {
+                // Do not cache permanently; record failed_at so retries are allowed after cooldown
+                guard.insert(
+                    key,
+                    CacheEntry::Failed {
+                        error,
+                        failed_at: Instant::now(),
+                    },
+                );
+            }
         }
     });
 
@@ -141,4 +203,46 @@ pub fn prefetch(url: &str) {
     }
 
     let _ = request_art(url, 64);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_arc_cached_image_shares_allocation() {
+        let dummy = DynamicImage::new_rgb8(200, 200);
+        let arc = Arc::new(dummy);
+        let entry = CacheEntry::Ready(Arc::clone(&arc));
+
+        assert_eq!(Arc::strong_count(&arc), 2);
+
+        if let CacheEntry::Ready(img) = entry {
+            assert_eq!(Arc::strong_count(&img), 2);
+            let cloned = Arc::clone(&img);
+            assert_eq!(Arc::strong_count(&cloned), 3);
+        } else {
+            panic!("Expected Ready entry");
+        }
+    }
+
+    #[test]
+    fn test_failed_cache_entry_retries_after_cooldown() {
+        let entry_fresh = CacheEntry::Failed {
+            error: "Network timeout".into(),
+            failed_at: Instant::now(),
+        };
+        if let CacheEntry::Failed { failed_at, .. } = entry_fresh {
+            assert!(failed_at.elapsed() < RETRY_COOLDOWN);
+        }
+
+        // Simulated expired cooldown
+        let entry_expired = CacheEntry::Failed {
+            error: "Old failure".into(),
+            failed_at: Instant::now() - Duration::from_secs(10),
+        };
+        if let CacheEntry::Failed { failed_at, .. } = entry_expired {
+            assert!(failed_at.elapsed() >= RETRY_COOLDOWN);
+        }
+    }
 }

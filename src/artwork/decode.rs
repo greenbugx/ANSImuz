@@ -1,14 +1,37 @@
 use image::{DynamicImage, GenericImageView};
 
 pub const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_IMAGE_WIDTH: u32 = 4096;
+pub const MAX_IMAGE_HEIGHT: u32 = 4096;
+pub const MAX_ALLOC_BYTES: u64 = 64 * 1024 * 1024;
 pub const MIN_ARTWORK_SIDE: u32 = 200;
 pub const HQ_SOURCE_SIDE: u32 = 0;
 
 pub fn decode_artwork(bytes: &[u8]) -> Result<DynamicImage, String> {
-    let image =
-        image::load_from_memory(bytes).map_err(|e| format!("Cannot decode artwork: {e}"))?;
+    if bytes.len() > MAX_IMAGE_BYTES {
+        return Err("Artwork byte size exceeds limit".into());
+    }
+
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes));
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_IMAGE_WIDTH);
+    limits.max_image_height = Some(MAX_IMAGE_HEIGHT);
+    limits.max_alloc = Some(MAX_ALLOC_BYTES);
+    reader.limits(limits);
+    let reader = reader
+        .with_guessed_format()
+        .map_err(|e| format!("Cannot detect artwork format: {e}"))?;
+    let image = reader
+        .decode()
+        .map_err(|e| format!("Cannot decode artwork: {e}"))?;
 
     let (width, height) = image.dimensions();
+
+    if width > MAX_IMAGE_WIDTH || height > MAX_IMAGE_HEIGHT {
+        return Err(format!(
+            "Artwork dimensions ({width}x{height}) exceed maximum allowed ({MAX_IMAGE_WIDTH}x{MAX_IMAGE_HEIGHT})"
+        ));
+    }
 
     if width < MIN_ARTWORK_SIDE || height < MIN_ARTWORK_SIDE {
         return Err(format!(

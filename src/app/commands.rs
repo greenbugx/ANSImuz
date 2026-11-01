@@ -243,7 +243,7 @@ pub fn dispatch_action(
     app: &mut App,
     player: &mut AudioPlayer,
     player_tx: &Sender<PlayerEvent>,
-    search_tx: &Sender<crate::music::SearchResult>,
+    search_tx: &Sender<crate::music::SearchResponse>,
     resolve_tx: &Sender<crate::music::ResolveResponse>,
 ) {
     match action {
@@ -257,7 +257,7 @@ pub fn dispatch_action(
             if app.playing.is_some() || app.now_playing.is_some() {
                 match player.toggle_pause() {
                     Ok(()) => {
-                        app.paused = !app.paused;
+                        app.set_paused(!app.paused);
                         app.set_status(if app.paused {
                             "PAUSED".to_string()
                         } else {
@@ -353,14 +353,17 @@ pub fn dispatch_action(
         Action::ToggleProvider => {
             app.cancel_pending_resolution();
             app.settings.provider = app.settings.provider.toggle();
-            app.settings.save();
-            app.set_status(format!("PROVIDER: {}", app.settings.provider.label()));
+            if let Err(error) = app.settings.save() {
+                app.set_status(format!("SETTINGS ERROR: {error}"));
+            } else {
+                app.set_status(format!("PROVIDER: {}", app.settings.provider.label()));
+            }
             crate::app::runner::refetch_if_needed(app, search_tx);
         }
-        Action::ClearCache => {
-            crate::config::clear_caches();
-            app.set_status("CACHES CLEARED");
-        }
+        Action::ClearCache => match crate::config::clear_caches() {
+            Ok(()) => app.set_status("CACHES CLEARED"),
+            Err(error) => app.set_status(format!("CACHE ERROR: {error}")),
+        },
 
         Action::Quit => {
             app.open_quit_dialog();
