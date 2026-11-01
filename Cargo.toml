@@ -1,6 +1,6 @@
 [package]
 name = "ansimuz"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "A lightweight fast TUI to stream your favourite music with pure 8-bit ANSI vibes."
 license = "MIT"
