@@ -257,7 +257,7 @@ pub fn dispatch_action(
             if app.playing.is_some() || app.now_playing.is_some() {
                 match player.toggle_pause() {
                     Ok(()) => {
-                        app.paused = !app.paused;
+                        app.set_paused(!app.paused);
                         app.set_status(if app.paused {
                             "PAUSED".to_string()
                         } else {
