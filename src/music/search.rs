@@ -166,6 +166,22 @@ pub fn search_music(query: String, provider: Provider) -> SearchResult {
     (query, result)
 }
 
+pub fn spawn_search(
+    query: String,
+    provider: Provider,
+    generation: u64,
+    tx: std::sync::mpsc::Sender<SearchResponse>,
+) {
+    std::thread::spawn(move || {
+        let (q, result) = search_music(query, provider);
+        let _ = tx.send(SearchResponse {
+            generation,
+            query: q,
+            result,
+        });
+    });
+}
+
 pub fn resolve_playable(track: &Track) -> Result<Track, String> {
     if let Some(cached) = get_cached_track(track) {
         return Ok(cached);
