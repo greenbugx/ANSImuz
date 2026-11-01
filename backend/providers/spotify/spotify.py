@@ -299,6 +299,7 @@ def resolve_playable(track: dict[str, Any]) -> dict[str, Any]:
         normalized_track.get("album", ""),
     )
     found_by_id: dict[str, dict[str, Any]] = {}
+    ranked: list[dict[str, Any]] = []
     winner = None
     errors = []
 
