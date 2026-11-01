@@ -154,6 +154,35 @@ pub fn cache_bytes() -> u64 {
     dir_size(&artwork_cache_dir()) + dir_size(&audio_cache_dir())
 }
 
+static CACHE_TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn write_cache_atomic(
+    dir: &std::path::Path,
+    file_stem: &str,
+    extension: &str,
+    bytes: &[u8],
+) -> std::io::Result<PathBuf> {
+    fs::create_dir_all(dir)?;
+    let final_path = dir.join(format!("{file_stem}.{extension}"));
+    let temp_id = CACHE_TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temp_path = dir.join(format!(
+        "{file_stem}.tmp-{}-{temp_id}.part",
+        std::process::id()
+    ));
+
+    if let Err(e) = fs::write(&temp_path, bytes) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(e);
+    }
+
+    if let Err(e) = fs::rename(&temp_path, &final_path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(e);
+    }
+
+    Ok(final_path)
+}
+
 pub fn clear_caches() -> std::io::Result<()> {
     let mut err = None;
 
