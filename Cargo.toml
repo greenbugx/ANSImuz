@@ -2,6 +2,8 @@
 name = "ansimuz"
 version = "0.1.1"
 edition = "2024"
+description = "A lightweight fast TUI to stream your favourite music with pure 8-bit ANSI vibes."
+license = "MIT"
 
 [dependencies]
 crossterm = "0.29.0"
