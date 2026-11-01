@@ -210,6 +210,65 @@ fn test_repeat_one_does_not_repeat_on_playback_failure() {
 }
 
 #[test]
+fn test_playback_error_advances_to_next_queued_track() {
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    // Currently playing Song A
+    let song_a = make_test_track("Song A", "Artist", "http://stream/a");
+    play_track(
+        &mut app,
+        &mut player,
+        player_tx.clone(),
+        resolve_tx.clone(),
+        song_a,
+        PlaybackSource::SearchResult { index: 0 },
+    );
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Song A")
+    );
+    assert!(player.is_playing());
+
+    // Queue has Song B
+    let song_b = make_test_track("Song B", "Artist", "http://stream/b");
+    app.enqueue(song_b);
+    assert_eq!(app.queue.len(), 1);
+
+    // Simulate playback error on Song A
+    player.record_error("MPV exited with error: Connection reset by peer".to_string());
+
+    // Simulate the runner loop logic when playback fails while queued items remain:
+    let error = player.error().map(|e| e.to_string());
+    assert!(error.is_some());
+    if let Some(current) = app.now_playing.take() {
+        app.push_history(current);
+    }
+    let advanced = advance_playback(&mut app, &mut player, player_tx, resolve_tx);
+
+    // Must successfully advance to Song B!
+    assert!(
+        advanced,
+        "Must advance to next queued track on playback error"
+    );
+    assert_eq!(
+        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        Some("Song B")
+    );
+    assert!(
+        app.queue.is_empty(),
+        "Queue must be consumed as Song B starts"
+    );
+    assert_eq!(app.history.len(), 1);
+    assert_eq!(
+        app.history[0].title, "Song A",
+        "Failed track must be in history"
+    );
+}
+
+#[test]
 fn test_previous_track_rewinds_history_and_prepends_to_queue() {
     use ansimuz::app::play_previous;
 
