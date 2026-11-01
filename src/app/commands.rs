@@ -353,14 +353,17 @@ pub fn dispatch_action(
         Action::ToggleProvider => {
             app.cancel_pending_resolution();
             app.settings.provider = app.settings.provider.toggle();
-            app.settings.save();
-            app.set_status(format!("PROVIDER: {}", app.settings.provider.label()));
+            if let Err(error) = app.settings.save() {
+                app.set_status(format!("SETTINGS ERROR: {error}"));
+            } else {
+                app.set_status(format!("PROVIDER: {}", app.settings.provider.label()));
+            }
             crate::app::runner::refetch_if_needed(app, search_tx);
         }
-        Action::ClearCache => {
-            crate::config::clear_caches();
-            app.set_status("CACHES CLEARED");
-        }
+        Action::ClearCache => match crate::config::clear_caches() {
+            Ok(()) => app.set_status("CACHES CLEARED"),
+            Err(error) => app.set_status(format!("CACHE ERROR: {error}")),
+        },
 
         Action::Quit => {
             app.open_quit_dialog();

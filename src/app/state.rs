@@ -163,13 +163,17 @@ impl App {
             2 => self.settings.art_hq = !self.settings.art_hq,
             3 => self.settings.art_palette = !self.settings.art_palette,
             _ => {
-                crate::config::clear_caches();
-                self.set_status("CACHES CLEARED");
+                match crate::config::clear_caches() {
+                    Ok(()) => self.set_status("CACHES CLEARED"),
+                    Err(error) => self.set_status(format!("CACHE ERROR: {error}")),
+                }
                 return;
             }
         }
 
-        self.settings.save();
+        if let Err(error) = self.settings.save() {
+            self.set_status(format!("SETTINGS ERROR: {error}"));
+        }
     }
 
     pub fn set_status(&mut self, message: impl Into<String>) {
