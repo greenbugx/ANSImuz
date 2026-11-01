@@ -35,17 +35,6 @@ pub fn run(
             handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, response);
         }
 
-        if !app.is_resolving
-            && app.now_playing.is_some()
-            && !player.is_playing()
-            && !advance_playback(&mut app, &mut player, player_tx.clone(), resolve_tx.clone())
-        {
-            app.set_status(match player.error() {
-                Some(error) => format!("PLAYER ERROR: {}", error),
-                None => "PLAYBACK ENDED".to_string(),
-            });
-        }
-
         let current = player.generation();
 
         while let Ok(event) = player_rx.try_recv() {
@@ -62,9 +51,28 @@ pub fn run(
                     generation,
                     message,
                 } if generation == current => {
+                    player.record_error(message.clone());
                     app.set_status(format!("PLAYER ERROR: {}", message));
                 }
                 _ => {}
+            }
+        }
+
+        if !app.is_resolving && app.now_playing.is_some() && !player.is_playing() {
+            if let Some(error) = player.error() {
+                app.set_status(format!("PLAYER ERROR: {}", error));
+                if let Some(current) = app.now_playing.take() {
+                    app.push_history(current);
+                }
+                app.playing = None;
+                app.paused = false;
+            } else if !advance_playback(
+                &mut app,
+                &mut player,
+                player_tx.clone(),
+                resolve_tx.clone(),
+            ) {
+                app.set_status("PLAYBACK ENDED".to_string());
             }
         }
 
@@ -333,6 +341,7 @@ pub fn advance_playback(
 ) -> bool {
     if app.repeat == Repeat::One
         && app.played_once
+        && player.error().is_none()
         && let Some(track) = app.now_playing.clone()
     {
         play_track(

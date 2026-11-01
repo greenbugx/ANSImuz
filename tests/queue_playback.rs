@@ -176,6 +176,40 @@ fn test_repeat_one_overrides_queue_advance() {
 }
 
 #[test]
+fn test_repeat_one_does_not_repeat_on_playback_failure() {
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    app.tracks = vec![make_test_track(
+        "Failing Song",
+        "Artist",
+        "http://stream/fail",
+    )];
+    app.repeat = Repeat::One;
+
+    play_search_result(
+        &mut app,
+        &mut player,
+        player_tx.clone(),
+        resolve_tx.clone(),
+        0,
+    );
+    app.played_once = true;
+
+    // Simulate playback error
+    player.record_error("Media error: stream closed unexpectedly".to_string());
+
+    // Advance playback: must NOT repeat on playback failure!
+    let advanced = advance_playback(&mut app, &mut player, player_tx, resolve_tx);
+    assert!(!advanced, "Repeat One must not restart failed playback");
+    assert!(app.now_playing.is_none());
+    assert_eq!(app.history.len(), 1);
+    assert_eq!(app.history[0].title, "Failing Song");
+}
+
+#[test]
 fn test_previous_track_rewinds_history_and_prepends_to_queue() {
     use ansimuz::app::play_previous;
 
