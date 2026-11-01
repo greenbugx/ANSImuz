@@ -117,6 +117,30 @@ class TestSpotifyResolutionErrorReporting(unittest.TestCase):
             f"Expected diagnostic details in error, got: {err_msg}",
         )
 
+    @patch("providers.spotify.spotify._get_ytmusic")
+    def test_resolve_handles_all_search_attempts_raising_exceptions(self, mock_get_yt):
+        from providers.spotify import spotify
+
+        mock_yt = MagicMock()
+        mock_get_yt.return_value = mock_yt
+        mock_yt.search.side_effect = RuntimeError("Network connection unreachable")
+
+        track = {
+            "spotify_id": "sp_fail_queries_all",
+            "title": "Unreachable Track",
+            "artist": "Artist",
+            "artists": ["Artist"],
+            "duration_ms": 200000,
+        }
+
+        with self.assertRaises(LookupError) as ctx:
+            spotify.resolve_playable(track)
+
+        err_msg = str(ctx.exception)
+        self.assertIn("No confident YouTube Music match", err_msg)
+        self.assertIn("Search errors:", err_msg)
+        self.assertIn("Network connection unreachable", err_msg)
+
 
 class TestArtworkThumbnails(unittest.TestCase):
     def test_cache_path_calculation(self):
