@@ -65,8 +65,7 @@ pub fn run(
                 if let Some(current) = app.now_playing.take() {
                     app.push_history(current);
                 }
-                app.playing = None;
-                app.paused = false;
+                app.set_stopped();
             } else if !advance_playback(
                 &mut app,
                 &mut player,
@@ -390,8 +389,7 @@ pub fn play_track(
     if track.stream_url.is_empty() {
         app.cancel_pending_resolution();
         let generation = app.resolve_generation;
-        app.is_resolving = true;
-        app.pending_track = Some(track.clone());
+        app.set_resolving(track.clone());
         match source {
             PlaybackSource::SearchResult { index } => {
                 app.selected = index;
@@ -452,16 +450,12 @@ pub fn start_playback(
 
     match player.play(&audio_source, app.volume, events) {
         Ok(()) => {
-            app.is_resolving = false;
-            app.pending_track = None;
-            app.pending_queue_entry_id = None;
             if let Some(old) = app.now_playing.take()
                 && (old.stream_url != track.stream_url || old.title != track.title)
             {
                 app.push_history(old);
             }
-            app.now_playing = Some(track.clone());
-            app.paused = false;
+            app.set_playing(track.clone());
             app.played_once = false;
             app.set_status(format!("PLAYING: {} — {}", track.title, track.artist));
 
@@ -495,8 +489,7 @@ pub fn start_playback(
             {
                 app.push_history(old);
             }
-            app.playing = None;
-            app.now_playing = None;
+            app.set_stopped();
             app.set_status(format!("PLAYER ERROR: {}", error));
             Err(error)
         }
@@ -524,17 +517,7 @@ pub fn refetch_if_needed(app: &mut App, search_tx: &Sender<SearchResponse>) {
         app.set_status(format!("REFETCHING ({})…", provider.label()));
 
         app.search_generation = app.search_generation.wrapping_add(1);
-        let generation = app.search_generation;
-
-        let tx = search_tx.clone();
-        std::thread::spawn(move || {
-            let (q, result) = crate::music::search_music(query, provider);
-            let _ = tx.send(SearchResponse {
-                generation,
-                query: q,
-                result,
-            });
-        });
+        crate::music::spawn_search(query, provider, app.search_generation, search_tx.clone());
     }
 }
 

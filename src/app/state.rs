@@ -26,6 +26,21 @@ pub enum QuitChoice {
     No,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum PlaybackState {
+    #[default]
+    Stopped,
+    Resolving {
+        track: Track,
+    },
+    Playing {
+        track: Track,
+    },
+    Paused {
+        track: Track,
+    },
+}
+
 #[derive(Clone, Debug)]
 pub struct QueueEntry {
     pub id: u64,
@@ -69,6 +84,7 @@ pub struct App {
     pub next_queue_id: u64,
     pub pending_queue_entry_id: Option<u64>,
     pub history: VecDeque<Track>,
+    pub playback_state: PlaybackState,
 }
 
 impl App {
@@ -114,6 +130,7 @@ impl App {
             next_queue_id: 1,
             history: VecDeque::new(),
             pending_queue_entry_id: None,
+            playback_state: PlaybackState::Stopped,
         }
     }
 
@@ -135,6 +152,66 @@ impl App {
         self.is_resolving = false;
         self.pending_track = None;
         self.pending_queue_entry_id = None;
+        if matches!(self.playback_state, PlaybackState::Resolving { .. }) {
+            self.playback_state = if let Some(current) = &self.now_playing {
+                if self.paused {
+                    PlaybackState::Paused {
+                        track: current.clone(),
+                    }
+                } else {
+                    PlaybackState::Playing {
+                        track: current.clone(),
+                    }
+                }
+            } else {
+                PlaybackState::Stopped
+            };
+        }
+    }
+
+    pub fn playback_state(&self) -> &PlaybackState {
+        &self.playback_state
+    }
+
+    pub fn set_stopped(&mut self) {
+        self.playback_state = PlaybackState::Stopped;
+        self.now_playing = None;
+        self.paused = false;
+        self.is_resolving = false;
+        self.pending_track = None;
+        self.pending_queue_entry_id = None;
+        self.playing = None;
+    }
+
+    pub fn set_resolving(&mut self, track: Track) {
+        self.playback_state = PlaybackState::Resolving {
+            track: track.clone(),
+        };
+        self.is_resolving = true;
+        self.pending_track = Some(track);
+    }
+
+    pub fn set_playing(&mut self, track: Track) {
+        self.playback_state = PlaybackState::Playing {
+            track: track.clone(),
+        };
+        self.now_playing = Some(track);
+        self.paused = false;
+        self.is_resolving = false;
+        self.pending_track = None;
+        self.pending_queue_entry_id = None;
+    }
+
+    pub fn set_paused(&mut self, paused: bool) {
+        if let Some(track) = self.now_playing.clone() {
+            if paused {
+                self.playback_state = PlaybackState::Paused { track };
+                self.paused = true;
+            } else {
+                self.playback_state = PlaybackState::Playing { track };
+                self.paused = false;
+            }
+        }
     }
 
     pub fn toggle_about(&mut self) {
@@ -383,6 +460,80 @@ impl Default for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_playback_state_transitions() {
+        let mut app = App::new();
+        assert_eq!(*app.playback_state(), PlaybackState::Stopped);
+
+        let track = Track {
+            title: "Test Track".into(),
+            artist: "Test Artist".into(),
+            stream_url: "".into(),
+            art_url: "".into(),
+            spotify_id: None,
+            artists: vec![],
+            album: None,
+            duration_ms: None,
+        };
+
+        // Resolving
+        app.set_resolving(track.clone());
+        assert_eq!(
+            *app.playback_state(),
+            PlaybackState::Resolving {
+                track: track.clone()
+            }
+        );
+        assert!(app.is_resolving);
+
+        // Cancel resolution when nothing was playing -> Stopped
+        app.cancel_pending_resolution();
+        assert_eq!(*app.playback_state(), PlaybackState::Stopped);
+        assert!(!app.is_resolving);
+
+        // Playing
+        let mut resolved = track.clone();
+        resolved.stream_url = "http://stream/test".into();
+        app.set_playing(resolved.clone());
+        assert_eq!(
+            *app.playback_state(),
+            PlaybackState::Playing {
+                track: resolved.clone()
+            }
+        );
+        assert_eq!(
+            app.now_playing.as_ref().map(|t| t.title.as_str()),
+            Some("Test Track")
+        );
+        assert!(!app.paused);
+
+        // Paused
+        app.set_paused(true);
+        assert_eq!(
+            *app.playback_state(),
+            PlaybackState::Paused {
+                track: resolved.clone()
+            }
+        );
+        assert!(app.paused);
+
+        // Unpaused
+        app.set_paused(false);
+        assert_eq!(
+            *app.playback_state(),
+            PlaybackState::Playing {
+                track: resolved.clone()
+            }
+        );
+        assert!(!app.paused);
+
+        // Stopped
+        app.set_stopped();
+        assert_eq!(*app.playback_state(), PlaybackState::Stopped);
+        assert!(app.now_playing.is_none());
+        assert!(!app.paused);
+    }
 
     #[test]
     fn test_cancel_pending_resolution_invalidates_generation() {
