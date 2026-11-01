@@ -11,10 +11,19 @@ SPOTIFY_LIMIT = 10
 YTMUSIC_LIMIT = 10
 MIN_MATCH_SCORE = 0.68 # higher the better, but may reduce matches
 
-_ytmusic = YTMusic()
+_ytmusic: YTMusic | None = None
 _ytmusic_lock = threading.Lock()
 _resolved_cache: dict[str, dict[str, Any]] = {}
 _cache_lock = threading.Lock()
+
+
+def _get_ytmusic() -> YTMusic:
+    global _ytmusic
+    if _ytmusic is None:
+        with _ytmusic_lock:
+            if _ytmusic is None:
+                _ytmusic = YTMusic()
+    return _ytmusic
 
 
 def _field(obj: Any, name: str, default: Any = None) -> Any:
@@ -246,6 +255,7 @@ def _rank_candidate(track: dict[str, Any], song: dict[str, Any]) -> dict[str, An
         "album": youtube_album,
         "duration": candidate_duration,
         "duration_difference": difference,
+        "tolerance": tolerance,
         "title_score": title_score,
         "artist_score": artist_score,
         "album_score": album_score,
@@ -294,8 +304,9 @@ def resolve_playable(track: dict[str, Any]) -> dict[str, Any]:
 
     for query in queries:
         try:
+            yt = _get_ytmusic()
             with _ytmusic_lock:
-                candidates = _ytmusic.search(
+                candidates = yt.search(
                     query,
                     filter="songs",
                     limit=YTMUSIC_LIMIT,
@@ -322,10 +333,43 @@ def resolve_playable(track: dict[str, Any]) -> dict[str, Any]:
             break
 
     if not winner:
-        detail = f" Search errors: {'; '.join(errors)}" if errors else ""
+        rejection_details = []
+        if ranked:
+            best = ranked[0]
+            if best.get("conflicts"):
+                rejection_details.append(
+                    f"version conflict with '{best['title']}' ({', '.join(best['conflicts'])})"
+                )
+            elif (
+                best.get("duration_difference") is not None
+                and best.get("tolerance") is not None
+                and best["duration_difference"] > best["tolerance"]
+            ):
+                rejection_details.append(
+                    f"duration difference {best['duration_difference']:.1f}s exceeded tolerance "
+                    f"{best['tolerance']:.1f}s on '{best['title']}'"
+                )
+            elif best.get("score") is not None and best["score"] < MIN_MATCH_SCORE:
+                rejection_details.append(
+                    f"match score {best['score']:.2f} was below threshold {MIN_MATCH_SCORE} on '{best['title']}'"
+                )
+            elif best.get("title_score") is not None and best["title_score"] < 0.60:
+                rejection_details.append(
+                    f"low title similarity ({best['title_score']:.2f}) on '{best['title']}'"
+                )
+            elif best.get("artist_score") is not None and best["artist_score"] < 0.55:
+                rejection_details.append(
+                    f"low artist similarity ({best['artist_score']:.2f}) on '{best['title']}'"
+                )
+        elif not found_by_id:
+            rejection_details.append("no candidate songs returned by YouTube Music")
+
+        reason_str = f" Reason: {'; '.join(rejection_details)}." if rejection_details else ""
+        error_str = f" Search errors: {'; '.join(errors)}." if errors else ""
+
         raise LookupError(
             f"No confident YouTube Music match for "
-            f"{track['title']} — {track.get('artist', '')}.{detail}"
+            f"'{track['title']}' by {track.get('artist', 'Unknown Artist')}.{reason_str}{error_str}"
         )
 
     selected_song = found_by_id[winner["video_id"]]
