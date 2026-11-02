@@ -6,3 +6,4 @@ pub mod paths;
 pub mod playback;
 pub mod terminal;
 pub mod ui;
+pub mod scripting;
