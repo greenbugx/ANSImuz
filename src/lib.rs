@@ -4,6 +4,6 @@ pub mod config;
 pub mod music;
 pub mod paths;
 pub mod playback;
+pub mod scripting;
 pub mod terminal;
 pub mod ui;
-pub mod scripting;
