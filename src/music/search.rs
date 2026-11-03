@@ -69,42 +69,52 @@ pub fn cache_resolved_track(track: &Track) {
     }
 }
 
-fn ensure_backend_path(py: Python<'_>) -> PyResult<()> {
-    static INIT: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+pub fn initialize_backend<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyModule>> {
+    let backend_dir = crate::paths::backend_dir();
+    if !backend_dir.is_dir() {
+        return Err(pyo3::exceptions::PyFileNotFoundError::new_err(format!(
+            "Backend directory does not exist: {}",
+            backend_dir.display()
+        )));
+    }
 
-    let res = INIT.get_or_init(|| {
-        let sys = PyModule::import(py, "sys").map_err(|e| e.to_string())?;
-        let attr = sys.getattr("path").map_err(|e| e.to_string())?;
-        let path = attr.cast_into::<PyList>().map_err(|e| e.to_string())?;
+    let bridge_file = backend_dir.join("bridge.py");
+    if !bridge_file.is_file() {
+        return Err(pyo3::exceptions::PyFileNotFoundError::new_err(format!(
+            "Backend bridge script not found: {}",
+            bridge_file.display()
+        )));
+    }
 
-        let backend_path = crate::paths::backend_dir();
-        let backend_str = backend_path.to_string_lossy();
+    let sys = PyModule::import(py, "sys")?;
+    let path = sys.getattr("path")?.cast_into::<PyList>()?;
+    let backend_str = backend_dir.to_string_lossy();
 
-        let already_present = path.iter().any(|item| {
-            item.extract::<String>()
-                .map(|s| s == backend_str.as_ref())
-                .unwrap_or(false)
-        });
-
-        if !already_present {
-            path.insert(0, backend_str.as_ref())
-                .map_err(|e| e.to_string())?;
-        }
-
-        Ok(())
+    let already_present = path.iter().any(|item| {
+        item.extract::<String>()
+            .map(|s| s == backend_str.as_ref())
+            .unwrap_or(false)
     });
 
-    match res {
-        Ok(()) => Ok(()),
-        Err(err) => Err(pyo3::exceptions::PyRuntimeError::new_err(err.clone())),
+    if !already_present {
+        path.insert(0, backend_str.as_ref())?;
     }
+
+    PyModule::import(py, "bridge")
+}
+
+pub fn with_backend<T>(
+    f: impl for<'py> FnOnce(Python<'py>, &Bound<'py, PyModule>) -> PyResult<T>,
+) -> Result<T, String> {
+    Python::attach(|py| {
+        let bridge = initialize_backend(py)?;
+        f(py, &bridge)
+    })
+    .map_err(|error| error.to_string())
 }
 
 pub fn search_music(query: String, provider: Provider) -> SearchResult {
-    let result = Python::attach(|py| -> PyResult<Vec<Track>> {
-        ensure_backend_path(py)?;
-
-        let bridge = PyModule::import(py, "bridge")?;
+    let result = with_backend(|_py, bridge| {
         let results = bridge
             .getattr("search_music")?
             .call1((query.clone(), provider.as_str()))?
@@ -160,8 +170,7 @@ pub fn search_music(query: String, provider: Provider) -> SearchResult {
         }
 
         Ok(tracks)
-    })
-    .map_err(|error| error.to_string());
+    });
 
     (query, result)
 }
@@ -186,11 +195,7 @@ pub fn resolve_playable(track: &Track) -> Result<Track, String> {
     if let Some(cached) = get_cached_track(track) {
         return Ok(cached);
     }
-    let resolved_track = Python::attach(|py| -> PyResult<Track> {
-        ensure_backend_path(py)?;
-
-        let bridge = PyModule::import(py, "bridge")?;
-
+    let resolved_track = with_backend(|py, bridge| {
         let dict = PyDict::new(py);
         dict.set_item("title", &track.title)?;
         dict.set_item("artist", &track.artist)?;
@@ -253,9 +258,80 @@ pub fn resolve_playable(track: &Track) -> Result<Track, String> {
             album,
             duration_ms,
         })
-    })
-    .map_err(|error| error.to_string())?;
+    })?;
 
     cache_resolved_track(&resolved_track);
     Ok(resolved_track)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_initialize_backend_loads_bridge_and_functions() {
+        let _guard = crate::paths::ENV_LOCK.lock().unwrap();
+        let res = with_backend(|_py, bridge| {
+            assert!(bridge.hasattr("search_music").unwrap());
+            assert!(bridge.hasattr("resolve_playable").unwrap());
+            Ok(())
+        });
+        assert!(
+            res.is_ok(),
+            "Backend initialization must succeed: {:?}",
+            res.err()
+        );
+    }
+
+    #[test]
+    fn test_sys_path_no_redundant_entries() {
+        let _guard = crate::paths::ENV_LOCK.lock().unwrap();
+        Python::attach(|py| {
+            // First call
+            let _ = initialize_backend(py).unwrap();
+            // Second call
+            let _ = initialize_backend(py).unwrap();
+
+            let sys = PyModule::import(py, "sys").unwrap();
+            let path = sys.getattr("path").unwrap().cast_into::<PyList>().unwrap();
+            let backend_str = crate::paths::backend_dir().to_string_lossy().to_string();
+
+            let count = path
+                .iter()
+                .filter(|item| {
+                    item.extract::<String>()
+                        .map(|s| s == backend_str)
+                        .unwrap_or(false)
+                })
+                .count();
+
+            assert_eq!(
+                count, 1,
+                "backend directory must appear exactly once in sys.path"
+            );
+        });
+    }
+
+    #[test]
+    fn test_missing_backend_directory_produces_useful_error() {
+        let _guard = crate::paths::ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("ANSIMUZ_DATA_DIR", "/tmp/nonexistent_ansimuz_dir_12345");
+        }
+
+        let res = with_backend(|_py, _bridge| Ok(()));
+        assert!(
+            res.is_err(),
+            "Missing backend directory must produce an error"
+        );
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("Backend directory does not exist")
+                || err.contains("Backend bridge script not found"),
+            "Error must clearly state missing backend, got: {err}"
+        );
+
+        unsafe {
+            std::env::remove_var("ANSIMUZ_DATA_DIR");
+        }
+    }
 }

@@ -58,6 +58,8 @@ pub fn assets_dir() -> PathBuf {
 pub fn frames_dir() -> PathBuf {
     data_dir().join("assets/frames")
 }
+#[cfg(test)]
+pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod tests {
@@ -65,12 +67,14 @@ mod tests {
 
     #[test]
     fn test_data_dir_resolution() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let dir = data_dir();
         assert!(dir.exists() || dir == std::path::Path::new("/usr/share/ansimuz"));
     }
 
     #[test]
     fn test_data_dir_override() {
+        let _guard = ENV_LOCK.lock().unwrap();
         unsafe {
             std::env::set_var("ANSIMUZ_DATA_DIR", "/tmp/ansimuz-custom-data");
         }
