@@ -390,3 +390,113 @@ fn test_switching_tracks_during_playback_ignores_stale_events() {
     assert_eq!(app.now_playing().map(|t| t.title.as_str()), Some("Track 1"));
     assert_ne!(app.status, "PLAYER ERROR: Old error");
 }
+#[test]
+fn test_failed_mpv_startup_handled_gracefully() {
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    player.set_mock_fail(true);
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    let track = make_test_track("Unplayable", "Artist", "http://stream/bad");
+    let result = play_track(
+        &mut app,
+        &mut player,
+        player_tx,
+        resolve_tx,
+        track,
+        PlaybackSource::SearchResult { index: 0 },
+    );
+
+    assert!(!result, "play_track must return false on spawn failure");
+    assert!(
+        app.now_playing().is_none(),
+        "Nothing should be playing on failure"
+    );
+    assert!(app.status.contains("PLAYER ERROR: Failed to launch mpv"));
+    assert_eq!(
+        player.error(),
+        Some("Failed to launch mpv: process failed to start")
+    );
+}
+
+#[test]
+fn test_rapid_track_switching_across_multiple_generations() {
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+    let mut playback = None;
+
+    let mut gens = Vec::new();
+    for i in 0..5 {
+        let t = make_test_track(
+            &format!("Track {i}"),
+            "Artist",
+            &format!("http://stream/{i}"),
+        );
+        play_track(
+            &mut app,
+            &mut player,
+            player_tx.clone(),
+            resolve_tx.clone(),
+            t,
+            PlaybackSource::SearchResult { index: i },
+        );
+        gens.push(player.generation());
+    }
+
+    // Generations must be strictly increasing
+    for i in 1..gens.len() {
+        assert!(
+            gens[i] > gens[i - 1],
+            "Generation must increment on each switch"
+        );
+    }
+
+    let final_gen = *gens.last().unwrap();
+    assert_eq!(app.now_playing().map(|t| t.title.as_str()), Some("Track 4"));
+
+    // Stale events from all prior generations (0..4) are dropped
+    for prior_gen in &gens[0..4] {
+        let ended = handle_player_event(
+            &mut app,
+            &mut player,
+            &player_tx,
+            &resolve_tx,
+            PlayerEvent::Ended {
+                generation: *prior_gen,
+            },
+            &mut playback,
+        );
+        assert!(!ended, "Events from prior generation must be dropped");
+
+        let failed = handle_player_event(
+            &mut app,
+            &mut player,
+            &player_tx,
+            &resolve_tx,
+            PlayerEvent::Failed {
+                generation: *prior_gen,
+                message: "Old error".into(),
+            },
+            &mut playback,
+        );
+        assert!(!failed, "Failures from prior generation must be dropped");
+    }
+
+    // Only the final generation's event takes effect
+    assert_eq!(app.now_playing().map(|t| t.title.as_str()), Some("Track 4"));
+    let final_ended = handle_player_event(
+        &mut app,
+        &mut player,
+        &player_tx,
+        &resolve_tx,
+        PlayerEvent::Ended {
+            generation: final_gen,
+        },
+        &mut playback,
+    );
+    assert!(final_ended, "Final generation event must be handled");
+    assert_eq!(app.status, "PLAYBACK ENDED");
+}

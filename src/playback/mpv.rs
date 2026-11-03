@@ -289,28 +289,64 @@ impl AudioPlayer {
             return;
         }
 
+        // Immediately signal observer thread to cancel before any shutdown actions
         if let Some(cancel) = self.cancel_observer.take() {
-            cancel.store(true, Ordering::Relaxed);
+            cancel.store(true, Ordering::SeqCst);
         }
 
-        if self.child.is_some() {
-            let _ = self.send(r#"{"command":["quit"]}"#);
+        // Terminate and reap the child process if active
+        if let Some(mut child) = self.child.take() {
+            // Attempt graceful quit via IPC socket
+            if self.socket_path.exists()
+                && let Ok(mut stream) = UnixStream::connect(&self.socket_path)
+            {
+                let _ = stream.write_all(b"{\"command\":[\"quit\"]}\n");
+            }
 
-            if let Some(mut child) = self.child.take() {
-                for _ in 0..10 {
-                    match child.try_wait() {
-                        Ok(Some(_)) => break,
-                        _ => thread::sleep(Duration::from_millis(50)),
+            let mut exited = false;
+            for _ in 0..10 {
+                match child.try_wait() {
+                    Ok(Some(_status)) => {
+                        exited = true;
+                        break;
+                    }
+                    Ok(None) => {
+                        thread::sleep(Duration::from_millis(50));
+                    }
+                    Err(_) => {
+                        exited = false;
+                        break;
                     }
                 }
-
-                let _ = child.kill();
-                let _ = child.wait();
             }
+
+            if !exited {
+                let _ = child.kill();
+            }
+
+            // Always wait to reap zombie process
+            let _ = child.wait();
         }
 
         self.paused = false;
-        let _ = fs::remove_file(&self.socket_path);
+
+        // Remove IPC socket file after child process has exited
+        if self.socket_path.exists() {
+            let _ = fs::remove_file(&self.socket_path);
+        }
+    }
+
+    #[cfg(test)]
+    pub fn set_child_for_test(
+        &mut self,
+        child: Child,
+        socket_path: PathBuf,
+        cancel: Arc<AtomicBool>,
+    ) {
+        self.child = Some(child);
+        self.socket_path = socket_path;
+        self.cancel_observer = Some(cancel);
+        self.is_mock = false;
     }
 }
 
@@ -766,6 +802,90 @@ mod tests {
         assert_eq!(
             val_stop.get("reason").and_then(|r| r.as_str()),
             Some("stop")
+        );
+    }
+
+    #[test]
+    fn test_stop_normal_shutdown_when_process_exits_gracefully() {
+        let child = Command::new("true").spawn().expect("spawn true");
+        let socket_path =
+            std::env::temp_dir().join(format!("ansimuz-test-normal-{}.sock", std::process::id()));
+        fs::write(&socket_path, b"test").expect("write socket");
+        assert!(socket_path.exists());
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut player = AudioPlayer::new();
+        player.set_child_for_test(child, socket_path.clone(), cancel.clone());
+
+        player.stop();
+
+        assert!(
+            cancel.load(Ordering::SeqCst),
+            "Observer cancellation must be set on stop"
+        );
+        assert!(player.child.is_none(), "Child must be cleared on stop");
+        assert!(
+            !socket_path.exists(),
+            "Socket file must be removed after exit"
+        );
+    }
+
+    #[test]
+    fn test_stop_forced_shutdown_kills_unresponsive_process() {
+        let child = Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn sleep");
+        let socket_path =
+            std::env::temp_dir().join(format!("ansimuz-test-forced-{}.sock", std::process::id()));
+        fs::write(&socket_path, b"test").expect("write socket");
+        assert!(socket_path.exists());
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut player = AudioPlayer::new();
+        player.set_child_for_test(child, socket_path.clone(), cancel.clone());
+
+        player.stop();
+
+        assert!(
+            cancel.load(Ordering::SeqCst),
+            "Observer cancellation must be set on forced stop"
+        );
+        assert!(
+            player.child.is_none(),
+            "Child must be cleared on forced stop"
+        );
+        assert!(
+            !socket_path.exists(),
+            "Socket file must be removed after forced kill"
+        );
+    }
+
+    #[test]
+    fn test_drop_reaps_child_and_removes_socket() {
+        let child = Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn sleep");
+        let socket_path =
+            std::env::temp_dir().join(format!("ansimuz-test-drop-{}.sock", std::process::id()));
+        fs::write(&socket_path, b"test").expect("write socket");
+        assert!(socket_path.exists());
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        {
+            let mut player = AudioPlayer::new();
+            player.set_child_for_test(child, socket_path.clone(), cancel.clone());
+            // player dropped here
+        }
+
+        assert!(
+            cancel.load(Ordering::SeqCst),
+            "Observer cancellation must be set on drop"
+        );
+        assert!(
+            !socket_path.exists(),
+            "Socket file must be removed after drop"
         );
     }
 }
