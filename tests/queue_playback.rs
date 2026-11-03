@@ -85,7 +85,6 @@ fn test_automatic_advance_queue_priority_and_exhaustion() {
         resolve_tx.clone(),
         0,
     );
-    app.played_once = true;
 
     // Enqueue Q0 and Q1
     app.enqueue(make_test_track("Q0", "Artist", "http://stream/q0"));
@@ -140,7 +139,6 @@ fn test_repeat_one_overrides_queue_advance() {
         resolve_tx.clone(),
         0,
     );
-    app.played_once = true;
 
     // Enqueue an item
     app.enqueue(make_test_track(
@@ -184,7 +182,6 @@ fn test_repeat_one_does_not_repeat_on_playback_failure() {
         resolve_tx.clone(),
         0,
     );
-    app.played_once = true;
 
     // Simulate playback error
     player.record_error("Media error: stream closed unexpectedly".to_string());
@@ -506,7 +503,6 @@ fn test_repeat_one_does_not_interfere_with_failed_queue_resolution() {
         resolve_tx.clone(),
         0,
     );
-    app.played_once = true;
 
     // Queue: [Q_fail (unresolved), Q_good (resolved)]
     let fail_track = make_test_track("Q Fail", "Artist", "");

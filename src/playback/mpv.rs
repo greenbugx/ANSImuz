@@ -348,10 +348,12 @@ fn observe(
     }
 
     if !socket_path.exists() {
-        let _ = events.send(PlayerEvent::Failed {
-            generation,
-            message: "mpv did not start".into(),
-        });
+        if !cancelled.load(Ordering::Relaxed) {
+            let _ = events.send(PlayerEvent::Failed {
+                generation,
+                message: "mpv did not start".into(),
+            });
+        }
         return;
     }
 
@@ -399,6 +401,12 @@ fn observe(
         if let Ok(bytes) = serde_json::to_vec(&time_cmd)
             && (stream_writer.write_all(&bytes).is_err() || stream_writer.write_all(b"\n").is_err())
         {
+            if !cancelled.load(Ordering::Relaxed) {
+                let _ = events.send(PlayerEvent::Failed {
+                    generation,
+                    message: "Connection to mpv lost".into(),
+                });
+            }
             break;
         }
 
@@ -423,6 +431,12 @@ fn observe(
             line.clear();
             match reader.read_line(&mut line) {
                 Ok(0) => {
+                    if !cancelled.load(Ordering::Relaxed) {
+                        let _ = events.send(PlayerEvent::Failed {
+                            generation,
+                            message: "Playback terminated unexpectedly".into(),
+                        });
+                    }
                     return;
                 }
                 Ok(_) => {
@@ -451,10 +465,19 @@ fn observe(
                                     .get("file_error")
                                     .and_then(|fe| fe.as_str())
                                     .unwrap_or("Playback failed");
-                                let _ = events.send(PlayerEvent::Failed {
-                                    generation,
-                                    message: msg.to_string(),
-                                });
+                                if !cancelled.load(Ordering::Relaxed) {
+                                    let _ = events.send(PlayerEvent::Failed {
+                                        generation,
+                                        message: msg.to_string(),
+                                    });
+                                }
+                                return;
+                            } else if reason == "eof" {
+                                if !cancelled.load(Ordering::Relaxed) {
+                                    let _ = events.send(PlayerEvent::Ended { generation });
+                                }
+                                return;
+                            } else if reason == "stop" || reason == "quit" {
                                 return;
                             }
                         }
@@ -467,11 +490,16 @@ fn observe(
                     break;
                 }
                 Err(_) => {
+                    if !cancelled.load(Ordering::Relaxed) {
+                        let _ = events.send(PlayerEvent::Failed {
+                            generation,
+                            message: "Connection to mpv lost".into(),
+                        });
+                    }
                     return;
                 }
             }
         }
-
         if let Some(el) = elapsed {
             let _ = events.send(PlayerEvent::Position {
                 generation,
@@ -723,6 +751,21 @@ mod tests {
         assert_eq!(
             val_err.get("file_error").and_then(|f| f.as_str()),
             Some("Connection refused")
+        );
+
+        let end_file_eof = r#"{"event":"end-file","reason":"eof"}"#;
+        let val_eof: serde_json::Value = serde_json::from_str(end_file_eof).unwrap();
+        assert_eq!(
+            val_eof.get("event").and_then(|e| e.as_str()),
+            Some("end-file")
+        );
+        assert_eq!(val_eof.get("reason").and_then(|r| r.as_str()), Some("eof"));
+
+        let end_file_stop = r#"{"event":"end-file","reason":"stop"}"#;
+        let val_stop: serde_json::Value = serde_json::from_str(end_file_stop).unwrap();
+        assert_eq!(
+            val_stop.get("reason").and_then(|r| r.as_str()),
+            Some("stop")
         );
     }
 }

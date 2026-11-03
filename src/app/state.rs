@@ -104,7 +104,6 @@ pub struct App {
     pub tracks: Vec<Track>,
     pub selected: usize,
     pub playing: Option<usize>,
-    pub played_once: bool,
     pub shuffle: bool,
     pub repeat: Repeat,
     rng_state: u64,
@@ -142,7 +141,6 @@ impl App {
             tracks: Vec::new(),
             selected: 0,
             playing: None,
-            played_once: false,
             shuffle: false,
             repeat: Repeat::Off,
             rng_state: SystemTime::now()
@@ -255,7 +253,6 @@ impl App {
 
     pub fn set_playing(&mut self, track: Track) {
         self.playback_state = PlaybackState::Playing { track };
-        self.played_once = false;
         self.pending_queue_entry_id = None;
     }
 
