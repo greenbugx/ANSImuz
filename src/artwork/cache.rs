@@ -125,7 +125,9 @@ pub fn load_image(url: &str) -> Result<DynamicImage, String> {
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("art");
-    let _ = crate::config::write_cache_atomic(&cache_dir(), file_stem, "img", &bytes);
+    if let Err(e) = crate::config::write_cache_atomic(&cache_dir(), file_stem, "img", &bytes) {
+        eprintln!("Warning: Failed to write artwork cache for {file_stem}: {e}");
+    }
     Ok(image)
 }
 
@@ -163,6 +165,7 @@ pub fn request_art(url: &str, side: u32) -> Result<Arc<DynamicImage>, String> {
     drop(guard);
 
     let owned_url = url.to_string();
+    let epoch = crate::config::current_cache_epoch();
 
     thread::spawn(move || {
         let result = load_image(&owned_url).map(|image| {
@@ -173,10 +176,19 @@ pub fn request_art(url: &str, side: u32) -> Result<Arc<DynamicImage>, String> {
             }
         });
 
+        // If cache was cleared during download, discard result without repopulating cache
+        if crate::config::current_cache_epoch() != epoch {
+            return;
+        }
+
         let mut guard = match art_cache().lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
+
+        if crate::config::current_cache_epoch() != epoch {
+            return;
+        }
 
         match result {
             Ok(arc_image) => {
@@ -257,5 +269,35 @@ mod tests {
         if let CacheEntry::Failed { failed_at, .. } = entry_expired {
             assert!(failed_at.elapsed() >= RETRY_COOLDOWN);
         }
+    }
+
+    #[test]
+    fn test_artwork_status_observable() {
+        let url = "https://example.com/status_test";
+        assert!(artwork_status(url, 64).is_none());
+
+        let key = (url.to_string(), 64);
+        let dummy = Arc::new(DynamicImage::new_rgb8(10, 10));
+        art_cache()
+            .lock()
+            .unwrap()
+            .insert(key, CacheEntry::Ready(dummy));
+
+        let status = artwork_status(url, 64);
+        assert!(status.is_some());
+        assert!(matches!(status.unwrap(), CacheEntry::Ready(_)));
+    }
+
+    #[test]
+    fn test_clear_memory_cache_clears_art_cache_and_resize_cache() {
+        let dummy = Arc::new(DynamicImage::new_rgb8(10, 10));
+        art_cache()
+            .lock()
+            .unwrap()
+            .insert(("test_url".into(), 0), CacheEntry::Ready(dummy));
+        assert!(!art_cache().lock().unwrap().is_empty());
+
+        clear_memory_cache();
+        assert!(art_cache().lock().unwrap().is_empty());
     }
 }

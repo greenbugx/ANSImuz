@@ -661,6 +661,7 @@ pub fn start_dump_cancellable(
     dumping: Arc<Mutex<HashSet<String>>>,
     cancel: Option<Arc<AtomicBool>>,
 ) -> PrefetchResult {
+    let epoch = crate::config::current_cache_epoch();
     if url.trim().is_empty() {
         return PrefetchResult::Failed("Empty URL".into());
     }
@@ -857,11 +858,29 @@ pub fn start_dump_cancellable(
         ));
     }
 
+    if crate::config::current_cache_epoch() != epoch {
+        return PrefetchResult::Cancelled;
+    }
+
     if let Err(e) = fs::rename(&part, &final_path) {
-        return PrefetchResult::Failed(format!("Failed to rename .part to final cache file: {e}"));
+        if e.kind() == std::io::ErrorKind::AlreadyExists
+            || e.kind() == std::io::ErrorKind::PermissionDenied
+        {
+            let _ = fs::remove_file(&final_path);
+            if let Err(retry_e) = fs::rename(&part, &final_path) {
+                return PrefetchResult::Failed(format!(
+                    "Failed to rename .part to final cache file: {retry_e}"
+                ));
+            }
+        } else {
+            return PrefetchResult::Failed(format!(
+                "Failed to rename .part to final cache file: {e}"
+            ));
+        }
     }
 
     part_guard.success = true;
+    let _ = crate::config::prune_cache_dir(&audio_cache_dir(), crate::config::MAX_CACHE_DIR_BYTES);
     PrefetchResult::Cached(final_path)
 }
 
