@@ -114,22 +114,10 @@ impl AudioPlayer {
         let owned = url.to_string();
 
         thread::spawn(move || {
-            thread::sleep(Duration::from_secs(delay_secs));
-
-            let already_dumping = dumping
-                .lock()
-                .map(|set| set.contains(&owned))
-                .unwrap_or(true);
-
-            if already_dumping
-                || audio_cache_dir()
-                    .join(format!("{}.audio", audio_hash(&owned)))
-                    .exists()
-            {
-                return;
+            if delay_secs > 0 {
+                thread::sleep(Duration::from_secs(delay_secs));
             }
-
-            start_dump(owned, dumping);
+            start_dump(&owned, dumping);
         });
     }
 
@@ -623,91 +611,209 @@ fn audio_hash(url: &str) -> String {
         .to_string()
 }
 
-fn start_dump(url: String, dumping: Arc<Mutex<HashSet<String>>>) {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PrefetchResult {
+    Cached(PathBuf),
+    AlreadyCached(PathBuf),
+    Failed(String),
+    Cancelled,
+}
+
+pub fn prefetch_stream(url: &str, dumping: Arc<Mutex<HashSet<String>>>) -> PrefetchResult {
+    start_dump(url, dumping)
+}
+
+pub fn start_dump(url: &str, dumping: Arc<Mutex<HashSet<String>>>) -> PrefetchResult {
+    if url.trim().is_empty() {
+        return PrefetchResult::Failed("Empty URL".into());
+    }
+
+    let final_path = audio_cache_dir().join(format!("{}.audio", audio_hash(url)));
+    if final_path.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+        return PrefetchResult::AlreadyCached(final_path);
+    }
+
     {
         let mut set = match dumping.lock() {
             Ok(set) => set,
-            Err(_) => return,
+            Err(_) => return PrefetchResult::Failed("Dumping lock poisoned".into()),
         };
 
-        if set.contains(&url) {
-            return;
+        if set.contains(url) {
+            return PrefetchResult::Cancelled;
         }
-        set.insert(url.clone());
+        set.insert(url.to_string());
     }
 
-    let _ = fs::create_dir_all(audio_cache_dir());
-    let part = audio_cache_dir().join(format!("{}.part", audio_hash(&url)));
-    let final_path = audio_cache_dir().join(format!("{}.audio", audio_hash(&url)));
+    struct DumpingGuard {
+        url: String,
+        dumping: Arc<Mutex<HashSet<String>>>,
+    }
 
-    thread::spawn(move || {
-        let mut saved = false;
-
-        if let Some(media) = resolve_stream(&url) {
-            let dump = Command::new("mpv")
-                .arg("--no-video")
-                .arg("--no-audio")
-                .arg("--really-quiet")
-                .arg("--ytdl-raw-options-append=extractor-args=youtube:player_client=visionos,default")
-                .arg(format!("--stream-dump={}", part.display()))
-                .arg(&media)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn();
-
-            if let Ok(mut child) = dump {
-                for _ in 0..600 {
-                    match child.try_wait() {
-                        Ok(Some(status)) => {
-                            saved = status.success()
-                                && part
-                                    .metadata()
-                                    .map(|meta| meta.len() >= MIN_DUMP_BYTES)
-                                    .unwrap_or(false);
-                            break;
-                        }
-                        Ok(None) => {
-                            if part
-                                .metadata()
-                                .map(|meta| meta.len() > MAX_DUMP_BYTES)
-                                .unwrap_or(false)
-                            {
-                                let _ = child.kill();
-                                let _ = child.wait();
-                                break;
-                            }
-                        }
-                        Err(_) => {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            break;
-                        }
-                    }
-
-                    thread::sleep(Duration::from_secs(1));
-                }
-
-                if let Ok(None) = child.try_wait() {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                }
+    impl Drop for DumpingGuard {
+        fn drop(&mut self) {
+            if let Ok(mut set) = self.dumping.lock() {
+                set.remove(&self.url);
             }
         }
+    }
 
-        if saved && part.exists() {
-            let _ = fs::rename(&part, &final_path);
-        } else {
-            let _ = fs::remove_file(&part);
-        }
+    let _dump_guard = DumpingGuard {
+        url: url.to_string(),
+        dumping: Arc::clone(&dumping),
+    };
 
-        if let Ok(mut set) = dumping.lock() {
-            set.remove(&url);
+    if let Err(e) = fs::create_dir_all(audio_cache_dir()) {
+        return PrefetchResult::Failed(format!("Cannot create audio cache directory: {e}"));
+    }
+
+    let part = audio_cache_dir().join(format!("{}.part", audio_hash(url)));
+    if part.exists() {
+        let _ = fs::remove_file(&part);
+    }
+
+    struct PartGuard {
+        path: PathBuf,
+        success: bool,
+    }
+
+    impl Drop for PartGuard {
+        fn drop(&mut self) {
+            if !self.success && self.path.exists() {
+                let _ = fs::remove_file(&self.path);
+            }
         }
-    });
+    }
+
+    let mut part_guard = PartGuard {
+        path: part.clone(),
+        success: false,
+    };
+
+    let media = match resolve_stream(url) {
+        Ok(m) => m,
+        Err(err) => return PrefetchResult::Failed(err),
+    };
+
+    let dump = Command::new("mpv")
+        .arg("--no-video")
+        .arg("--no-audio")
+        .arg("--really-quiet")
+        .arg("--ytdl-raw-options-append=extractor-args=youtube:player_client=visionos,default")
+        .arg(format!("--stream-dump={}", part.display()))
+        .arg(&media)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn();
+
+    let mut child = match dump {
+        Ok(c) => c,
+        Err(e) => return PrefetchResult::Failed(format!("Failed to spawn mpv stream-dump: {e}")),
+    };
+
+    let stderr_lines = Arc::new(Mutex::new(Vec::new()));
+    if let Some(stderr) = child.stderr.take() {
+        let buf = Arc::clone(&stderr_lines);
+        thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().map_while(Result::ok) {
+                let trimmed = line.trim();
+                if !trimmed.is_empty()
+                    && let Ok(mut lock) = buf.lock()
+                {
+                    if lock.len() >= 50 {
+                        lock.remove(0);
+                    }
+                    lock.push(trimmed.to_string());
+                }
+            }
+        });
+    }
+
+    let mut failure_reason: Option<String> = None;
+    let mut completed_ok = false;
+
+    for _ in 0..600 {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if status.success() {
+                    completed_ok = true;
+                } else {
+                    let lines = stderr_lines.lock().map(|l| l.clone()).unwrap_or_default();
+                    let err = extract_mpv_error(&lines, Some(status));
+                    failure_reason = Some(format!("mpv stream-dump exited with error: {err}"));
+                }
+                break;
+            }
+            Ok(None) => {
+                if let Ok(meta) = part.metadata()
+                    && meta.len() > MAX_DUMP_BYTES
+                {
+                    failure_reason = Some(format!(
+                        "stream-dump exceeded maximum size ({} bytes > {} bytes)",
+                        meta.len(),
+                        MAX_DUMP_BYTES
+                    ));
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break;
+                }
+            }
+            Err(e) => {
+                failure_reason = Some(format!("Error polling mpv stream-dump: {e}"));
+                let _ = child.kill();
+                let _ = child.wait();
+                break;
+            }
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+
+    if let Ok(None) = child.try_wait() {
+        let _ = child.kill();
+        let _ = child.wait();
+        failure_reason = Some("mpv stream-dump timed out after 600 seconds".into());
+    }
+
+    if let Some(err) = failure_reason {
+        return PrefetchResult::Failed(err);
+    }
+
+    if !completed_ok {
+        return PrefetchResult::Failed("mpv stream-dump failed to complete successfully".into());
+    }
+
+    let file_size = match part.metadata() {
+        Ok(meta) => meta.len(),
+        Err(e) => {
+            return PrefetchResult::Failed(format!(
+                "Failed to read stream-dump file metadata: {e}"
+            ));
+        }
+    };
+
+    if file_size < MIN_DUMP_BYTES {
+        return PrefetchResult::Failed(format!(
+            "Prefetched audio file too small: {file_size} bytes (minimum is {MIN_DUMP_BYTES} bytes)"
+        ));
+    }
+
+    if file_size > MAX_DUMP_BYTES {
+        return PrefetchResult::Failed(format!(
+            "Prefetched audio file too large: {file_size} bytes (maximum is {MAX_DUMP_BYTES} bytes)"
+        ));
+    }
+
+    if let Err(e) = fs::rename(&part, &final_path) {
+        return PrefetchResult::Failed(format!("Failed to rename .part to final cache file: {e}"));
+    }
+
+    part_guard.success = true;
+    PrefetchResult::Cached(final_path)
 }
 
-fn resolve_stream(url: &str) -> Option<String> {
+fn resolve_stream(url: &str) -> Result<String, String> {
     let output = Command::new("yt-dlp")
         .arg("--extractor-args")
         .arg("youtube:player_client=visionos,default")
@@ -716,19 +822,30 @@ fn resolve_stream(url: &str) -> Option<String> {
         .arg("--get-url")
         .arg(url)
         .output()
-        .ok()?;
+        .map_err(|e| format!("Failed to execute yt-dlp: {e}"))?;
 
     if !output.status.success() {
-        return None;
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let err_msg = if !stderr.is_empty() {
+            stderr
+        } else {
+            format!("yt-dlp exited with status {}", output.status)
+        };
+        return Err(format!("yt-dlp stream resolution failed: {err_msg}"));
     }
 
     let media = String::from_utf8_lossy(&output.stdout)
         .lines()
-        .next()?
+        .next()
+        .unwrap_or("")
         .trim()
         .to_string();
 
-    (!media.is_empty()).then_some(media)
+    if media.is_empty() {
+        return Err("yt-dlp returned empty media stream URL".into());
+    }
+
+    Ok(media)
 }
 
 #[cfg(test)]
@@ -886,6 +1003,66 @@ mod tests {
         assert!(
             !socket_path.exists(),
             "Socket file must be removed after drop"
+        );
+    }
+    #[test]
+    fn test_prefetch_result_already_cached() {
+        let test_url = "https://example.com/already_cached_track";
+        let cache_dir = audio_cache_dir();
+        fs::create_dir_all(&cache_dir).expect("create cache dir");
+        let final_path = cache_dir.join(format!("{}.audio", audio_hash(test_url)));
+        fs::write(&final_path, b"valid audio data").expect("write audio cache");
+
+        let dumping = Arc::new(Mutex::new(HashSet::new()));
+        let res = start_dump(test_url, dumping.clone());
+
+        assert_eq!(res, PrefetchResult::AlreadyCached(final_path.clone()));
+        assert!(!dumping.lock().unwrap().contains(test_url));
+
+        let _ = fs::remove_file(&final_path);
+    }
+
+    #[test]
+    fn test_prefetch_duplicate_request_cancelled() {
+        let test_url = "https://example.com/duplicate_track";
+        let dumping = Arc::new(Mutex::new(HashSet::new()));
+        dumping.lock().unwrap().insert(test_url.to_string());
+
+        let res = start_dump(test_url, dumping.clone());
+        assert_eq!(res, PrefetchResult::Cancelled);
+        // The URL was originally in dumping, guard does not remove it because it returned before guard created
+        assert!(dumping.lock().unwrap().contains(test_url));
+    }
+
+    #[test]
+    fn test_prefetch_empty_url_fails() {
+        let dumping = Arc::new(Mutex::new(HashSet::new()));
+        let res = start_dump("   ", dumping);
+        assert_eq!(res, PrefetchResult::Failed("Empty URL".into()));
+    }
+
+    #[test]
+    fn test_prefetch_resolution_failure_cleans_up_part_and_dumping() {
+        let test_url = "https://invalid.domain.that.does.not.exist/audio_fail";
+        let dumping = Arc::new(Mutex::new(HashSet::new()));
+        let part = audio_cache_dir().join(format!("{}.part", audio_hash(test_url)));
+        let _ = fs::remove_file(&part);
+
+        let res = start_dump(test_url, dumping.clone());
+        match res {
+            PrefetchResult::Failed(err) => {
+                assert!(
+                    err.contains("resolution failed") || err.contains("yt-dlp"),
+                    "Expected resolution failure message, got: {err}"
+                );
+            }
+            other => panic!("Expected PrefetchResult::Failed, got {other:?}"),
+        }
+
+        assert!(!part.exists(), ".part file must not remain on failure");
+        assert!(
+            !dumping.lock().unwrap().contains(test_url),
+            "URL must be removed from dumping set after failure"
         );
     }
 }
