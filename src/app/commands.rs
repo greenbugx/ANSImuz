@@ -3,7 +3,8 @@ use std::sync::mpsc::Sender;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{
-    runner::{now_playing, play_next, play_previous, play_queue_item, play_search_result},
+    playback::{now_playing, play_next, play_previous, play_queue_item, play_search_result},
+    search::refetch_if_needed,
     state::{App, ListFocus, Mode},
 };
 use crate::playback::{AudioPlayer, PlayerEvent, Repeat};
@@ -359,7 +360,7 @@ pub fn dispatch_action(
             } else {
                 app.set_status(format!("PROVIDER: {}", app.settings.provider.label()));
             }
-            crate::app::runner::refetch_if_needed(app, search_tx);
+            refetch_if_needed(app, search_tx);
         }
         Action::ClearCache => match crate::config::clear_caches() {
             Ok(()) => app.set_status("CACHES CLEARED"),

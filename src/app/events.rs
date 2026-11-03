@@ -4,7 +4,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{
     commands::{action_for_nav_key, dispatch_action, filtered_commands},
-    runner::{play_queue_item, play_search_result},
+    playback::{play_queue_item, play_search_result},
+    search::refetch_if_needed,
     state::{App, ListFocus, Mode},
 };
 use crate::music::{SearchResponse, spawn_search};
@@ -123,7 +124,7 @@ pub fn handle_key(
                 app.apply_setting();
                 if app.settings.provider != old_provider {
                     app.cancel_pending_resolution();
-                    super::runner::refetch_if_needed(app, search_tx);
+                    refetch_if_needed(app, search_tx);
                 }
             }
             KeyCode::Char('/') => {

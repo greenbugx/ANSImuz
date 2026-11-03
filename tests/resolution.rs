@@ -1,9 +1,6 @@
 use std::sync::mpsc;
 
-use ansimuz::app::{
-    runner::{handle_resolve_response, play_search_result, play_track},
-    state::App,
-};
+use ansimuz::app::{handle_resolve_response, play_search_result, play_track, state::App};
 use ansimuz::music::{PlaybackSource, ResolveResponse, Track};
 use ansimuz::playback::{AudioPlayer, PlayerEvent};
 
