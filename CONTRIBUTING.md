@@ -184,7 +184,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 
 # Check Python syntax and run backend tests
-python -m py_compile backend/bridge.py backend/artwork/thumbnails.py backend/providers/spotify/spotify.py backend/providers/ytmusic/ytmusic.py
+python -m py_compile backend/bridge.py backend/exceptions.py backend/artwork/thumbnails.py backend/providers/spotify/spotify.py backend/providers/ytmusic/ytmusic.py
 python -m unittest discover -s backend/tests -p "test_*.py"
 
 If your change touches `packaging/arch/` or `packaging/rpm/`, also run the matching packaging test: [Packaging (Arch Linux)](#packaging-arch-linux) or [Packaging (Fedora / COPR)](#packaging-fedora--copr).
