@@ -38,6 +38,7 @@ pub fn clear_memory_cache() {
         Err(poisoned) => poisoned.into_inner(),
     };
     guard.clear();
+    super::render::clear_resize_cache();
 }
 
 pub fn cache_path(url: &str) -> PathBuf {
