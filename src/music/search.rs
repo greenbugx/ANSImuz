@@ -103,14 +103,67 @@ pub fn initialize_backend<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyModule>
     PyModule::import(py, "bridge")
 }
 
+pub fn format_py_error(py: Python<'_>, err: PyErr) -> String {
+    let type_name = err
+        .get_type(py)
+        .name()
+        .map(|n| n.to_string())
+        .unwrap_or_default();
+    let message = err.value(py).to_string();
+
+    match type_name.as_str() {
+        "NetworkError" => {
+            if message.is_empty() {
+                "Network connection failed. Please check your internet connection.".to_string()
+            } else {
+                format!("Network error: {message}")
+            }
+        }
+        "RateLimitError" => {
+            if message.is_empty() {
+                "Rate limit exceeded. Please wait a moment before retrying.".to_string()
+            } else {
+                format!("Rate limit exceeded: {message}")
+            }
+        }
+        "AuthenticationError" => {
+            if message.is_empty() {
+                "Authentication failed. Please check provider credentials.".to_string()
+            } else {
+                format!("Authentication error: {message}")
+            }
+        }
+        "TrackNotFoundError" => {
+            if message.is_empty() {
+                "Track not found on provider.".to_string()
+            } else {
+                message
+            }
+        }
+        "ProviderError" => {
+            if message.is_empty() {
+                "Provider error occurred.".to_string()
+            } else {
+                message
+            }
+        }
+        _ => {
+            if !message.is_empty() {
+                message
+            } else {
+                err.to_string()
+            }
+        }
+    }
+}
+
 pub fn with_backend<T>(
     f: impl for<'py> FnOnce(Python<'py>, &Bound<'py, PyModule>) -> PyResult<T>,
 ) -> Result<T, String> {
     Python::attach(|py| {
-        let bridge = initialize_backend(py)?;
-        f(py, &bridge)
+        let bridge = initialize_backend(py).map_err(|err| format_py_error(py, err))?;
+        f(py, &bridge).map_err(|err| format_py_error(py, err))
     })
-    .map_err(|error| error.to_string())
 }
 
 pub fn search_music(query: String, provider: Provider) -> SearchResult {
@@ -333,5 +386,45 @@ mod tests {
         unsafe {
             std::env::remove_var("ANSIMUZ_DATA_DIR");
         }
+    }
+    #[test]
+    fn test_format_py_error_converts_custom_exceptions_cleanly() {
+        let _guard = crate::paths::ENV_LOCK.lock().unwrap();
+        Python::attach(|py| {
+            let bridge = initialize_backend(py).expect("initialize backend");
+            let net_cls = bridge.getattr("NetworkError").unwrap();
+            let net_err = net_cls.call1(("Connection timed out",)).unwrap();
+            let net_pyerr = PyErr::from_value(net_err);
+            let formatted_net = format_py_error(py, net_pyerr);
+            assert_eq!(formatted_net, "Network error: Connection timed out");
+            assert!(!formatted_net.contains("Traceback"));
+            assert!(!formatted_net.contains("<class"));
+
+            let rate_cls = bridge.getattr("RateLimitError").unwrap();
+            let rate_err = rate_cls.call1(("HTTP 429 quota exceeded",)).unwrap();
+            let rate_pyerr = PyErr::from_value(rate_err);
+            let formatted_rate = format_py_error(py, rate_pyerr);
+            assert_eq!(
+                formatted_rate,
+                "Rate limit exceeded: HTTP 429 quota exceeded"
+            );
+
+            let auth_cls = bridge.getattr("AuthenticationError").unwrap();
+            let auth_err = auth_cls.call1(("HTTP 401 invalid token",)).unwrap();
+            let auth_pyerr = PyErr::from_value(auth_err);
+            let formatted_auth = format_py_error(py, auth_pyerr);
+            assert_eq!(
+                formatted_auth,
+                "Authentication error: HTTP 401 invalid token"
+            );
+
+            let not_found_cls = bridge.getattr("TrackNotFoundError").unwrap();
+            let not_found_err = not_found_cls
+                .call1(("No confident match for 'Song'",))
+                .unwrap();
+            let not_found_pyerr = PyErr::from_value(not_found_err);
+            let formatted_not_found = format_py_error(py, not_found_pyerr);
+            assert_eq!(formatted_not_found, "No confident match for 'Song'");
+        });
     }
 }

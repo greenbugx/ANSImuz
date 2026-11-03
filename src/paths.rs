@@ -12,21 +12,6 @@ pub fn data_dir() -> PathBuf {
     if let Ok(path) = env::var("ANSIMUZ_DATA_DIR") {
         return PathBuf::from(path);
     }
-
-    // compile-time configured default
-    if let Some(path) = option_env!("ANSIMUZ_DATA_DIR") {
-        let p = PathBuf::from(path);
-        if has_data(&p) {
-            return p;
-        }
-    }
-
-    // installed application
-    let installed = PathBuf::from("/usr/share/ansimuz");
-    if has_data(&installed) {
-        return installed;
-    }
-
     // Development: running from the project directory.
     if let Ok(cwd) = env::current_dir()
         && has_data(&cwd)
@@ -44,6 +29,19 @@ pub fn data_dir() -> PathBuf {
         }
     }
 
+    // compile-time configured default
+    if let Some(path) = option_env!("ANSIMUZ_DATA_DIR") {
+        let p = PathBuf::from(path);
+        if has_data(&p) {
+            return p;
+        }
+    }
+
+    // installed application
+    let installed = PathBuf::from("/usr/share/ansimuz");
+    if has_data(&installed) {
+        return installed;
+    }
     env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 

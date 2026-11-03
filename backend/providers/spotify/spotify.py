@@ -7,6 +7,7 @@ from typing import Any
 from spotify_scraper import SpotifyClient
 from ytmusicapi import YTMusic
 
+from exceptions import TrackNotFoundError, classify_error
 SPOTIFY_LIMIT = 10
 YTMUSIC_LIMIT = 10
 MIN_MATCH_SCORE = 0.68 # higher the better, but may reduce matches
@@ -115,7 +116,7 @@ def search(query: str) -> list[dict[str, Any]]:
                 limit=SPOTIFY_LIMIT,
             )
     except Exception as exc:
-        raise RuntimeError(f"Spotify search failed: {exc}") from exc
+        raise classify_error("Spotify search failed", exc) from exc
 
     tracks = []
     for item in list(response.tracks or ())[:SPOTIFY_LIMIT]:
@@ -368,7 +369,7 @@ def resolve_playable(track: dict[str, Any]) -> dict[str, Any]:
         reason_str = f" Reason: {'; '.join(rejection_details)}." if rejection_details else ""
         error_str = f" Search errors: {'; '.join(errors)}." if errors else ""
 
-        raise LookupError(
+        raise TrackNotFoundError(
             f"No confident YouTube Music match for "
             f"'{track['title']}' by {track.get('artist', 'Unknown Artist')}.{reason_str}{error_str}"
         )
