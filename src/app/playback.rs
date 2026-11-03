@@ -362,7 +362,7 @@ pub fn start_playback(
     match player.play(&audio_source, app.volume, events) {
         Ok(()) => {
             if let Some(old) = app.current_track().cloned()
-                && (old.stream_url != track.stream_url || old.title != track.title)
+                && !old.same_identity(&track)
             {
                 app.push_history(old);
             }
@@ -395,7 +395,7 @@ pub fn start_playback(
         }
         Err(error) => {
             if let Some(old) = app.current_track().cloned()
-                && (old.stream_url != track.stream_url || old.title != track.title)
+                && !old.same_identity(&track)
             {
                 app.push_history(old);
             }
@@ -439,13 +439,11 @@ pub fn handle_resolve_response(
                         return false;
                     };
 
-                    let is_same = match (&slot.spotify_id, &response.spotify_id) {
-                        (Some(a), Some(b)) => a == b,
-                        _ => {
-                            slot.title.eq_ignore_ascii_case(&response.title)
-                                && slot.artist.eq_ignore_ascii_case(&response.artist)
-                        }
-                    };
+                    let is_same = slot.matches_identity(
+                        response.spotify_id.as_deref(),
+                        &response.title,
+                        &response.artist,
+                    );
 
                     if !is_same {
                         app.cancel_pending_resolution();
