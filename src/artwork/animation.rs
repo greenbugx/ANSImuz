@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::{LazyLock, Mutex},
+    sync::{Arc, LazyLock, Mutex},
     time::Instant,
 };
 
@@ -11,7 +11,7 @@ pub const TOTAL_FRAMES: usize = 20;
 pub const FRAME_DURATION_MS: usize = 100; // 10 FPS
 
 static ANIM_START: LazyLock<Instant> = LazyLock::new(Instant::now);
-static FRAME_CACHE: LazyLock<Mutex<HashMap<usize, DynamicImage>>> =
+static FRAME_CACHE: LazyLock<Mutex<HashMap<usize, Arc<DynamicImage>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static PREWARMED: LazyLock<()> = LazyLock::new(|| {
     std::thread::spawn(|| {
@@ -35,21 +35,21 @@ fn resolve_frame_path(frame_number: usize) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-pub fn get_animation_frame(index: usize) -> Option<DynamicImage> {
+pub fn get_animation_frame(index: usize) -> Option<Arc<DynamicImage>> {
     let frame_idx = index % TOTAL_FRAMES;
 
     if let Ok(guard) = FRAME_CACHE.lock()
         && let Some(img) = guard.get(&frame_idx)
     {
-        return Some(img.clone());
+        return Some(Arc::clone(img));
     }
 
     let frame_num = frame_idx + 1;
     let path = resolve_frame_path(frame_num)?;
-    let loaded = image::open(&path).ok()?;
+    let loaded = Arc::new(image::open(&path).ok()?);
 
     if let Ok(mut guard) = FRAME_CACHE.lock() {
-        guard.insert(frame_idx, loaded.clone());
+        guard.insert(frame_idx, Arc::clone(&loaded));
     }
 
     Some(loaded)
@@ -60,7 +60,7 @@ pub fn current_frame_index() -> usize {
     (elapsed / FRAME_DURATION_MS) % TOTAL_FRAMES
 }
 
-pub fn current_animation_frame() -> Option<DynamicImage> {
+pub fn current_animation_frame() -> Option<Arc<DynamicImage>> {
     ensure_prewarmed();
     get_animation_frame(current_frame_index())
 }
@@ -85,5 +85,21 @@ mod tests {
             assert!(frame.width() > 0);
             assert!(frame.height() > 0);
         }
+    }
+
+    #[test]
+    fn test_animation_frame_cache_shares_allocation() {
+        let frame1 = get_animation_frame(0);
+        let frame2 = get_animation_frame(0);
+
+        if let (Some(f1), Some(f2)) = (frame1, frame2) {
+            // Verify pointer equality: both Arcs point to the exact same image allocation
+            assert!(Arc::ptr_eq(&f1, &f2));
+        }
+    }
+
+    #[test]
+    fn test_missing_frame_fails_gracefully() {
+        assert!(resolve_frame_path(99999).is_none());
     }
 }
