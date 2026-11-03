@@ -47,25 +47,49 @@ pub fn data_dir() -> PathBuf {
     env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
+pub fn backend_dir() -> PathBuf {
+    data_dir().join("backend")
+}
 
-//     #[test]
-//     fn test_data_dir_resolution() {
-//         let dir = data_dir();
-//         assert!(dir.exists() || dir == std::path::Path::new("/usr/share/ansimuz"));
-//     }
+pub fn assets_dir() -> PathBuf {
+    data_dir().join("assets")
+}
 
-//     #[test]
-//     fn test_data_dir_override() {
-//         unsafe {
-//             std::env::set_var("ANSIMUZ_DATA_DIR", "/tmp/ansimuz-custom-data");
-//         }
-//         let dir = data_dir();
-//         assert_eq!(dir, PathBuf::from("/tmp/ansimuz-custom-data"));
-//         unsafe {
-//             std::env::remove_var("ANSIMUZ_DATA_DIR");
-//         }
-//     }
-// }
+pub fn frames_dir() -> PathBuf {
+    data_dir().join("assets/frames")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_data_dir_resolution() {
+        let dir = data_dir();
+        assert!(dir.exists() || dir == std::path::Path::new("/usr/share/ansimuz"));
+    }
+
+    #[test]
+    fn test_data_dir_override() {
+        unsafe {
+            std::env::set_var("ANSIMUZ_DATA_DIR", "/tmp/ansimuz-custom-data");
+        }
+        let dir = data_dir();
+        assert_eq!(dir, PathBuf::from("/tmp/ansimuz-custom-data"));
+        assert_eq!(
+            backend_dir(),
+            PathBuf::from("/tmp/ansimuz-custom-data/backend")
+        );
+        assert_eq!(
+            assets_dir(),
+            PathBuf::from("/tmp/ansimuz-custom-data/assets")
+        );
+        assert_eq!(
+            frames_dir(),
+            PathBuf::from("/tmp/ansimuz-custom-data/assets/frames")
+        );
+        unsafe {
+            std::env::remove_var("ANSIMUZ_DATA_DIR");
+        }
+    }
+}

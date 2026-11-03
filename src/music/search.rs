@@ -77,7 +77,7 @@ fn ensure_backend_path(py: Python<'_>) -> PyResult<()> {
         let attr = sys.getattr("path").map_err(|e| e.to_string())?;
         let path = attr.cast_into::<PyList>().map_err(|e| e.to_string())?;
 
-        let backend_path = crate::paths::data_dir().join("backend");
+        let backend_path = crate::paths::backend_dir();
         let backend_str = backend_path.to_string_lossy();
 
         let already_present = path.iter().any(|item| {

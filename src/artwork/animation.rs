@@ -22,54 +22,17 @@ static PREWARMED: LazyLock<()> = LazyLock::new(|| {
 });
 
 fn resolve_frame_path(frame_number: usize) -> Option<PathBuf> {
-    let frame_dir = crate::paths::data_dir().join("assets/frames");
-    let filenames = [
+    let frame_dir = crate::paths::frames_dir();
+
+    let candidates = [
         format!("frame-{frame_number:03}.png"),
         format!("frame_{frame_number:03}.png"),
     ];
 
-    for name in &filenames {
-        let p = frame_dir.join(name);
-        if p.exists() {
-            return Some(p);
-        }
-    }
-
-    let rel_filenames = [
-        format!("assets/frames/frame-{frame_number:03}.png"),
-        format!("assets/frames/frame_{frame_number:03}.png"),
-    ];
-
-    for rel in rel_filenames {
-        // Current working directory
-        let p = PathBuf::from(&rel);
-        if p.exists() {
-            return Some(p);
-        }
-        // Executable directory ancestors
-        if let Ok(exe) = std::env::current_exe()
-            && let Some(parent) = exe.parent()
-        {
-            let p = parent.join(&rel);
-            if p.exists() {
-                return Some(p);
-            }
-            if let Some(grandparent) = parent.parent() {
-                let p = grandparent.join(&rel);
-                if p.exists() {
-                    return Some(p);
-                }
-                if let Some(great) = grandparent.parent() {
-                    let p = great.join(&rel);
-                    if p.exists() {
-                        return Some(p);
-                    }
-                }
-            }
-        }
-    }
-
-    None
+    candidates
+        .iter()
+        .map(|name| frame_dir.join(name))
+        .find(|path| path.is_file())
 }
 
 pub fn get_animation_frame(index: usize) -> Option<DynamicImage> {
