@@ -4,7 +4,10 @@ pub mod decode;
 pub mod palette;
 pub mod render;
 
-pub use animation::{current_animation_frame, current_frame_index, get_animation_frame};
+pub use animation::{
+    current_animation_frame, current_frame_index, ensure_prewarmed, get_animation_frame,
+    trigger_prewarming,
+};
 pub use cache::{artwork_status, clear_memory_cache, prefetch};
 pub use palette::dominant_color;
 pub use render::{
