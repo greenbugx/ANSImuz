@@ -19,12 +19,7 @@ pub fn handle_search_result(app: &mut App, response: SearchResponse) -> bool {
             app.mode = Mode::Nav;
 
             if let Some(now) = app.current_track() {
-                app.playing = app.tracks.iter().position(|t| {
-                    (!now.stream_url.is_empty() && t.stream_url == now.stream_url)
-                        || (now.spotify_id.is_some() && t.spotify_id == now.spotify_id)
-                        || (t.title.eq_ignore_ascii_case(&now.title)
-                            && t.artist.eq_ignore_ascii_case(&now.artist))
-                });
+                app.playing = app.tracks.iter().position(|t| t.same_identity(now));
             } else {
                 app.playing = None;
             }

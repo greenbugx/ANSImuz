@@ -104,13 +104,7 @@ pub fn get_cached_track(track: &Track) -> Option<Track> {
     {
         return Some(cached);
     }
-
-    let key = format!(
-        "{}—{}",
-        track.title.to_lowercase().trim(),
-        track.artist.to_lowercase().trim()
-    );
-    guard.get(&key)
+    guard.get(&track.cache_key())
 }
 
 pub fn cache_resolved_track(track: &Track) {
@@ -126,12 +120,7 @@ pub fn cache_resolved_track(track: &Track) {
     if let Some(id) = &track.spotify_id {
         guard.insert(id.clone(), track.clone());
     }
-    let key = format!(
-        "{}—{}",
-        track.title.to_lowercase().trim(),
-        track.artist.to_lowercase().trim()
-    );
-    guard.insert(key, track.clone());
+    guard.insert(track.cache_key(), track.clone());
 }
 
 pub fn clear_resolved_cache() {
@@ -254,55 +243,10 @@ pub fn search_music(query: String, provider: Provider) -> SearchResult {
             .call1((query.clone(), provider.as_str()))?
             .cast_into::<PyList>()?;
 
-        let mut tracks = Vec::new();
-
+        let mut tracks = Vec::with_capacity(results.len());
         for item in results.iter() {
-            let title = item.get_item("title")?.extract::<String>()?;
-            let artist = item.get_item("artist")?.extract::<String>()?;
-            let stream_url = item
-                .get_item("stream_url")
-                .and_then(|v| v.extract::<String>())
-                .unwrap_or_default();
-            let art_url = item
-                .get_item("art_url")
-                .and_then(|v| v.extract::<String>())
-                .unwrap_or_default();
-
-            let spotify_id = item
-                .get_item("spotify_id")
-                .ok()
-                .and_then(|v| v.extract::<String>().ok())
-                .filter(|s| !s.is_empty());
-
-            let artists = item
-                .get_item("artists")
-                .ok()
-                .and_then(|v| v.extract::<Vec<String>>().ok())
-                .unwrap_or_else(|| vec![artist.clone()]);
-
-            let album = item
-                .get_item("album")
-                .ok()
-                .and_then(|v| v.extract::<String>().ok())
-                .filter(|s| !s.is_empty());
-
-            let duration_ms = item
-                .get_item("duration_ms")
-                .ok()
-                .and_then(|v| v.extract::<u64>().ok());
-
-            tracks.push(Track {
-                title,
-                artist,
-                stream_url,
-                art_url,
-                spotify_id,
-                artists,
-                album,
-                duration_ms,
-            });
+            tracks.push(Track::from_py(&item)?);
         }
-
         Ok(tracks)
     });
 
@@ -370,51 +314,27 @@ pub fn resolve_playable(track: &Track) -> Result<Track, String> {
         }
         let resolved = bridge.getattr("resolve_playable")?.call1((dict,))?;
 
-        let title = resolved.get_item("title")?.extract::<String>()?;
-        let artist = resolved.get_item("artist")?.extract::<String>()?;
-        let stream_url = resolved
-            .get_item("stream_url")
-            .and_then(|v| v.extract::<String>())
-            .unwrap_or_default();
-        let art_url = resolved
-            .get_item("art_url")
-            .and_then(|v| v.extract::<String>())
-            .unwrap_or_else(|_| track.art_url.clone());
+        let mut resolved_track = Track::from_py(&resolved)?;
+        if !resolved_track.has_stream_url() {
+            resolved_track.stream_url = track.stream_url.clone();
+        }
+        if resolved_track.art_url.is_empty() {
+            resolved_track.art_url = track.art_url.clone();
+        }
+        if resolved_track.spotify_id.is_none() {
+            resolved_track.spotify_id = track.spotify_id.clone();
+        }
+        if resolved_track.artists.is_empty() {
+            resolved_track.artists = track.artists.clone();
+        }
+        if resolved_track.album.is_none() {
+            resolved_track.album = track.album.clone();
+        }
+        if resolved_track.duration_ms.is_none() {
+            resolved_track.duration_ms = track.duration_ms;
+        }
 
-        let spotify_id = resolved
-            .get_item("spotify_id")
-            .ok()
-            .and_then(|v| v.extract::<String>().ok())
-            .or_else(|| track.spotify_id.clone());
-
-        let artists = resolved
-            .get_item("artists")
-            .ok()
-            .and_then(|v| v.extract::<Vec<String>>().ok())
-            .unwrap_or_else(|| track.artists.clone());
-
-        let album = resolved
-            .get_item("album")
-            .ok()
-            .and_then(|v| v.extract::<String>().ok())
-            .or_else(|| track.album.clone());
-
-        let duration_ms = resolved
-            .get_item("duration_ms")
-            .ok()
-            .and_then(|v| v.extract::<u64>().ok())
-            .or(track.duration_ms);
-
-        Ok(Track {
-            title,
-            artist,
-            stream_url,
-            art_url,
-            spotify_id,
-            artists,
-            album,
-            duration_ms,
-        })
+        Ok(resolved_track)
     })?;
 
     cache_resolved_track(&resolved_track);
