@@ -27,20 +27,82 @@ pub struct ResolveResponse {
     pub result: Result<Track, String>,
 }
 
-static RESOLVED_CACHE: LazyLock<Mutex<HashMap<String, Track>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+pub const MAX_RESOLVED_CACHE_ENTRIES: usize = 200;
+
+struct ResolvedCache {
+    entries: HashMap<String, Track>,
+    order: Vec<String>,
+    capacity: usize,
+}
+
+impl ResolvedCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: Vec::new(),
+            capacity: capacity.max(1),
+        }
+    }
+
+    fn get(&mut self, key: &str) -> Option<Track> {
+        let track = self.entries.get(key)?.clone();
+        if let Some(pos) = self.order.iter().position(|k| k == key) {
+            let k = self.order.remove(pos);
+            self.order.push(k);
+        }
+        Some(track)
+    }
+
+    fn insert(&mut self, key: String, track: Track) {
+        if self.entries.contains_key(&key) {
+            self.entries.insert(key.clone(), track);
+            if let Some(pos) = self.order.iter().position(|k| k == &key) {
+                let k = self.order.remove(pos);
+                self.order.push(k);
+            }
+            return;
+        }
+
+        while self.entries.len() >= self.capacity {
+            if !self.order.is_empty() {
+                let oldest = self.order.remove(0);
+                self.entries.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+
+        self.order.push(key.clone());
+        self.entries.insert(key, track);
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
+}
+
+static RESOLVED_CACHE: LazyLock<Mutex<ResolvedCache>> =
+    LazyLock::new(|| Mutex::new(ResolvedCache::new(MAX_RESOLVED_CACHE_ENTRIES)));
 
 pub fn get_cached_track(track: &Track) -> Option<Track> {
     if !track.stream_url.is_empty() {
         return Some(track.clone());
     }
 
-    let guard = RESOLVED_CACHE.lock().ok()?;
+    let mut guard = match RESOLVED_CACHE.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
 
     if let Some(id) = &track.spotify_id
         && let Some(cached) = guard.get(id)
     {
-        return Some(cached.clone());
+        return Some(cached);
     }
 
     let key = format!(
@@ -48,7 +110,7 @@ pub fn get_cached_track(track: &Track) -> Option<Track> {
         track.title.to_lowercase().trim(),
         track.artist.to_lowercase().trim()
     );
-    guard.get(&key).cloned()
+    guard.get(&key)
 }
 
 pub fn cache_resolved_track(track: &Track) {
@@ -56,17 +118,36 @@ pub fn cache_resolved_track(track: &Track) {
         return;
     }
 
-    if let Ok(mut guard) = RESOLVED_CACHE.lock() {
-        if let Some(id) = &track.spotify_id {
-            guard.insert(id.clone(), track.clone());
-        }
-        let key = format!(
-            "{}—{}",
-            track.title.to_lowercase().trim(),
-            track.artist.to_lowercase().trim()
-        );
-        guard.insert(key, track.clone());
+    let mut guard = match RESOLVED_CACHE.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    if let Some(id) = &track.spotify_id {
+        guard.insert(id.clone(), track.clone());
     }
+    let key = format!(
+        "{}—{}",
+        track.title.to_lowercase().trim(),
+        track.artist.to_lowercase().trim()
+    );
+    guard.insert(key, track.clone());
+}
+
+pub fn clear_resolved_cache() {
+    let mut guard = match RESOLVED_CACHE.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.clear();
+}
+
+pub fn resolved_cache_len() -> usize {
+    let guard = match RESOLVED_CACHE.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.len()
 }
 
 pub fn initialize_backend<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyModule>> {

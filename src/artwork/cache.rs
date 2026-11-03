@@ -14,6 +14,8 @@ use super::decode::{MAX_IMAGE_BYTES, decode_artwork};
 
 const RETRY_COOLDOWN: Duration = Duration::from_secs(5);
 
+pub const MAX_ARTWORK_CACHE_ENTRIES: usize = 48;
+
 #[derive(Clone)]
 pub enum CacheEntry {
     Loading,
@@ -21,13 +23,84 @@ pub enum CacheEntry {
     Failed { error: String, failed_at: Instant },
 }
 
-type ArtCache = Mutex<HashMap<(String, u32), CacheEntry>>;
-
-pub fn art_cache() -> &'static ArtCache {
-    static CACHE: LazyLock<ArtCache> = LazyLock::new(|| Mutex::new(HashMap::new()));
-    &CACHE
+pub struct BoundedArtCache {
+    entries: HashMap<(String, u32), CacheEntry>,
+    order: Vec<(String, u32)>,
+    capacity: usize,
 }
 
+impl BoundedArtCache {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: Vec::new(),
+            capacity: capacity.max(1),
+        }
+    }
+
+    pub fn get(&mut self, key: &(String, u32)) -> Option<CacheEntry> {
+        let entry = self.entries.get(key)?.clone();
+        if let Some(pos) = self.order.iter().position(|k| k == key) {
+            let k = self.order.remove(pos);
+            self.order.push(k);
+        }
+        Some(entry)
+    }
+
+    pub fn insert(&mut self, key: (String, u32), value: CacheEntry) {
+        if self.entries.contains_key(&key) {
+            self.entries.insert(key.clone(), value);
+            if let Some(pos) = self.order.iter().position(|k| k == &key) {
+                let k = self.order.remove(pos);
+                self.order.push(k);
+            }
+            return;
+        }
+
+        while self.entries.len() >= self.capacity {
+            if !self.order.is_empty() {
+                let oldest = self.order.remove(0);
+                self.entries.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+
+        self.order.push(key.clone());
+        self.entries.insert(key, value);
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&(String, u32), &CacheEntry)> {
+        self.entries.iter()
+    }
+}
+
+static ART_CACHE: LazyLock<Mutex<BoundedArtCache>> =
+    LazyLock::new(|| Mutex::new(BoundedArtCache::new(MAX_ARTWORK_CACHE_ENTRIES)));
+
+pub fn art_cache() -> &'static Mutex<BoundedArtCache> {
+    &ART_CACHE
+}
+
+pub fn art_cache_len() -> usize {
+    match art_cache().lock() {
+        Ok(g) => g.len(),
+        Err(poisoned) => poisoned.into_inner().len(),
+    }
+}
 pub fn cache_dir() -> PathBuf {
     crate::config::artwork_cache_dir()
 }
@@ -149,7 +222,7 @@ pub fn request_art(url: &str, side: u32) -> Result<Arc<DynamicImage>, String> {
 
     if let Some(entry) = guard.get(&key) {
         match entry {
-            CacheEntry::Ready(img) => return Ok(Arc::clone(img)),
+            CacheEntry::Ready(img) => return Ok(img),
             CacheEntry::Loading => return Err("loading".into()),
             CacheEntry::Failed { error, failed_at } => {
                 if failed_at.elapsed() < RETRY_COOLDOWN {
@@ -227,7 +300,11 @@ pub fn artwork_status(url: &str, side: u32) -> Option<CacheEntry> {
         return None;
     }
     let key = (url.to_string(), side);
-    art_cache().lock().ok()?.get(&key).cloned()
+    let mut guard = match art_cache().lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.get(&key)
 }
 
 #[cfg(test)]

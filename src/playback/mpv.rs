@@ -18,6 +18,7 @@ use super::events::PlayerEvent;
 
 const MAX_DUMP_BYTES: u64 = 64 * 1024 * 1024;
 const MIN_DUMP_BYTES: u64 = 100 * 1024;
+pub const MAX_PREFETCH_RESULTS: usize = 50;
 
 const REQ_ID_VOLUME: u64 = 1;
 const REQ_ID_TIME_POS: u64 = 2;
@@ -141,6 +142,12 @@ impl AudioPlayer {
 
             let res = start_dump_cancellable(&owned, dumping, Some(cancel));
             if let Ok(mut lock) = results.lock() {
+                if lock.len() >= MAX_PREFETCH_RESULTS
+                    && !lock.contains_key(&owned)
+                    && let Some(first_key) = lock.keys().next().cloned()
+                {
+                    lock.remove(&first_key);
+                }
                 lock.insert(owned, res);
             }
         });

@@ -295,7 +295,7 @@ pub fn clear_caches() -> std::io::Result<()> {
     }
 
     crate::artwork::clear_memory_cache();
-
+    crate::music::clear_resolved_cache();
     if let Some(e) = err { Err(e) } else { Ok(()) }
 }
 
