@@ -244,6 +244,29 @@ pub fn spawn_search(
     });
 }
 
+pub fn spawn_resolve(
+    track: Track,
+    source: PlaybackSource,
+    generation: u64,
+    tx: std::sync::mpsc::Sender<ResolveResponse>,
+) {
+    let spotify_id = track.spotify_id.clone();
+    let title = track.title.clone();
+    let artist = track.artist.clone();
+
+    std::thread::spawn(move || {
+        let result = resolve_playable(&track);
+        let _ = tx.send(ResolveResponse {
+            generation,
+            source,
+            spotify_id,
+            title,
+            artist,
+            result,
+        });
+    });
+}
+
 pub fn resolve_playable(track: &Track) -> Result<Track, String> {
     if let Some(cached) = get_cached_track(track) {
         return Ok(cached);

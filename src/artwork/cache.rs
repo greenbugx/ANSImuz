@@ -197,12 +197,24 @@ pub fn request_art(url: &str, side: u32) -> Result<Arc<DynamicImage>, String> {
     Err("loading".into())
 }
 
-pub fn prefetch(url: &str) {
+pub fn prefetch(url: &str) -> Result<(), String> {
     if url.trim().is_empty() {
-        return;
+        return Err("No artwork URL".into());
     }
 
-    let _ = request_art(url, 64);
+    match request_art(url, 64) {
+        Ok(_) => Ok(()),
+        Err(e) if e == "loading" => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+pub fn artwork_status(url: &str, side: u32) -> Option<CacheEntry> {
+    if url.trim().is_empty() {
+        return None;
+    }
+    let key = (url.to_string(), side);
+    art_cache().lock().ok()?.get(&key).cloned()
 }
 
 #[cfg(test)]

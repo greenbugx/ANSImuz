@@ -500,3 +500,34 @@ fn test_rapid_track_switching_across_multiple_generations() {
     assert!(final_ended, "Final generation event must be handled");
     assert_eq!(app.status, "PLAYBACK ENDED");
 }
+#[test]
+fn test_search_dispatch_contract_returns_channel_response() {
+    let (tx, rx) = mpsc::channel();
+    ansimuz::music::spawn_search(
+        "query".to_string(),
+        ansimuz::config::Provider::YtMusic,
+        42,
+        tx,
+    );
+
+    let resp = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("receive search response");
+    assert_eq!(resp.generation, 42);
+    assert_eq!(resp.query, "query");
+}
+
+#[test]
+fn test_resolve_dispatch_contract_returns_channel_response() {
+    let (tx, rx) = mpsc::channel();
+    let track = make_test_track("Cached Song", "Artist", "http://stream/cached");
+    ansimuz::music::spawn_resolve(track, PlaybackSource::Queue { entry_id: 101 }, 99, tx);
+
+    let resp = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("receive resolve response");
+    assert_eq!(resp.generation, 99);
+    assert_eq!(resp.source, PlaybackSource::Queue { entry_id: 101 });
+    assert!(resp.result.is_ok());
+    assert_eq!(resp.result.unwrap().title, "Cached Song");
+}

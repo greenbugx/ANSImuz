@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     io::{BufRead, BufReader, Write},
     os::unix::net::UnixStream,
@@ -40,6 +40,8 @@ pub struct AudioPlayer {
     dumping: Arc<Mutex<HashSet<String>>>,
     stderr_lines: Arc<Mutex<Vec<String>>>,
     cancel_observer: Option<Arc<AtomicBool>>,
+    cancel_prefetch: Arc<AtomicBool>,
+    prefetch_results: Arc<Mutex<HashMap<String, PrefetchResult>>>,
     is_mock: bool,
     mock_playing: bool,
     mock_fail: bool,
@@ -59,6 +61,8 @@ impl AudioPlayer {
             dumping: Arc::new(Mutex::new(HashSet::new())),
             stderr_lines: Arc::new(Mutex::new(Vec::new())),
             cancel_observer: None,
+            cancel_prefetch: Arc::new(AtomicBool::new(false)),
+            prefetch_results: Arc::new(Mutex::new(HashMap::new())),
             is_mock: false,
             mock_playing: false,
             mock_fail: false,
@@ -75,6 +79,8 @@ impl AudioPlayer {
             dumping: Arc::new(Mutex::new(HashSet::new())),
             stderr_lines: Arc::new(Mutex::new(Vec::new())),
             cancel_observer: None,
+            cancel_prefetch: Arc::new(AtomicBool::new(false)),
+            prefetch_results: Arc::new(Mutex::new(HashMap::new())),
             is_mock: true,
             mock_playing: false,
             mock_fail: false,
@@ -111,14 +117,37 @@ impl AudioPlayer {
         }
 
         let dumping = Arc::clone(&self.dumping);
+        let results = Arc::clone(&self.prefetch_results);
+        let cancel = Arc::clone(&self.cancel_prefetch);
         let owned = url.to_string();
 
         thread::spawn(move || {
-            if delay_secs > 0 {
-                thread::sleep(Duration::from_secs(delay_secs));
+            for _ in 0..(delay_secs * 10) {
+                if cancel.load(Ordering::Relaxed) {
+                    if let Ok(mut lock) = results.lock() {
+                        lock.insert(owned, PrefetchResult::Cancelled);
+                    }
+                    return;
+                }
+                thread::sleep(Duration::from_millis(100));
             }
-            start_dump(&owned, dumping);
+
+            if cancel.load(Ordering::Relaxed) {
+                if let Ok(mut lock) = results.lock() {
+                    lock.insert(owned, PrefetchResult::Cancelled);
+                }
+                return;
+            }
+
+            let res = start_dump_cancellable(&owned, dumping, Some(cancel));
+            if let Ok(mut lock) = results.lock() {
+                lock.insert(owned, res);
+            }
         });
+    }
+
+    pub fn prefetch_result(&self, url: &str) -> Option<PrefetchResult> {
+        self.prefetch_results.lock().ok()?.get(url).cloned()
     }
 
     pub fn generation(&self) -> u64 {
@@ -180,9 +209,9 @@ impl AudioPlayer {
 
         self.last_error = None;
         self.paused = false;
+        self.cancel_prefetch = Arc::new(AtomicBool::new(false));
         self.generation += 1;
         let generation = self.generation;
-
         self.socket_path = generation_socket_path(generation);
         if self.socket_path.exists() {
             let _ = fs::remove_file(&self.socket_path);
@@ -277,11 +306,11 @@ impl AudioPlayer {
             return;
         }
 
-        // Immediately signal observer thread to cancel before any shutdown actions
+        // Immediately signal observer and prefetch tasks to cancel before any shutdown actions
         if let Some(cancel) = self.cancel_observer.take() {
             cancel.store(true, Ordering::SeqCst);
         }
-
+        self.cancel_prefetch.store(true, Ordering::SeqCst);
         // Terminate and reap the child process if active
         if let Some(mut child) = self.child.take() {
             // Attempt graceful quit via IPC socket
@@ -624,8 +653,20 @@ pub fn prefetch_stream(url: &str, dumping: Arc<Mutex<HashSet<String>>>) -> Prefe
 }
 
 pub fn start_dump(url: &str, dumping: Arc<Mutex<HashSet<String>>>) -> PrefetchResult {
+    start_dump_cancellable(url, dumping, None)
+}
+
+pub fn start_dump_cancellable(
+    url: &str,
+    dumping: Arc<Mutex<HashSet<String>>>,
+    cancel: Option<Arc<AtomicBool>>,
+) -> PrefetchResult {
     if url.trim().is_empty() {
         return PrefetchResult::Failed("Empty URL".into());
+    }
+
+    if cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+        return PrefetchResult::Cancelled;
     }
 
     let final_path = audio_cache_dir().join(format!("{}.audio", audio_hash(url)));
@@ -689,12 +730,18 @@ pub fn start_dump(url: &str, dumping: Arc<Mutex<HashSet<String>>>) -> PrefetchRe
         path: part.clone(),
         success: false,
     };
+    if cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+        return PrefetchResult::Cancelled;
+    }
 
     let media = match resolve_stream(url) {
         Ok(m) => m,
         Err(err) => return PrefetchResult::Failed(err),
     };
 
+    if cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+        return PrefetchResult::Cancelled;
+    }
     let dump = Command::new("mpv")
         .arg("--no-video")
         .arg("--no-audio")
@@ -735,6 +782,11 @@ pub fn start_dump(url: &str, dumping: Arc<Mutex<HashSet<String>>>) -> PrefetchRe
     let mut completed_ok = false;
 
     for _ in 0..600 {
+        if cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return PrefetchResult::Cancelled;
+        }
         match child.try_wait() {
             Ok(Some(status)) => {
                 if status.success() {
@@ -1064,5 +1116,24 @@ mod tests {
             !dumping.lock().unwrap().contains(test_url),
             "URL must be removed from dumping set after failure"
         );
+    }
+    #[test]
+    fn test_prefetch_cancellation_aborts_immediately() {
+        let test_url = "https://example.com/cancelled_prefetch_track";
+        let dumping = Arc::new(Mutex::new(HashSet::new()));
+        let cancel = Arc::new(AtomicBool::new(true));
+
+        let res = start_dump_cancellable(test_url, dumping.clone(), Some(cancel));
+        assert_eq!(res, PrefetchResult::Cancelled);
+        assert!(!dumping.lock().unwrap().contains(test_url));
+    }
+
+    #[test]
+    fn test_player_stop_signals_prefetch_cancellation() {
+        let mut player = AudioPlayer::new();
+        assert!(!player.cancel_prefetch.load(Ordering::Relaxed));
+
+        player.stop();
+        assert!(player.cancel_prefetch.load(Ordering::Relaxed));
     }
 }

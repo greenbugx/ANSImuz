@@ -452,23 +452,7 @@ pub fn play_track(
             }
         }
         app.set_status(format!("RESOLVING: {} — {}…", track.title, track.artist));
-
-        let track_to_resolve = track;
-        let spotify_id = track_to_resolve.spotify_id.clone();
-        let title = track_to_resolve.title.clone();
-        let artist = track_to_resolve.artist.clone();
-
-        std::thread::spawn(move || {
-            let result = crate::music::resolve_playable(&track_to_resolve);
-            let _ = resolve_tx.send(ResolveResponse {
-                generation,
-                source,
-                spotify_id,
-                title,
-                artist,
-                result,
-            });
-        });
+        crate::music::spawn_resolve(track, source, generation, resolve_tx);
         return true;
     }
 
@@ -523,7 +507,7 @@ pub fn start_playback(
                 if app.settings.audio_cache {
                     player.prefetch_later(&next_queue.track.stream_url, 25);
                 }
-                crate::artwork::prefetch(&next_queue.track.art_url);
+                let _ = crate::artwork::prefetch(&next_queue.track.art_url);
             }
 
             if app.settings.audio_cache {
