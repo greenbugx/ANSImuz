@@ -59,12 +59,13 @@ pub fn run(
             }
         }
 
-        if !app.is_resolving && app.now_playing.is_some() && !player.is_playing() {
+        if !app.is_resolving() && app.current_track().is_some() && !player.is_playing() {
             let error = player.error().map(|e| e.to_string());
             if error.is_some()
-                && let Some(current) = app.now_playing.take()
+                && let Some(current) = app.current_track().cloned()
             {
                 app.push_history(current);
+                app.set_stopped();
             }
             if !advance_playback(&mut app, &mut player, player_tx.clone(), resolve_tx.clone()) {
                 app.set_stopped();
@@ -75,7 +76,7 @@ pub fn run(
             }
         }
 
-        if app.now_playing.is_none() {
+        if app.current_track().is_none() {
             playback = None;
         }
 
@@ -128,7 +129,7 @@ pub fn handle_search_result(app: &mut App, response: SearchResponse) -> bool {
             app.last_query = response.query;
             app.mode = Mode::Nav;
 
-            if let Some(now) = &app.now_playing {
+            if let Some(now) = app.current_track() {
                 app.playing = app.tracks.iter().position(|t| {
                     (!now.stream_url.is_empty() && t.stream_url == now.stream_url)
                         || (now.spotify_id.is_some() && t.spotify_id == now.spotify_id)
@@ -231,12 +232,13 @@ pub fn refill_queue_from_repeat_all(app: &mut App) -> bool {
     if app.repeat != Repeat::All {
         return false;
     }
-    if app.history.is_empty() && app.now_playing.is_none() {
+    if app.history.is_empty() && app.current_track().is_none() {
         return false;
     }
-    if let Some(current) = app.now_playing.take() {
+    if let Some(current) = app.current_track().cloned() {
         app.push_history(current);
     }
+    app.set_stopped();
     let history = std::mem::take(&mut app.history);
     for track in history {
         app.enqueue(track);
@@ -281,8 +283,9 @@ pub fn play_previous(
     resolve_tx: Sender<ResolveResponse>,
 ) -> bool {
     if let Some(prev) = app.history.pop_back() {
-        if let Some(current) = app.now_playing.take() {
+        if let Some(current) = app.current_track().cloned() {
             app.push_front_queue(current);
+            app.set_stopped();
         }
         play_track(
             app,
@@ -293,7 +296,7 @@ pub fn play_previous(
             PlaybackSource::History,
         );
         true
-    } else if let Some(current) = app.now_playing.clone() {
+    } else if let Some(current) = app.current_track().cloned() {
         play_track(
             app,
             player,
@@ -322,17 +325,16 @@ pub fn recover_queue_failure(
     }
 
     // If the previous track is still playing in the audio player, preserve it!
-    if player.is_playing() && app.now_playing.is_some() {
+    if player.is_playing() && app.current_track().is_some() {
         return false;
     }
 
     // Queue is exhausted after failures: do NOT refill from Repeat::All to avoid endless retries!
     // Idle/stopped: push any ended track to history and clear playback state
-    if let Some(current) = app.now_playing.take() {
+    if let Some(current) = app.current_track().cloned() {
         app.push_history(current);
     }
-    app.playing = None;
-    app.paused = false;
+    app.set_stopped();
     false
 }
 
@@ -345,7 +347,7 @@ pub fn advance_playback(
     if app.repeat == Repeat::One
         && app.played_once
         && player.error().is_none()
-        && let Some(track) = app.now_playing.clone()
+        && let Some(track) = app.current_track().cloned()
     {
         play_track(
             app,
@@ -362,11 +364,10 @@ pub fn advance_playback(
         return true;
     }
 
-    if let Some(current) = app.now_playing.take() {
+    if let Some(current) = app.current_track().cloned() {
         app.push_history(current);
     }
-    app.playing = None;
-    app.paused = false;
+    app.set_stopped();
     false
 }
 pub fn play_track(
@@ -389,7 +390,7 @@ pub fn play_track(
     if track.stream_url.is_empty() {
         app.cancel_pending_resolution();
         let generation = app.resolve_generation;
-        app.set_resolving(track.clone());
+        app.set_resolving(track.clone(), source);
         match source {
             PlaybackSource::SearchResult { index } => {
                 app.selected = index;
@@ -450,7 +451,7 @@ pub fn start_playback(
 
     match player.play(&audio_source, app.volume, events) {
         Ok(()) => {
-            if let Some(old) = app.now_playing.take()
+            if let Some(old) = app.current_track().cloned()
                 && (old.stream_url != track.stream_url || old.title != track.title)
             {
                 app.push_history(old);
@@ -484,7 +485,7 @@ pub fn start_playback(
             Ok(())
         }
         Err(error) => {
-            if let Some(old) = app.now_playing.take()
+            if let Some(old) = app.current_track().cloned()
                 && (old.stream_url != track.stream_url || old.title != track.title)
             {
                 app.push_history(old);
@@ -497,8 +498,7 @@ pub fn start_playback(
 }
 
 pub fn now_playing(app: &App) -> String {
-    app.now_playing
-        .as_ref()
+    app.current_track()
         .map(|t| format!("PLAYING: {} — {}", t.title, t.artist))
         .unwrap_or_else(|| "PLAYING".into())
 }
@@ -532,9 +532,6 @@ pub fn handle_resolve_response(
         return false;
     }
 
-    app.is_resolving = false;
-    app.pending_track = None;
-
     match response.result {
         Ok(resolved) => {
             crate::music::cache_resolved_track(&resolved);
@@ -542,7 +539,8 @@ pub fn handle_resolve_response(
             match response.source {
                 PlaybackSource::SearchResult { index } => {
                     let Some(slot) = app.tracks.get_mut(index) else {
-                        app.set_status(if app.now_playing.is_some() && player.is_playing() {
+                        app.cancel_pending_resolution();
+                        app.set_status(if app.current_track().is_some() && player.is_playing() {
                             now_playing(app)
                         } else {
                             "RESOLVE CANCELLED".to_string()
@@ -559,7 +557,8 @@ pub fn handle_resolve_response(
                     };
 
                     if !is_same {
-                        app.set_status(if app.now_playing.is_some() && player.is_playing() {
+                        app.cancel_pending_resolution();
+                        app.set_status(if app.current_track().is_some() && player.is_playing() {
                             now_playing(app)
                         } else {
                             "RESOLVE CANCELLED".to_string()
@@ -579,58 +578,56 @@ pub fn handle_resolve_response(
                         app.set_status(format!("PLAYER ERROR: {error}"));
                         return false;
                     }
+
                     true
                 }
                 PlaybackSource::Queue { entry_id } => {
-                    if app.pending_queue_entry_id.is_some()
-                        && app.pending_queue_entry_id != Some(entry_id)
-                    {
-                        return false;
-                    }
-                    app.pending_queue_entry_id = None;
-
                     if let Some(pos) = app.queue.iter().position(|e| e.id == entry_id) {
-                        app.remove_queue_item(pos);
+                        let is_first = pos == 0;
+                        if is_first {
+                            let entry = app.remove_queue_item(pos).expect("valid queue item");
+                            let mut track = resolved;
+                            track.spotify_id = entry.track.spotify_id;
+                            if let Err(error) = start_playback(
+                                app,
+                                player,
+                                player_tx.clone(),
+                                track,
+                                PlaybackSource::Queue { entry_id },
+                            ) {
+                                app.set_status(format!("PLAYER ERROR: {error}"));
+                                return recover_queue_failure(
+                                    app,
+                                    player,
+                                    player_tx.clone(),
+                                    resolve_tx.clone(),
+                                );
+                            }
+                            true
+                        } else {
+                            app.queue[pos].track = resolved;
+                            app.cancel_pending_resolution();
+                            true
+                        }
+                    } else {
+                        app.cancel_pending_resolution();
+                        false
                     }
-
-                    if let Err(error) = start_playback(
-                        app,
-                        player,
-                        player_tx.clone(),
-                        resolved,
-                        PlaybackSource::Queue { entry_id },
-                    ) {
+                }
+                PlaybackSource::History | PlaybackSource::Current => {
+                    if let Err(error) =
+                        start_playback(app, player, player_tx.clone(), resolved, response.source)
+                    {
                         app.set_status(format!("PLAYER ERROR: {error}"));
-                        recover_queue_failure(app, player, player_tx.clone(), resolve_tx.clone());
                         return false;
                     }
-                    true
-                }
-                PlaybackSource::History => {
-                    let _ = start_playback(
-                        app,
-                        player,
-                        player_tx.clone(),
-                        resolved,
-                        PlaybackSource::History,
-                    );
-                    true
-                }
-                PlaybackSource::Current => {
-                    let _ = start_playback(
-                        app,
-                        player,
-                        player_tx.clone(),
-                        resolved,
-                        PlaybackSource::Current,
-                    );
                     true
                 }
             }
         }
         Err(error) => {
             app.set_status(format!("RESOLVE ERROR: {}", error));
-            app.pending_queue_entry_id = None;
+            app.cancel_pending_resolution();
 
             if let PlaybackSource::Queue { entry_id } = response.source {
                 if let Some(pos) = app.queue.iter().position(|e| e.id == entry_id) {

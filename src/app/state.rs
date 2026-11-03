@@ -5,7 +5,7 @@ use std::{
 pub const MAX_HISTORY_SIZE: usize = 100;
 
 use crate::config::Settings;
-use crate::music::Track;
+use crate::music::{PlaybackSource, Track};
 use crate::playback::Repeat;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,6 +32,8 @@ pub enum PlaybackState {
     Stopped,
     Resolving {
         track: Track,
+        source: PlaybackSource,
+        active: Option<Box<PlaybackState>>,
     },
     Playing {
         track: Track,
@@ -39,6 +41,53 @@ pub enum PlaybackState {
     Paused {
         track: Track,
     },
+}
+
+impl PlaybackState {
+    pub fn current_track(&self) -> Option<&Track> {
+        match self {
+            PlaybackState::Playing { track } | PlaybackState::Paused { track } => Some(track),
+            PlaybackState::Resolving { active, .. } => {
+                active.as_ref().and_then(|a| a.current_track())
+            }
+            PlaybackState::Stopped => None,
+        }
+    }
+
+    pub fn pending_track(&self) -> Option<&Track> {
+        match self {
+            PlaybackState::Resolving { track, .. } => Some(track),
+            _ => None,
+        }
+    }
+
+    pub fn is_playing(&self) -> bool {
+        match self {
+            PlaybackState::Playing { .. } => true,
+            PlaybackState::Resolving { active, .. } => {
+                active.as_ref().is_some_and(|a| a.is_playing())
+            }
+            _ => false,
+        }
+    }
+
+    pub fn is_paused(&self) -> bool {
+        match self {
+            PlaybackState::Paused { .. } => true,
+            PlaybackState::Resolving { active, .. } => {
+                active.as_ref().is_some_and(|a| a.is_paused())
+            }
+            _ => false,
+        }
+    }
+
+    pub fn is_resolving(&self) -> bool {
+        matches!(self, PlaybackState::Resolving { .. })
+    }
+
+    pub fn is_stopped(&self) -> bool {
+        matches!(self, PlaybackState::Stopped)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -55,13 +104,11 @@ pub struct App {
     pub tracks: Vec<Track>,
     pub selected: usize,
     pub playing: Option<usize>,
-    pub now_playing: Option<Track>,
     pub played_once: bool,
     pub shuffle: bool,
     pub repeat: Repeat,
     rng_state: u64,
     pub loading: bool,
-    pub paused: bool,
     pub volume: u8,
     pub status: String,
     status_at: Option<Instant>,
@@ -75,8 +122,6 @@ pub struct App {
     pub command_palette_open: bool,
     pub command_palette_query: String,
     pub command_palette_cursor: usize,
-    pub pending_track: Option<Track>,
-    pub is_resolving: bool,
     pub resolve_generation: u64,
     pub search_generation: u64,
     pub queue: Vec<QueueEntry>,
@@ -97,7 +142,6 @@ impl App {
             tracks: Vec::new(),
             selected: 0,
             playing: None,
-            now_playing: None,
             played_once: false,
             shuffle: false,
             repeat: Repeat::Off,
@@ -107,7 +151,6 @@ impl App {
                 .unwrap_or(0x9E3779B97F4A7C15)
                 | 1,
             loading: false,
-            paused: false,
             volume: 70,
             status: String::new(),
             status_at: None,
@@ -121,8 +164,6 @@ impl App {
             command_palette_open: false,
             command_palette_query: String::new(),
             command_palette_cursor: 0,
-            pending_track: None,
-            is_resolving: false,
             resolve_generation: 0,
             search_generation: 0,
             queue: Vec::new(),
@@ -147,26 +188,28 @@ impl App {
         self.command_palette_cursor = 0;
     }
 
-    pub fn cancel_pending_resolution(&mut self) {
-        self.resolve_generation = self.resolve_generation.wrapping_add(1);
-        self.is_resolving = false;
-        self.pending_track = None;
-        self.pending_queue_entry_id = None;
-        if matches!(self.playback_state, PlaybackState::Resolving { .. }) {
-            self.playback_state = if let Some(current) = &self.now_playing {
-                if self.paused {
-                    PlaybackState::Paused {
-                        track: current.clone(),
-                    }
-                } else {
-                    PlaybackState::Playing {
-                        track: current.clone(),
-                    }
-                }
-            } else {
-                PlaybackState::Stopped
-            };
-        }
+    pub fn current_track(&self) -> Option<&Track> {
+        self.playback_state.current_track()
+    }
+
+    pub fn now_playing(&self) -> Option<&Track> {
+        self.playback_state.current_track()
+    }
+
+    pub fn pending_track(&self) -> Option<&Track> {
+        self.playback_state.pending_track()
+    }
+
+    pub fn is_playing(&self) -> bool {
+        self.playback_state.is_playing()
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.playback_state.is_paused()
+    }
+
+    pub fn is_resolving(&self) -> bool {
+        self.playback_state.is_resolving()
     }
 
     pub fn playback_state(&self) -> &PlaybackState {
@@ -175,45 +218,56 @@ impl App {
 
     pub fn set_stopped(&mut self) {
         self.playback_state = PlaybackState::Stopped;
-        self.now_playing = None;
-        self.paused = false;
-        self.is_resolving = false;
-        self.pending_track = None;
         self.pending_queue_entry_id = None;
         self.playing = None;
     }
 
-    pub fn set_resolving(&mut self, track: Track) {
-        self.playback_state = PlaybackState::Resolving {
-            track: track.clone(),
+    pub fn set_resolving(&mut self, track: Track, source: PlaybackSource) {
+        let active = match &self.playback_state {
+            PlaybackState::Playing { track: t } => {
+                Some(Box::new(PlaybackState::Playing { track: t.clone() }))
+            }
+            PlaybackState::Paused { track: t } => {
+                Some(Box::new(PlaybackState::Paused { track: t.clone() }))
+            }
+            PlaybackState::Resolving { active: prev, .. } => prev.clone(),
+            PlaybackState::Stopped => None,
         };
-        self.is_resolving = true;
-        self.pending_track = Some(track);
+
+        self.playback_state = PlaybackState::Resolving {
+            track,
+            source,
+            active,
+        };
+    }
+
+    pub fn cancel_pending_resolution(&mut self) {
+        self.resolve_generation = self.resolve_generation.wrapping_add(1);
+        self.pending_queue_entry_id = None;
+
+        if let PlaybackState::Resolving { active, .. } = &self.playback_state {
+            self.playback_state = active
+                .as_ref()
+                .map(|b| *b.clone())
+                .unwrap_or(PlaybackState::Stopped);
+        }
     }
 
     pub fn set_playing(&mut self, track: Track) {
-        self.playback_state = PlaybackState::Playing {
-            track: track.clone(),
-        };
-        self.now_playing = Some(track);
-        self.paused = false;
-        self.is_resolving = false;
-        self.pending_track = None;
+        self.playback_state = PlaybackState::Playing { track };
+        self.played_once = false;
         self.pending_queue_entry_id = None;
     }
 
     pub fn set_paused(&mut self, paused: bool) {
-        if let Some(track) = self.now_playing.clone() {
+        if let Some(track) = self.current_track().cloned() {
             if paused {
                 self.playback_state = PlaybackState::Paused { track };
-                self.paused = true;
             } else {
                 self.playback_state = PlaybackState::Playing { track };
-                self.paused = false;
             }
         }
     }
-
     pub fn toggle_about(&mut self) {
         self.about_open = !self.about_open;
         if self.about_open {
@@ -407,7 +461,7 @@ impl App {
             self.queue_selected = self.queue.len() - 1;
         }
 
-        if self.is_resolving && self.pending_queue_entry_id == Some(entry.id) {
+        if self.is_resolving() && self.pending_queue_entry_id == Some(entry.id) {
             self.cancel_pending_resolution();
             self.set_status("RESOLVE CANCELLED");
         }
@@ -477,20 +531,25 @@ mod tests {
             duration_ms: None,
         };
 
-        // Resolving
-        app.set_resolving(track.clone());
+        // Resolving from stopped
+        app.set_resolving(track.clone(), PlaybackSource::SearchResult { index: 0 });
         assert_eq!(
             *app.playback_state(),
             PlaybackState::Resolving {
-                track: track.clone()
+                track: track.clone(),
+                source: PlaybackSource::SearchResult { index: 0 },
+                active: None,
             }
         );
-        assert!(app.is_resolving);
+        assert!(app.is_resolving());
+        assert!(app.current_track().is_none());
+        assert_eq!(app.pending_track().unwrap().title, "Test Track");
 
         // Cancel resolution when nothing was playing -> Stopped
         app.cancel_pending_resolution();
         assert_eq!(*app.playback_state(), PlaybackState::Stopped);
-        assert!(!app.is_resolving);
+        assert!(!app.is_resolving());
+        assert!(app.pending_track().is_none());
 
         // Playing
         let mut resolved = track.clone();
@@ -503,10 +562,47 @@ mod tests {
             }
         );
         assert_eq!(
-            app.now_playing.as_ref().map(|t| t.title.as_str()),
+            app.now_playing().map(|t| t.title.as_str()),
             Some("Test Track")
         );
-        assert!(!app.paused);
+        assert!(!app.is_paused());
+        assert!(app.is_playing());
+
+        // Resolving a second track while first is playing preserves active
+        let track2 = Track {
+            title: "Second Track".into(),
+            artist: "Second Artist".into(),
+            stream_url: "".into(),
+            art_url: "".into(),
+            spotify_id: None,
+            artists: vec![],
+            album: None,
+            duration_ms: None,
+        };
+        app.set_resolving(track2.clone(), PlaybackSource::SearchResult { index: 1 });
+        assert!(app.is_resolving());
+        // Active track is still Test Track!
+        assert_eq!(
+            app.now_playing().map(|t| t.title.as_str()),
+            Some("Test Track")
+        );
+        assert_eq!(
+            app.pending_track().map(|t| t.title.as_str()),
+            Some("Second Track")
+        );
+
+        // Cancel restores active playing track
+        app.cancel_pending_resolution();
+        assert_eq!(
+            *app.playback_state(),
+            PlaybackState::Playing {
+                track: resolved.clone()
+            }
+        );
+        assert_eq!(
+            app.now_playing().map(|t| t.title.as_str()),
+            Some("Test Track")
+        );
 
         // Paused
         app.set_paused(true);
@@ -516,7 +612,8 @@ mod tests {
                 track: resolved.clone()
             }
         );
-        assert!(app.paused);
+        assert!(app.is_paused());
+        assert!(!app.is_playing());
 
         // Unpaused
         app.set_paused(false);
@@ -526,38 +623,46 @@ mod tests {
                 track: resolved.clone()
             }
         );
-        assert!(!app.paused);
+        assert!(!app.is_paused());
+        assert!(app.is_playing());
 
         // Stopped
         app.set_stopped();
         assert_eq!(*app.playback_state(), PlaybackState::Stopped);
-        assert!(app.now_playing.is_none());
-        assert!(!app.paused);
+        assert!(app.now_playing().is_none());
+        assert!(!app.is_paused());
+        assert!(!app.is_playing());
     }
 
     #[test]
     fn test_cancel_pending_resolution_invalidates_generation() {
         let mut app = App::new();
         assert_eq!(app.resolve_generation, 0);
-        assert!(!app.is_resolving);
-        assert!(app.pending_track.is_none());
+        assert!(!app.is_resolving());
+        assert!(app.pending_track().is_none());
 
-        app.is_resolving = true;
-        app.pending_track = Some(Track {
-            title: "Test Track".into(),
-            artist: "Test Artist".into(),
-            stream_url: String::new(),
-            art_url: String::new(),
-            spotify_id: Some("spotify123".into()),
-            artists: vec!["Test Artist".into()],
-            album: Some("Test Album".into()),
-            duration_ms: Some(180_000),
-        });
+        app.set_resolving(
+            Track {
+                title: "Test Track".into(),
+                artist: "Test Artist".into(),
+                stream_url: String::new(),
+                art_url: String::new(),
+                spotify_id: Some("spotify123".into()),
+                artists: vec!["Test Artist".into()],
+                album: Some("Test Album".into()),
+                duration_ms: Some(180_000),
+            },
+            PlaybackSource::SearchResult { index: 0 },
+        );
+
+        assert_eq!(app.resolve_generation, 0);
+        assert!(app.is_resolving());
+        assert!(app.pending_track().is_some());
 
         app.cancel_pending_resolution();
         assert_eq!(app.resolve_generation, 1);
-        assert!(!app.is_resolving);
-        assert!(app.pending_track.is_none());
+        assert!(!app.is_resolving());
+        assert!(app.pending_track().is_none());
     }
 
     fn sample_track(title: &str) -> Track {

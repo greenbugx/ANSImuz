@@ -194,7 +194,7 @@ pub fn handle_key(
 
             match key.code {
                 KeyCode::Esc => {
-                    if app.is_resolving {
+                    if app.is_resolving() {
                         app.cancel_pending_resolution();
                         app.set_status("RESOLVE CANCELLED");
                     } else {

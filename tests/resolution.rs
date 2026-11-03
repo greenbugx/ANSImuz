@@ -48,9 +48,9 @@ fn test_rapid_track_switching_ignores_stale_responses() {
         0,
     );
     assert_eq!(app.resolve_generation, 1);
-    assert!(app.is_resolving);
+    assert!(app.is_resolving());
     assert_eq!(
-        app.pending_track.as_ref().map(|t| t.title.as_str()),
+        app.pending_track().map(|t| t.title.as_str()),
         Some("Track Zero")
     );
 
@@ -62,9 +62,9 @@ fn test_rapid_track_switching_ignores_stale_responses() {
         1,
     );
     assert_eq!(app.resolve_generation, 2);
-    assert!(app.is_resolving);
+    assert!(app.is_resolving());
     assert_eq!(
-        app.pending_track.as_ref().map(|t| t.title.as_str()),
+        app.pending_track().map(|t| t.title.as_str()),
         Some("Track One")
     );
 
@@ -76,9 +76,9 @@ fn test_rapid_track_switching_ignores_stale_responses() {
         2,
     );
     assert_eq!(app.resolve_generation, 3);
-    assert!(app.is_resolving);
+    assert!(app.is_resolving());
     assert_eq!(
-        app.pending_track.as_ref().map(|t| t.title.as_str()),
+        app.pending_track().map(|t| t.title.as_str()),
         Some("Track Two")
     );
 
@@ -99,9 +99,9 @@ fn test_rapid_track_switching_ignores_stale_responses() {
     let handled_0 =
         handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, stale_resp_0);
     assert!(!handled_0, "Stale generation 1 response must be ignored");
-    assert!(app.is_resolving, "Track 2 must still be resolving");
+    assert!(app.is_resolving(), "Track 2 must still be resolving");
     assert_eq!(
-        app.pending_track.as_ref().map(|t| t.title.as_str()),
+        app.pending_track().map(|t| t.title.as_str()),
         Some("Track Two")
     );
     assert!(
@@ -121,7 +121,7 @@ fn test_rapid_track_switching_ignores_stale_responses() {
     let handled_1 =
         handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, stale_resp_1);
     assert!(!handled_1, "Stale generation 2 response must be ignored");
-    assert!(app.is_resolving);
+    assert!(app.is_resolving());
 
     // Fresh response from request 2 arrives (generation 3)
     let fresh_resp_2 = ResolveResponse {
@@ -135,11 +135,11 @@ fn test_rapid_track_switching_ignores_stale_responses() {
     let handled_2 =
         handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, fresh_resp_2);
     assert!(handled_2, "Fresh generation 3 response must be accepted");
-    assert!(!app.is_resolving);
-    assert!(app.pending_track.is_none());
+    assert!(!app.is_resolving());
+    assert!(app.pending_track().is_none());
     assert!(!app.tracks[2].stream_url.is_empty());
     assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        app.now_playing().map(|t| t.title.as_str()),
         Some("Track Two")
     );
 }
@@ -158,7 +158,7 @@ fn test_cancelling_while_old_track_is_playing_preserves_playback() {
         make_spotify_track("sp1", "New Track", "New Artist"),
     ];
     app.playing = Some(0);
-    app.now_playing = Some(old_track.clone());
+    app.set_playing(old_track.clone());
 
     // User selects Track 1 (unresolved Spotify track)
     play_search_result(
@@ -170,14 +170,14 @@ fn test_cancelling_while_old_track_is_playing_preserves_playback() {
     );
 
     // Track 0 must remain playing while Track 1 is resolving in background
-    assert!(app.is_resolving);
+    assert!(app.is_resolving());
     assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        app.now_playing().map(|t| t.title.as_str()),
         Some("Old Track"),
         "now_playing must NOT be overwritten before resolution finishes"
     );
     assert_eq!(
-        app.pending_track.as_ref().map(|t| t.title.as_str()),
+        app.pending_track().map(|t| t.title.as_str()),
         Some("New Track"),
         "pending_track must hold the track undergoing resolution"
     );
@@ -187,10 +187,10 @@ fn test_cancelling_while_old_track_is_playing_preserves_playback() {
     app.cancel_pending_resolution();
     app.set_status("RESOLVE CANCELLED");
 
-    assert!(!app.is_resolving);
-    assert!(app.pending_track.is_none());
+    assert!(!app.is_resolving());
+    assert!(app.pending_track().is_none());
     assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        app.now_playing().map(|t| t.title.as_str()),
         Some("Old Track"),
         "now_playing must remain intact after cancellation"
     );
@@ -209,7 +209,7 @@ fn test_cancelling_while_old_track_is_playing_preserves_playback() {
         handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, stale_resp);
     assert!(!handled, "Stale response after cancel must be discarded");
     assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        app.now_playing().map(|t| t.title.as_str()),
         Some("Old Track")
     );
 }
@@ -228,7 +228,7 @@ fn test_resolution_failure_preserves_playing_track() {
         make_spotify_track("sp1", "Failing Song", "Failing Artist"),
     ];
     app.playing = Some(0);
-    app.now_playing = Some(old_track.clone());
+    app.set_playing(old_track.clone());
 
     // Request track 1
     play_search_result(
@@ -253,11 +253,11 @@ fn test_resolution_failure_preserves_playing_track() {
     let handled =
         handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, fail_resp);
     assert!(!handled, "Failed resolution must return false");
-    assert!(!app.is_resolving);
-    assert!(app.pending_track.is_none());
+    assert!(!app.is_resolving());
+    assert!(app.pending_track().is_none());
     assert!(app.status.contains("RESOLVE ERROR"));
     assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        app.now_playing().map(|t| t.title.as_str()),
         Some("Current Song"),
         "now_playing must NOT be cleared when pending resolution fails"
     );
@@ -277,7 +277,7 @@ fn test_resolution_failure_when_idle_cleans_up() {
 
     app.tracks = vec![make_spotify_track("sp0", "Idle Fail", "Artist")];
     app.playing = None;
-    app.now_playing = None;
+    app.set_stopped();
 
     play_search_result(
         &mut app,
@@ -300,9 +300,9 @@ fn test_resolution_failure_when_idle_cleans_up() {
     let handled =
         handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, fail_resp);
     assert!(!handled);
-    assert!(!app.is_resolving);
-    assert!(app.pending_track.is_none());
-    assert!(app.now_playing.is_none());
+    assert!(!app.is_resolving());
+    assert!(app.pending_track().is_none());
+    assert!(app.now_playing().is_none());
     assert!(app.playing.is_none());
     assert!(app.status.contains("RESOLVE ERROR"));
 }
@@ -320,8 +320,11 @@ fn test_stale_response_rejected_on_slot_mismatch() {
         "Different Track",
         "Different Artist",
     )];
+    app.set_resolving(
+        make_spotify_track("old_id", "Old Track", "Old Artist"),
+        PlaybackSource::SearchResult { index: 0 },
+    );
     app.resolve_generation = 1;
-    app.is_resolving = true;
 
     // Incoming response claims index 0, matching generation, but identity is from old search
     let response = ResolveResponse {
@@ -358,7 +361,7 @@ fn test_queue_track_resolution_plays_directly_without_touching_search_results() 
         make_resolved_track("sp_search", "Search Song", "Search Artist", "yt_search");
     app.tracks = vec![search_track.clone()];
     app.playing = Some(0);
-    app.now_playing = Some(search_track);
+    app.set_playing(search_track);
 
     // Enqueue an unresolved Spotify track
     let queue_track = make_spotify_track("sp_queue", "Queued Song", "Queued Artist");
@@ -374,7 +377,7 @@ fn test_queue_track_resolution_plays_directly_without_touching_search_results() 
         PlaybackSource::Queue { entry_id },
     );
 
-    assert!(app.is_resolving);
+    assert!(app.is_resolving());
     let generation = app.resolve_generation;
 
     // Resolution arrives for the queue track
@@ -391,7 +394,7 @@ fn test_queue_track_resolution_plays_directly_without_touching_search_results() 
 
     let handled = handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, response);
     assert!(handled, "Queue resolution must be accepted");
-    assert!(!app.is_resolving);
+    assert!(!app.is_resolving());
 
     // Critical assertions:
     // app.tracks[0] was NOT overwritten by the queue track
@@ -404,7 +407,7 @@ fn test_queue_track_resolution_plays_directly_without_touching_search_results() 
 
     // Queue track is playing directly
     assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        app.now_playing().map(|t| t.title.as_str()),
         Some("Queued Song")
     );
 
