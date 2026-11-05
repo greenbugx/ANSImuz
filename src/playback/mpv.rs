@@ -2,7 +2,6 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     io::{BufRead, BufReader, Write},
-    os::unix::net::UnixStream,
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::{
@@ -14,7 +13,7 @@ use std::{
     time::Duration,
 };
 
-use super::events::PlayerEvent;
+use super::{events::PlayerEvent, ipc::IpcEndpoint};
 
 const MAX_DUMP_BYTES: u64 = 64 * 1024 * 1024;
 const MIN_DUMP_BYTES: u64 = 100 * 1024;
@@ -24,17 +23,9 @@ const REQ_ID_VOLUME: u64 = 1;
 const REQ_ID_TIME_POS: u64 = 2;
 const REQ_ID_DURATION: u64 = 3;
 
-fn generation_socket_path(generation: u64) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "ansimuz-mpv-{}-{}.sock",
-        std::process::id(),
-        generation
-    ))
-}
-
 pub struct AudioPlayer {
     child: Option<Child>,
-    socket_path: PathBuf,
+    endpoint: IpcEndpoint,
     paused: bool,
     last_error: Option<String>,
     generation: u64,
@@ -51,11 +42,11 @@ pub struct AudioPlayer {
 impl AudioPlayer {
     pub fn new() -> Self {
         let generation = 0;
-        let socket_path = generation_socket_path(generation);
+        let endpoint = IpcEndpoint::new(generation);
 
         Self {
             child: None,
-            socket_path,
+            endpoint,
             paused: false,
             last_error: None,
             generation,
@@ -73,7 +64,7 @@ impl AudioPlayer {
     pub fn new_mock() -> Self {
         Self {
             child: None,
-            socket_path: PathBuf::new(),
+            endpoint: IpcEndpoint::from_string(String::new()),
             paused: false,
             last_error: None,
             generation: 0,
@@ -219,16 +210,14 @@ impl AudioPlayer {
         self.cancel_prefetch = Arc::new(AtomicBool::new(false));
         self.generation += 1;
         let generation = self.generation;
-        self.socket_path = generation_socket_path(generation);
-        if self.socket_path.exists() {
-            let _ = fs::remove_file(&self.socket_path);
-        }
+        self.endpoint = IpcEndpoint::new(generation);
+        self.endpoint.cleanup();
 
         let mut cmd = Command::new("mpv");
         cmd.arg("--no-video")
             .arg("--idle=no")
             .arg("--force-window=no")
-            .arg(format!("--input-ipc-server={}", self.socket_path.display()))
+            .arg(format!("--input-ipc-server={}", self.endpoint.as_str()))
             .arg("--ytdl-raw-options-append=extractor-args=youtube:player_client=visionos,default")
             .arg(url)
             .stdin(Stdio::null())
@@ -261,11 +250,11 @@ impl AudioPlayer {
         self.stderr_lines = stderr_lines;
         self.child = Some(child);
 
-        let socket_path = self.socket_path.clone();
+        let endpoint = self.endpoint.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancel_observer = Some(Arc::clone(&cancel));
 
-        thread::spawn(move || observe(generation, socket_path, volume, events, cancel));
+        thread::spawn(move || observe(generation, endpoint, volume, events, cancel));
 
         Ok(())
     }
@@ -275,7 +264,9 @@ impl AudioPlayer {
             return Err("Nothing is playing.".into());
         }
 
-        let mut stream = UnixStream::connect(&self.socket_path)
+        let mut stream = self
+            .endpoint
+            .connect()
             .map_err(|e| format!("Failed to connect to MPV socket: {e}"))?;
 
         stream
@@ -321,9 +312,7 @@ impl AudioPlayer {
         // Terminate and reap the child process if active
         if let Some(mut child) = self.child.take() {
             // Attempt graceful quit via IPC socket
-            if self.socket_path.exists()
-                && let Ok(mut stream) = UnixStream::connect(&self.socket_path)
-            {
+            if let Ok(mut stream) = self.endpoint.connect() {
                 let _ = stream.write_all(b"{\"command\":[\"quit\"]}\n");
             }
 
@@ -355,20 +344,18 @@ impl AudioPlayer {
         self.paused = false;
 
         // Remove IPC socket file after child process has exited
-        if self.socket_path.exists() {
-            let _ = fs::remove_file(&self.socket_path);
-        }
+        self.endpoint.cleanup();
     }
 
     #[cfg(test)]
     pub fn set_child_for_test(
         &mut self,
         child: Child,
-        socket_path: PathBuf,
+        endpoint: IpcEndpoint,
         cancel: Arc<AtomicBool>,
     ) {
         self.child = Some(child);
-        self.socket_path = socket_path;
+        self.endpoint = endpoint;
         self.cancel_observer = Some(cancel);
         self.is_mock = false;
     }
@@ -388,43 +375,42 @@ impl Drop for AudioPlayer {
 
 fn observe(
     generation: u64,
-    socket_path: PathBuf,
+    endpoint: IpcEndpoint,
     volume: u8,
     events: Sender<PlayerEvent>,
     cancelled: Arc<AtomicBool>,
 ) {
+    let mut stream = None;
     for _ in 0..80 {
         if cancelled.load(Ordering::Relaxed) {
             return;
         }
-        if socket_path.exists() {
-            break;
+        match endpoint.connect() {
+            Ok(s) => {
+                stream = Some(s);
+                break;
+            }
+            Err(_) => {
+                thread::sleep(Duration::from_millis(25));
+            }
         }
-        thread::sleep(Duration::from_millis(25));
     }
 
     if cancelled.load(Ordering::Relaxed) {
         return;
     }
 
-    if !socket_path.exists() {
-        if !cancelled.load(Ordering::Relaxed) {
-            let _ = events.send(PlayerEvent::Failed {
-                generation,
-                message: "mpv did not start".into(),
-            });
+    let stream = match stream {
+        Some(s) => s,
+        None => {
+            if !cancelled.load(Ordering::Relaxed) {
+                let _ = events.send(PlayerEvent::Failed {
+                    generation,
+                    message: "mpv did not start".into(),
+                });
+            }
+            return;
         }
-        return;
-    }
-
-    let Ok(stream) = UnixStream::connect(&socket_path) else {
-        if !cancelled.load(Ordering::Relaxed) {
-            let _ = events.send(PlayerEvent::Failed {
-                generation,
-                message: "cannot connect to mpv socket".into(),
-            });
-        }
-        return;
     };
 
     let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
@@ -930,13 +916,50 @@ fn resolve_stream(url: &str) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    fn spawn_graceful_child() -> Command {
+        #[cfg(windows)]
+        {
+            let mut cmd = Command::new("cmd");
+            cmd.args(["/c", "exit 0"]);
+            cmd
+        }
+        #[cfg(not(windows))]
+        {
+            Command::new("true")
+        }
+    }
+
+    fn spawn_hanging_child() -> Command {
+        #[cfg(windows)]
+        {
+            let mut cmd = Command::new("ping");
+            cmd.args(["-n", "61", "127.0.0.1"]);
+            cmd
+        }
+        #[cfg(not(windows))]
+        {
+            let mut cmd = Command::new("sleep");
+            cmd.arg("60");
+            cmd
+        }
+    }
+
     #[test]
-    fn test_generation_socket_path_unique() {
-        let path1 = generation_socket_path(1);
-        let path2 = generation_socket_path(2);
-        assert_ne!(path1, path2);
-        assert!(path1.to_string_lossy().contains("-1.sock"));
-        assert!(path2.to_string_lossy().contains("-2.sock"));
+    fn test_generation_ipc_path_unique() {
+        let ep1 = IpcEndpoint::new(1);
+        let ep2 = IpcEndpoint::new(2);
+        assert_ne!(ep1, ep2);
+        #[cfg(unix)]
+        {
+            assert!(ep1.as_str().contains("-1.sock"));
+            assert!(ep2.as_str().contains("-2.sock"));
+        }
+        #[cfg(windows)]
+        {
+            assert!(ep1.as_str().contains("-1"));
+            assert!(ep2.as_str().contains("-2"));
+            assert!(ep1.as_str().starts_with(r"\\.\pipe\"));
+        }
     }
 
     #[test]
@@ -1002,15 +1025,17 @@ mod tests {
 
     #[test]
     fn test_stop_normal_shutdown_when_process_exits_gracefully() {
-        let child = Command::new("true").spawn().expect("spawn true");
-        let socket_path =
-            std::env::temp_dir().join(format!("ansimuz-test-normal-{}.sock", std::process::id()));
-        fs::write(&socket_path, b"test").expect("write socket");
-        assert!(socket_path.exists());
+        let child = spawn_graceful_child().spawn().expect("spawn child");
+        let endpoint = IpcEndpoint::new(991);
+        #[cfg(unix)]
+        {
+            fs::write(endpoint.as_str(), b"test").expect("write socket");
+            assert!(std::path::Path::new(endpoint.as_str()).exists());
+        }
 
         let cancel = Arc::new(AtomicBool::new(false));
         let mut player = AudioPlayer::new();
-        player.set_child_for_test(child, socket_path.clone(), cancel.clone());
+        player.set_child_for_test(child, endpoint.clone(), cancel.clone());
 
         player.stop();
 
@@ -1019,26 +1044,26 @@ mod tests {
             "Observer cancellation must be set on stop"
         );
         assert!(player.child.is_none(), "Child must be cleared on stop");
+        #[cfg(unix)]
         assert!(
-            !socket_path.exists(),
+            !std::path::Path::new(endpoint.as_str()).exists(),
             "Socket file must be removed after exit"
         );
     }
 
     #[test]
     fn test_stop_forced_shutdown_kills_unresponsive_process() {
-        let child = Command::new("sleep")
-            .arg("60")
-            .spawn()
-            .expect("spawn sleep");
-        let socket_path =
-            std::env::temp_dir().join(format!("ansimuz-test-forced-{}.sock", std::process::id()));
-        fs::write(&socket_path, b"test").expect("write socket");
-        assert!(socket_path.exists());
+        let child = spawn_hanging_child().spawn().expect("spawn child");
+        let endpoint = IpcEndpoint::new(992);
+        #[cfg(unix)]
+        {
+            fs::write(endpoint.as_str(), b"test").expect("write socket");
+            assert!(std::path::Path::new(endpoint.as_str()).exists());
+        }
 
         let cancel = Arc::new(AtomicBool::new(false));
         let mut player = AudioPlayer::new();
-        player.set_child_for_test(child, socket_path.clone(), cancel.clone());
+        player.set_child_for_test(child, endpoint.clone(), cancel.clone());
 
         player.stop();
 
@@ -1050,27 +1075,27 @@ mod tests {
             player.child.is_none(),
             "Child must be cleared on forced stop"
         );
+        #[cfg(unix)]
         assert!(
-            !socket_path.exists(),
+            !std::path::Path::new(endpoint.as_str()).exists(),
             "Socket file must be removed after forced kill"
         );
     }
 
     #[test]
     fn test_drop_reaps_child_and_removes_socket() {
-        let child = Command::new("sleep")
-            .arg("60")
-            .spawn()
-            .expect("spawn sleep");
-        let socket_path =
-            std::env::temp_dir().join(format!("ansimuz-test-drop-{}.sock", std::process::id()));
-        fs::write(&socket_path, b"test").expect("write socket");
-        assert!(socket_path.exists());
+        let child = spawn_hanging_child().spawn().expect("spawn child");
+        let endpoint = IpcEndpoint::new(993);
+        #[cfg(unix)]
+        {
+            fs::write(endpoint.as_str(), b"test").expect("write socket");
+            assert!(std::path::Path::new(endpoint.as_str()).exists());
+        }
 
         let cancel = Arc::new(AtomicBool::new(false));
         {
             let mut player = AudioPlayer::new();
-            player.set_child_for_test(child, socket_path.clone(), cancel.clone());
+            player.set_child_for_test(child, endpoint.clone(), cancel.clone());
             // player dropped here
         }
 
@@ -1078,8 +1103,9 @@ mod tests {
             cancel.load(Ordering::SeqCst),
             "Observer cancellation must be set on drop"
         );
+        #[cfg(unix)]
         assert!(
-            !socket_path.exists(),
+            !std::path::Path::new(endpoint.as_str()).exists(),
             "Socket file must be removed after drop"
         );
     }
