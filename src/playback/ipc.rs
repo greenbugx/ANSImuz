@@ -76,12 +76,58 @@ impl IpcStream {
         Ok(Self { inner })
     }
 
+    /// Sets the socket read timeout.
+    ///
+    /// On Unix, configures `SO_RCVTIMEO` on the underlying Unix domain socket.
+    /// On Windows, synchronous named pipes do not support kernel-level I/O timeouts,
+    /// clearing the timeout (`None`) succeeds as a no-op, while `Some` returns
+    /// `ErrorKind::Unsupported`.
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
-        self.inner.set_recv_timeout(timeout)
+        #[cfg(unix)]
+        {
+            self.inner.set_recv_timeout(timeout)
+        }
+        #[cfg(windows)]
+        {
+            match timeout {
+                None => Ok(()),
+                Some(_) => Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "named pipes do not support I/O timeouts",
+                )),
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            self.inner.set_recv_timeout(timeout)
+        }
     }
 
+    /// Sets the socket write timeout.
+    ///
+    /// On Unix, configures `SO_SNDTIMEO` on the underlying Unix domain socket.
+    /// On Windows, synchronous named pipes do not support kernel-level I/O timeouts,
+    /// clearing the timeout (`None`) succeeds as a no-op, while `Some` returns
+    /// `ErrorKind::Unsupported`.
     pub fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
-        self.inner.set_send_timeout(timeout)
+        #[cfg(unix)]
+        {
+            self.inner.set_send_timeout(timeout)
+        }
+        #[cfg(windows)]
+        {
+            match timeout {
+                None => Ok(()),
+                Some(_) => Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "named pipes do not support I/O timeouts",
+                )),
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            self.inner.set_send_timeout(timeout)
+        }
     }
 
     pub fn try_clone(&self) -> io::Result<Self> {
@@ -240,6 +286,65 @@ mod tests {
 
         let received = client_handle.join().expect("join client");
         assert_eq!(received, vec!["echo msg 1", "echo msg 2", "echo msg 3"]);
+        endpoint.cleanup();
+    }
+
+    #[test]
+    fn test_ipc_stream_timeout_apis() {
+        use interprocess::local_socket::ListenerOptions;
+        use std::thread;
+
+        let endpoint = IpcEndpoint::new(9996);
+        endpoint.cleanup();
+
+        let name = endpoint
+            .as_str()
+            .to_fs_name::<GenericFilePath>()
+            .expect("valid endpoint name");
+        let listener = ListenerOptions::new()
+            .name(name)
+            .create_sync()
+            .expect("create listener");
+
+        let endpoint_client = endpoint.clone();
+        let client_handle = thread::spawn(move || {
+            let stream = endpoint_client.connect().expect("client connect");
+
+            // Clearing timeouts must succeed on all platforms
+            assert!(stream.set_read_timeout(None).is_ok());
+            assert!(stream.set_write_timeout(None).is_ok());
+
+            #[cfg(unix)]
+            {
+                assert!(
+                    stream
+                        .set_read_timeout(Some(Duration::from_millis(100)))
+                        .is_ok()
+                );
+                assert!(
+                    stream
+                        .set_write_timeout(Some(Duration::from_millis(100)))
+                        .is_ok()
+                );
+            }
+
+            #[cfg(windows)]
+            {
+                let err_r = stream
+                    .set_read_timeout(Some(Duration::from_millis(100)))
+                    .unwrap_err();
+                assert_eq!(err_r.kind(), io::ErrorKind::Unsupported);
+                let err_w = stream
+                    .set_write_timeout(Some(Duration::from_millis(100)))
+                    .unwrap_err();
+                assert_eq!(err_w.kind(), io::ErrorKind::Unsupported);
+            }
+        });
+
+        let server_stream = listener.accept().expect("server accept");
+        client_handle.join().expect("join client");
+        drop(server_stream);
+        drop(listener);
         endpoint.cleanup();
     }
 }

@@ -32,6 +32,7 @@ pub struct AudioPlayer {
     dumping: Arc<Mutex<HashSet<String>>>,
     stderr_lines: Arc<Mutex<Vec<String>>>,
     cancel_observer: Option<Arc<AtomicBool>>,
+    observer_handle: Option<thread::JoinHandle<()>>,
     cancel_prefetch: Arc<AtomicBool>,
     prefetch_results: Arc<Mutex<HashMap<String, PrefetchResult>>>,
     is_mock: bool,
@@ -53,6 +54,7 @@ impl AudioPlayer {
             dumping: Arc::new(Mutex::new(HashSet::new())),
             stderr_lines: Arc::new(Mutex::new(Vec::new())),
             cancel_observer: None,
+            observer_handle: None,
             cancel_prefetch: Arc::new(AtomicBool::new(false)),
             prefetch_results: Arc::new(Mutex::new(HashMap::new())),
             is_mock: false,
@@ -71,6 +73,7 @@ impl AudioPlayer {
             dumping: Arc::new(Mutex::new(HashSet::new())),
             stderr_lines: Arc::new(Mutex::new(Vec::new())),
             cancel_observer: None,
+            observer_handle: None,
             cancel_prefetch: Arc::new(AtomicBool::new(false)),
             prefetch_results: Arc::new(Mutex::new(HashMap::new())),
             is_mock: true,
@@ -254,7 +257,9 @@ impl AudioPlayer {
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancel_observer = Some(Arc::clone(&cancel));
 
-        thread::spawn(move || observe(generation, endpoint, volume, events, cancel));
+        self.observer_handle = Some(thread::spawn(move || {
+            observe(generation, endpoint, volume, events, cancel)
+        }));
 
         Ok(())
     }
@@ -341,6 +346,9 @@ impl AudioPlayer {
             let _ = child.wait();
         }
 
+        if let Some(handle) = self.observer_handle.take() {
+            let _ = handle.join();
+        }
         self.paused = false;
 
         // Remove IPC socket file after child process has exited
@@ -433,11 +441,13 @@ fn observe(
     let has_dur = Arc::clone(&has_duration);
     let events_writer = events.clone();
 
-    thread::spawn(move || {
+    let writer_handle = thread::spawn(move || {
         while !cancel_writer.load(Ordering::Relaxed) {
-            thread::sleep(Duration::from_millis(250));
-            if cancel_writer.load(Ordering::Relaxed) {
-                break;
+            for _ in 0..10 {
+                if cancel_writer.load(Ordering::Relaxed) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(25));
             }
 
             let time_cmd = serde_json::json!({
@@ -469,6 +479,25 @@ fn observe(
             }
         }
     });
+
+    struct WriterThreadGuard {
+        cancelled: Arc<AtomicBool>,
+        handle: Option<thread::JoinHandle<()>>,
+    }
+
+    impl Drop for WriterThreadGuard {
+        fn drop(&mut self) {
+            self.cancelled.store(true, Ordering::SeqCst);
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    let _writer_guard = WriterThreadGuard {
+        cancelled: Arc::clone(&cancelled),
+        handle: Some(writer_handle),
+    };
 
     let mut duration: Option<f64> = None;
     let mut line = String::new();
