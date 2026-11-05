@@ -179,4 +179,67 @@ mod tests {
         drop(server_stream);
         endpoint.cleanup();
     }
+
+    #[test]
+    fn test_duplex_concurrent_read_write() {
+        use interprocess::local_socket::ListenerOptions;
+        use std::io::{BufRead, BufReader, Write};
+        use std::thread;
+
+        let endpoint = IpcEndpoint::new(9998);
+        endpoint.cleanup();
+
+        let name = endpoint
+            .as_str()
+            .to_fs_name::<GenericFilePath>()
+            .expect("valid endpoint name");
+        let listener = ListenerOptions::new()
+            .name(name)
+            .create_sync()
+            .expect("create listener");
+
+        let endpoint_client = endpoint.clone();
+        let client_handle = thread::spawn(move || {
+            let stream = endpoint_client.connect().expect("client connect");
+            let mut writer = stream.try_clone().expect("client clone");
+            let mut reader = BufReader::new(stream);
+
+            let read_handle = thread::spawn(move || {
+                let mut received = Vec::new();
+                for _ in 0..3 {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).expect("client read line");
+                    received.push(line.trim().to_string());
+                }
+                received
+            });
+
+            for i in 1..=3 {
+                thread::sleep(Duration::from_millis(10));
+                writer
+                    .write_all(format!("msg {i}\n").as_bytes())
+                    .expect("client write line");
+            }
+
+            read_handle.join().expect("join read handle")
+        });
+
+        let server_stream = listener.accept().expect("server accept");
+        let mut server_writer = server_stream.try_clone().expect("server clone");
+        let mut server_reader = BufReader::new(server_stream);
+
+        for _ in 0..3 {
+            let mut line = String::new();
+            server_reader
+                .read_line(&mut line)
+                .expect("server read line");
+            server_writer
+                .write_all(format!("echo {}\n", line.trim()).as_bytes())
+                .expect("server write line");
+        }
+
+        let received = client_handle.join().expect("join client");
+        assert_eq!(received, vec!["echo msg 1", "echo msg 2", "echo msg 3"]);
+        endpoint.cleanup();
+    }
 }

@@ -403,7 +403,7 @@ fn observe(
     let stream = match stream {
         Some(s) => s,
         None => {
-            if !cancelled.load(Ordering::Relaxed) {
+            if !cancelled.swap(true, Ordering::Relaxed) {
                 let _ = events.send(PlayerEvent::Failed {
                     generation,
                     message: "mpv did not start".into(),
@@ -412,9 +412,6 @@ fn observe(
             return;
         }
     };
-
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
 
     let mut stream_writer = match stream.try_clone() {
         Ok(s) => s,
@@ -431,127 +428,133 @@ fn observe(
         let _ = stream_writer.write_all(b"\n");
     }
 
+    let has_duration = Arc::new(AtomicBool::new(false));
+    let cancel_writer = Arc::clone(&cancelled);
+    let has_dur = Arc::clone(&has_duration);
+    let events_writer = events.clone();
+
+    thread::spawn(move || {
+        while !cancel_writer.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_millis(250));
+            if cancel_writer.load(Ordering::Relaxed) {
+                break;
+            }
+
+            let time_cmd = serde_json::json!({
+                "command": ["get_property", "time-pos"],
+                "request_id": REQ_ID_TIME_POS,
+            });
+            if let Ok(bytes) = serde_json::to_vec(&time_cmd)
+                && (stream_writer.write_all(&bytes).is_err()
+                    || stream_writer.write_all(b"\n").is_err())
+            {
+                if !cancel_writer.swap(true, Ordering::Relaxed) {
+                    let _ = events_writer.send(PlayerEvent::Failed {
+                        generation,
+                        message: "Connection to mpv lost".into(),
+                    });
+                }
+                break;
+            }
+
+            if !has_dur.load(Ordering::Relaxed) {
+                let dur_cmd = serde_json::json!({
+                    "command": ["get_property", "duration"],
+                    "request_id": REQ_ID_DURATION,
+                });
+                if let Ok(bytes) = serde_json::to_vec(&dur_cmd) {
+                    let _ = stream_writer.write_all(&bytes);
+                    let _ = stream_writer.write_all(b"\n");
+                }
+            }
+        }
+    });
+
     let mut duration: Option<f64> = None;
     let mut line = String::new();
 
-    while !cancelled.load(Ordering::Relaxed) {
-        thread::sleep(Duration::from_millis(250));
+    loop {
         if cancelled.load(Ordering::Relaxed) {
-            break;
+            return;
         }
 
-        let time_cmd = serde_json::json!({
-            "command": ["get_property", "time-pos"],
-            "request_id": REQ_ID_TIME_POS,
-        });
-        if let Ok(bytes) = serde_json::to_vec(&time_cmd)
-            && (stream_writer.write_all(&bytes).is_err() || stream_writer.write_all(b"\n").is_err())
-        {
-            if !cancelled.load(Ordering::Relaxed) {
-                let _ = events.send(PlayerEvent::Failed {
-                    generation,
-                    message: "Connection to mpv lost".into(),
-                });
-            }
-            break;
-        }
-
-        if duration.is_none() {
-            let dur_cmd = serde_json::json!({
-                "command": ["get_property", "duration"],
-                "request_id": REQ_ID_DURATION,
-            });
-            if let Ok(bytes) = serde_json::to_vec(&dur_cmd) {
-                let _ = stream_writer.write_all(&bytes);
-                let _ = stream_writer.write_all(b"\n");
-            }
-        }
-
-        let mut elapsed: Option<f64> = None;
-
-        loop {
-            if cancelled.load(Ordering::Relaxed) {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => {
+                if !cancelled.swap(true, Ordering::Relaxed) {
+                    let _ = events.send(PlayerEvent::Failed {
+                        generation,
+                        message: "Playback terminated unexpectedly".into(),
+                    });
+                }
                 return;
             }
-
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) => {
-                    if !cancelled.load(Ordering::Relaxed) {
-                        let _ = events.send(PlayerEvent::Failed {
-                            generation,
-                            message: "Playback terminated unexpectedly".into(),
-                        });
-                    }
-                    return;
+            Ok(_) => {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
                 }
-                Ok(_) => {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
 
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                        if let Some(req_id) = val.get("request_id").and_then(|id| id.as_u64()) {
-                            let is_success =
-                                val.get("error").and_then(|e| e.as_str()) == Some("success");
-                            if req_id == REQ_ID_TIME_POS && is_success {
-                                elapsed = val.get("data").and_then(|d| d.as_f64());
-                            } else if req_id == REQ_ID_DURATION && is_success {
-                                duration = val.get("data").and_then(|d| d.as_f64());
-                            }
-                        }
-
-                        if let Some(event) = val.get("event").and_then(|e| e.as_str())
-                            && event == "end-file"
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                    if let Some(req_id) = val.get("request_id").and_then(|id| id.as_u64()) {
+                        let is_success =
+                            val.get("error").and_then(|e| e.as_str()) == Some("success");
+                        if req_id == REQ_ID_TIME_POS
+                            && is_success
+                            && let Some(elapsed) = val.get("data").and_then(|d| d.as_f64())
+                            && !cancelled.load(Ordering::Relaxed)
                         {
-                            let reason = val.get("reason").and_then(|r| r.as_str()).unwrap_or("");
-                            if reason == "error" {
-                                let msg = val
-                                    .get("file_error")
-                                    .and_then(|fe| fe.as_str())
-                                    .unwrap_or("Playback failed");
-                                if !cancelled.load(Ordering::Relaxed) {
-                                    let _ = events.send(PlayerEvent::Failed {
-                                        generation,
-                                        message: msg.to_string(),
-                                    });
-                                }
-                                return;
-                            } else if reason == "eof" {
-                                if !cancelled.load(Ordering::Relaxed) {
-                                    let _ = events.send(PlayerEvent::Ended { generation });
-                                }
-                                return;
-                            } else if reason == "stop" || reason == "quit" {
-                                return;
-                            }
+                            let _ = events.send(PlayerEvent::Position {
+                                generation,
+                                elapsed,
+                                duration,
+                            });
+                        } else if req_id == REQ_ID_DURATION
+                            && is_success
+                            && let Some(dur) = val.get("data").and_then(|d| d.as_f64())
+                        {
+                            duration = Some(dur);
+                            has_duration.store(true, Ordering::Relaxed);
                         }
                     }
-                }
-                Err(e)
-                    if e.kind() == std::io::ErrorKind::WouldBlock
-                        || e.kind() == std::io::ErrorKind::TimedOut =>
-                {
-                    break;
-                }
-                Err(_) => {
-                    if !cancelled.load(Ordering::Relaxed) {
-                        let _ = events.send(PlayerEvent::Failed {
-                            generation,
-                            message: "Connection to mpv lost".into(),
-                        });
+
+                    if let Some(event) = val.get("event").and_then(|e| e.as_str())
+                        && event == "end-file"
+                    {
+                        let reason = val.get("reason").and_then(|r| r.as_str()).unwrap_or("");
+                        if reason == "error" {
+                            let msg = val
+                                .get("file_error")
+                                .and_then(|fe| fe.as_str())
+                                .unwrap_or("Playback failed");
+                            if !cancelled.swap(true, Ordering::Relaxed) {
+                                let _ = events.send(PlayerEvent::Failed {
+                                    generation,
+                                    message: msg.to_string(),
+                                });
+                            }
+                            return;
+                        } else if reason == "eof" {
+                            if !cancelled.swap(true, Ordering::Relaxed) {
+                                let _ = events.send(PlayerEvent::Ended { generation });
+                            }
+                            return;
+                        } else if reason == "stop" || reason == "quit" {
+                            cancelled.store(true, Ordering::Relaxed);
+                            return;
+                        }
                     }
-                    return;
                 }
             }
-        }
-        if let Some(el) = elapsed {
-            let _ = events.send(PlayerEvent::Position {
-                generation,
-                elapsed: el,
-                duration,
-            });
+            Err(_) => {
+                if !cancelled.swap(true, Ordering::Relaxed) {
+                    let _ = events.send(PlayerEvent::Failed {
+                        generation,
+                        message: "Connection to mpv lost".into(),
+                    });
+                }
+                return;
+            }
         }
     }
 }
@@ -1187,5 +1190,93 @@ mod tests {
 
         player.stop();
         assert!(player.cancel_prefetch.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_observe_emits_position_and_ended() {
+        use interprocess::{
+            TryClone,
+            local_socket::{GenericFilePath, ListenerOptions, ToFsName, prelude::*},
+        };
+        use std::sync::mpsc::channel;
+
+        let endpoint = IpcEndpoint::new(8888);
+        endpoint.cleanup();
+
+        let name = endpoint
+            .as_str()
+            .to_fs_name::<GenericFilePath>()
+            .expect("valid endpoint name");
+        let listener = ListenerOptions::new()
+            .name(name)
+            .create_sync()
+            .expect("create listener");
+
+        let server_handle = thread::spawn(move || {
+            let server_stream = listener.accept().expect("server accept");
+            let mut writer = server_stream.try_clone().expect("server clone");
+            let mut reader = BufReader::new(server_stream);
+
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("server read vol");
+
+            line.clear();
+            reader.read_line(&mut line).expect("server read time-pos");
+
+            writer
+                .write_all(b"{\"data\":10.5,\"request_id\":2,\"error\":\"success\"}\n")
+                .expect("server write time-pos reply");
+
+            line.clear();
+            reader.read_line(&mut line).expect("server read duration");
+
+            writer
+                .write_all(b"{\"data\":200.0,\"request_id\":3,\"error\":\"success\"}\n")
+                .expect("server write duration reply");
+
+            thread::sleep(Duration::from_millis(50));
+            writer
+                .write_all(b"{\"event\":\"end-file\",\"reason\":\"eof\"}\n")
+                .expect("server write end-file");
+        });
+
+        let (events_tx, events_rx) = channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        let cancel_obs = Arc::clone(&cancel);
+        let obs_endpoint = endpoint.clone();
+        let obs_handle = thread::spawn(move || {
+            observe(1, obs_endpoint, 80, events_tx, cancel_obs);
+        });
+
+        let mut got_position = false;
+        let mut got_ended = false;
+
+        while let Ok(event) = events_rx.recv_timeout(Duration::from_secs(3)) {
+            match event {
+                PlayerEvent::Position {
+                    generation,
+                    elapsed,
+                    ..
+                } => {
+                    assert_eq!(generation, 1);
+                    assert!((elapsed - 10.5).abs() < 0.001);
+                    got_position = true;
+                }
+                PlayerEvent::Ended { generation } => {
+                    assert_eq!(generation, 1);
+                    got_ended = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(got_position, "Must have received PlayerEvent::Position");
+        assert!(got_ended, "Must have received PlayerEvent::Ended");
+
+        server_handle.join().expect("join server");
+        obs_handle.join().expect("join observer");
+        endpoint.cleanup();
     }
 }
