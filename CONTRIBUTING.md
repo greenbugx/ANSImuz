@@ -12,16 +12,19 @@ All contributors and participants are expected to adhere to our [Code of Conduct
 
 ---
 
-## Development Prerequisites
+## Supported Operating Systems & Prerequisites
+
+ANSImuz supports:
+- **Linux** (x86_64): Primary platform (tested on Arch Linux, Fedora).
+- **Windows** (x86_64): Windows 10/11 supported via PowerShell installer (`scripts/install_windows.ps1`) and also through `WSL2(Fedora 44)`.
 
 Ensure the following tools are installed on your system:
 
 - **Rust toolchain**: 1.85+ (compatible with the Rust 2024 edition).
 - **Python**: 3.10 or higher (with development headers for PyO3 linking).
-- **[mpv](https://mpv.io/)**: For audio playback.
-- **[yt-dlp](https://github.com/yt-dlp/yt-dlp)**: For stream resolution and media fetching.
+- **[mpv](https://mpv.io/)**: Version 0.35+ recommended, with JSON IPC enabled.
+- **[yt-dlp](https://github.com/yt-dlp/yt-dlp)**: For stream resolution and media extraction.
 - **OpenSSL / libssl-dev**: Required for native network operations.
-
 ---
 
 ## Setting Up Your Environment
@@ -65,18 +68,26 @@ The codebase is organized into modular boundaries:
 ```
 ANSImuz/
 ├── src/
-│   ├── app/          # State management (queue, history, focus), key routing, runner
-│   ├── artwork/      # Image decoding, thumbnail cache, palette extraction, and renderer
-│   ├── config/       # Settings persistence and platform-aware cache paths
-│   ├── music/        # Track models, search interfaces, and lazy resolution
-│   ├── playback/     # MPV IPC process supervision, volume, and playback controls
+│   ├── app/          # Application loop, state machine, and orchestration
+│   │   ├── runner.rs     # Main application event loop and terminal interaction
+│   │   ├── playback.rs   # Playback lifecycle, queue sequencing, history, and resolution
+│   │   ├── search.rs     # Search result handling, refetching, and pagination
+│   │   ├── events.rs     # Raw key event handling and input routing
+│   │   ├── commands.rs   # Command palette actions and dispatch
+│   │   ├── state.rs      # Authoritative PlaybackState and application state
+│   │   └── mod.rs        # App module re-exports
+│   ├── artwork/      # Image decoding, bounded memory cache, resize cache, renderer
+│   ├── config/       # Settings persistence (TOML), platform cache dirs, atomic writes
+│   ├── music/        # Track model, identity policy, backend PyO3 bridge execution
+│   ├── playback/     # MPV IPC process supervision, lifecycle events, audio prefetch
 │   ├── terminal/     # Terminal raw mode setup and clean teardown
 │   ├── ui/           # Ratatui components (queue_list, track_list), screens, theme
 │   ├── paths.rs      # Runtime data directory resolution (backend/ and assets/)
 │   ├── lib.rs        # Library interface for integration tests
-│   └── main.rs       # Minimal application entry point
+│   └── main.rs       # Application entry point (cleans stale caches, boots TUI)
 ├── backend/
 │   ├── bridge.py     # PyO3 integration boundary
+│   ├── exceptions.py # Structured provider exception hierarchy
 │   ├── artwork/      # Python thumbnail utilities and prewarming
 │   ├── providers/    # Music provider implementations (ytmusic, spotify)
 │   └── tests/        # Python backend unit and smoke tests
@@ -85,7 +96,13 @@ ANSImuz/
 ├── packaging/
 │   ├── arch/         # PKGBUILD for Arch Linux
 │   └── rpm/          # RPM specs for Fedora (COPR)
-├── tests/            # Integration test suites (queue, queue_playback, resolution, artwork)
+├── tests/            # Integration test suites:
+│   ├── queue.rs          # Queue manipulation and focus interactions
+│   ├── queue_playback.rs # Queue priority, repeat modes, failure continuation
+│   ├── resolution.rs     # Generation tracking, slot identity, cancellation
+│   ├── lifecycle.rs      # Explicit Ended/Failed events, shutdown, track switching
+│   ├── memory_session.rs # Long-session cache bounds, memory leakage, cache clearing
+│   └── artwork.rs        # Disk cache persistence, corruption handling
 └── .github/          # CI workflows
 ```
 
@@ -180,15 +197,40 @@ cargo check --all-targets
 # Run Clippy lints (warnings treated as errors)
 cargo clippy --all-targets -- -D warnings
 
-# Run the test suite
+# Run all unit and integration tests
 cargo test
 
+# Run a specific integration test target:
+cargo test --test queue             # Queue operations and cursor focus
+cargo test --test queue_playback    # Queue priority, repeat modes, error recovery
+cargo test --test resolution        # Async track resolution, stale generation rejection
+cargo test --test lifecycle         # Explicit Ended/Failed lifecycle events, track switching
+cargo test --test memory_session    # Bounded cache capacities, long session memory stability
+cargo test --test artwork           # Disk caching, file format detection, corruption recovery
+
 # Check Python syntax and run backend tests
-python -m py_compile backend/bridge.py backend/artwork/thumbnails.py backend/providers/spotify/spotify.py backend/providers/ytmusic/ytmusic.py
-python -m unittest discover -s backend/tests -p "test_*.py"
+python -m py_compile backend/bridge.py backend/exceptions.py backend/artwork/thumbnails.py backend/providers/spotify/spotify.py backend/providers/ytmusic/ytmusic.py
+python -m unittest discover -s backend/tests -p "test_*.py" -v
+```
 
-If your change touches `packaging/arch/` or `packaging/rpm/`, also run the matching packaging test: [Packaging (Arch Linux)](#packaging-arch-linux) or [Packaging (Fedora / COPR)](#packaging-fedora--copr).
+### Testing MPV Process Supervision & IPC
 
+ANSImuz separates player orchestration from system processes using `AudioPlayer::new_mock()`, allowing all test suites to run deterministically offline without requiring audio hardware.
+
+To test real MPV process lifecycle management, graceful shutdown, SIGKILL timeouts, and JSON IPC parsing:
+
+```bash
+# Run MPV supervision unit tests against real processes:
+cargo test --lib playback::mpv::tests
+
+# Smoke test live audio playback and streaming (requires internet and active audio device):
+cargo run
+```
+
+### Network Access in Tests
+
+- **Offline Tests**: All Rust unit tests (`cargo test --lib`), integration suites (`cargo test --test <name>`), and Python unit tests run 100% offline using mock drivers.
+- **Online Operations**: Live searching, streaming, and artwork prefetching during `cargo run` require an active internet connection.
 ---
 
 ## Continuous Integration (CI)

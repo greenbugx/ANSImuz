@@ -301,7 +301,7 @@ fn test_focus_aware_keyboard_navigation_and_controls() {
         &resolve_tx,
     );
     assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        app.now_playing().map(|t| t.title.as_str()),
         Some("Search 0")
     );
     assert_eq!(app.queue.len(), 0, "Queue item consumed on play");
@@ -426,10 +426,7 @@ fn test_stage_4_connected_interactions() {
         &player_tx,
         &resolve_tx,
     );
-    assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
-        Some("Track X")
-    );
+    assert_eq!(app.now_playing().map(|t| t.title.as_str()), Some("Track X"));
     assert_eq!(app.queue.len(), 2);
     assert_eq!(app.queue[0].track.title, "Track A");
     assert_eq!(app.queue[1].track.title, "Track B");
@@ -450,7 +447,7 @@ fn test_stage_4_connected_interactions() {
         &resolve_tx,
     );
     assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        app.now_playing().map(|t| t.title.as_str()),
         Some("Track A"),
         "Next button must prioritize front of queue (index 0), ignoring queue_selected cursor"
     );

@@ -141,6 +141,88 @@ class TestSpotifyResolutionErrorReporting(unittest.TestCase):
         self.assertIn("Search errors:", err_msg)
         self.assertIn("Network connection unreachable", err_msg)
 
+class TestProviderErrorClassification(unittest.TestCase):
+    def test_error_hierarchy(self):
+        from exceptions import (
+            AuthenticationError,
+            NetworkError,
+            ProviderError,
+            RateLimitError,
+            TrackNotFoundError,
+        )
+
+        self.assertTrue(issubclass(NetworkError, ProviderError))
+        self.assertTrue(issubclass(RateLimitError, ProviderError))
+        self.assertTrue(issubclass(AuthenticationError, ProviderError))
+        self.assertTrue(issubclass(TrackNotFoundError, ProviderError))
+        self.assertTrue(issubclass(TrackNotFoundError, LookupError))
+
+    def test_classify_network_error_with_chaining(self):
+        from exceptions import NetworkError, classify_error
+
+        orig = ConnectionResetError("Connection reset by peer")
+        try:
+            raise classify_error("Spotify search", orig) from orig
+        except NetworkError as err:
+            self.assertIs(err.__cause__, orig)
+            self.assertIn("network connection error", str(err))
+
+    def test_classify_rate_limit_error_with_chaining(self):
+        from exceptions import RateLimitError, classify_error
+
+        orig = RuntimeError("HTTP 429 Too Many Requests")
+        try:
+            raise classify_error("YT Music search", orig) from orig
+        except RateLimitError as err:
+            self.assertIs(err.__cause__, orig)
+            self.assertIn("rate limit exceeded", str(err))
+
+    def test_classify_authentication_error_with_chaining(self):
+        from exceptions import AuthenticationError, classify_error
+
+        orig = RuntimeError("HTTP 401 Unauthorized")
+        try:
+            raise classify_error("Provider call", orig) from orig
+        except AuthenticationError as err:
+            self.assertIs(err.__cause__, orig)
+            self.assertIn("authentication failed", str(err))
+
+    @patch("providers.spotify.spotify.SpotifyClient")
+    def test_spotify_search_raises_chained_network_error(self, mock_client_cls):
+        from exceptions import NetworkError
+        from providers.spotify import spotify
+
+        mock_client = MagicMock()
+        mock_client.__enter__.return_value = mock_client
+        mock_client.search.side_effect = ConnectionRefusedError("Connection refused by peer")
+        mock_client_cls.return_value = mock_client
+
+        with self.assertRaises(NetworkError) as ctx:
+            spotify.search("test song")
+        self.assertIsInstance(ctx.exception.__cause__, ConnectionRefusedError)
+
+    @patch("providers.ytmusic.ytmusic.YTMusic")
+    def test_ytmusic_search_raises_chained_network_error(self, mock_yt_cls):
+        from exceptions import NetworkError
+        from providers.ytmusic import ytmusic
+
+        mock_yt = MagicMock()
+        mock_yt.search.side_effect = TimeoutError("Socket timed out")
+        mock_yt_cls.return_value = mock_yt
+
+        with self.assertRaises(NetworkError) as ctx:
+            ytmusic.search("test song")
+        self.assertIsInstance(ctx.exception.__cause__, TimeoutError)
+
+    @patch("bridge.spotify.search")
+    def test_bridge_search_music_propagates_provider_error(self, mock_sp_search):
+        import bridge
+        from exceptions import RateLimitError
+
+        mock_sp_search.side_effect = RateLimitError("Spotify rate limit exceeded")
+
+        with self.assertRaises(RateLimitError):
+            bridge.search_music("test", provider="spotify")
 
 class TestArtworkThumbnails(unittest.TestCase):
     def test_cache_path_calculation(self):

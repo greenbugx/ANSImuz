@@ -155,6 +155,85 @@ pub fn cache_bytes() -> u64 {
 }
 
 static CACHE_TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static CACHE_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub const MAX_CACHE_DIR_BYTES: u64 = 512 * 1024 * 1024; // 512 MB per cache type
+
+pub fn current_cache_epoch() -> u64 {
+    CACHE_EPOCH.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn invalidate_cache_epoch() -> u64 {
+    CACHE_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+}
+
+pub fn clean_stale_part_files(dir: &std::path::Path) -> std::io::Result<usize> {
+    if !dir.exists() {
+        return Ok(0);
+    }
+    let mut cleaned = 0;
+    let entries = fs::read_dir(dir)?;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.is_file()
+            && path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext == "part")
+                .unwrap_or(false)
+            && fs::remove_file(&path).is_ok()
+        {
+            cleaned += 1;
+        }
+    }
+    Ok(cleaned)
+}
+
+pub fn clean_stale_caches() {
+    let _ = clean_stale_part_files(&artwork_cache_dir());
+    let _ = clean_stale_part_files(&audio_cache_dir());
+}
+
+pub fn prune_cache_dir(dir: &std::path::Path, max_bytes: u64) -> std::io::Result<u64> {
+    if !dir.exists() {
+        return Ok(0);
+    }
+
+    let mut entries = Vec::new();
+    let mut total_size = 0u64;
+
+    for entry in fs::read_dir(dir)?.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.is_file()
+            && let Ok(meta) = entry.metadata()
+        {
+            let size = meta.len();
+            total_size += size;
+            let mtime = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            entries.push((path, size, mtime));
+        }
+    }
+
+    if total_size <= max_bytes {
+        return Ok(0);
+    }
+
+    // Sort oldest modified first
+    entries.sort_by_key(|(_, _, mtime)| *mtime);
+
+    let mut bytes_pruned = 0u64;
+    for (path, size, _) in entries {
+        if total_size <= max_bytes {
+            break;
+        }
+        if fs::remove_file(&path).is_ok() {
+            total_size = total_size.saturating_sub(size);
+            bytes_pruned += size;
+        }
+    }
+
+    Ok(bytes_pruned)
+}
 
 pub fn write_cache_atomic(
     dir: &std::path::Path,
@@ -176,14 +255,29 @@ pub fn write_cache_atomic(
     }
 
     if let Err(e) = fs::rename(&temp_path, &final_path) {
-        let _ = fs::remove_file(&temp_path);
-        return Err(e);
+        // Handle cross-platform atomic replacement
+        if e.kind() == std::io::ErrorKind::AlreadyExists
+            || e.kind() == std::io::ErrorKind::PermissionDenied
+        {
+            let _ = fs::remove_file(&final_path);
+            if let Err(retry_err) = fs::rename(&temp_path, &final_path) {
+                let _ = fs::remove_file(&temp_path);
+                return Err(retry_err);
+            }
+        } else {
+            let _ = fs::remove_file(&temp_path);
+            return Err(e);
+        }
     }
+
+    let _ = prune_cache_dir(dir, MAX_CACHE_DIR_BYTES);
 
     Ok(final_path)
 }
 
 pub fn clear_caches() -> std::io::Result<()> {
+    invalidate_cache_epoch();
+
     let mut err = None;
 
     let art_dir = artwork_cache_dir();
@@ -201,7 +295,7 @@ pub fn clear_caches() -> std::io::Result<()> {
     }
 
     crate::artwork::clear_memory_cache();
-
+    crate::music::clear_resolved_cache();
     if let Some(e) = err { Err(e) } else { Ok(()) }
 }
 
@@ -292,5 +386,69 @@ mod tests {
     fn test_clear_caches_result() {
         let result = clear_caches();
         assert!(result.is_ok(), "clear_caches must return Ok");
+    }
+    #[test]
+    fn test_write_cache_atomic_overwrites_existing_file() {
+        let dir = std::env::temp_dir().join(format!("ansimuz-test-atomic-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+
+        let path1 = write_cache_atomic(&dir, "sample", "txt", b"version 1").expect("write 1");
+        assert_eq!(fs::read(&path1).unwrap(), b"version 1");
+
+        // Overwrite must succeed on all platforms
+        let path2 = write_cache_atomic(&dir, "sample", "txt", b"version 2").expect("write 2");
+        assert_eq!(path1, path2);
+        assert_eq!(fs::read(&path2).unwrap(), b"version 2");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_clean_stale_part_files() {
+        let dir = std::env::temp_dir().join(format!("ansimuz-test-stale-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+
+        fs::write(dir.join("track1.part"), b"stale data 1").unwrap();
+        fs::write(dir.join("track2.part"), b"stale data 2").unwrap();
+        fs::write(dir.join("valid.txt"), b"keeper").unwrap();
+
+        let cleaned = clean_stale_part_files(&dir).expect("clean stale");
+        assert_eq!(cleaned, 2);
+        assert!(!dir.join("track1.part").exists());
+        assert!(!dir.join("track2.part").exists());
+        assert!(dir.join("valid.txt").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_prune_cache_dir_enforces_max_bytes() {
+        let dir = std::env::temp_dir().join(format!("ansimuz-test-prune-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+
+        fs::write(dir.join("file1.dat"), vec![0u8; 1000]).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        fs::write(dir.join("file2.dat"), vec![0u8; 1000]).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        fs::write(dir.join("file3.dat"), vec![0u8; 1000]).unwrap();
+
+        assert_eq!(dir_size(&dir), 3000);
+
+        // Prune down to 1500 bytes
+        let pruned = prune_cache_dir(&dir, 1500).expect("prune");
+        assert_eq!(pruned, 2000);
+        assert_eq!(dir_size(&dir), 1000);
+        assert!(dir.join("file3.dat").exists());
+        assert!(!dir.join("file1.dat").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_cache_epoch_invalidation() {
+        let epoch1 = current_cache_epoch();
+        let epoch2 = invalidate_cache_epoch();
+        assert_eq!(epoch2, epoch1 + 1);
+        assert_eq!(current_cache_epoch(), epoch2);
     }
 }

@@ -27,28 +27,84 @@ pub struct ResolveResponse {
     pub result: Result<Track, String>,
 }
 
-static RESOLVED_CACHE: LazyLock<Mutex<HashMap<String, Track>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+pub const MAX_RESOLVED_CACHE_ENTRIES: usize = 200;
+
+struct ResolvedCache {
+    entries: HashMap<String, Track>,
+    order: Vec<String>,
+    capacity: usize,
+}
+
+impl ResolvedCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: Vec::new(),
+            capacity: capacity.max(1),
+        }
+    }
+
+    fn get(&mut self, key: &str) -> Option<Track> {
+        let track = self.entries.get(key)?.clone();
+        if let Some(pos) = self.order.iter().position(|k| k == key) {
+            let k = self.order.remove(pos);
+            self.order.push(k);
+        }
+        Some(track)
+    }
+
+    fn insert(&mut self, key: String, track: Track) {
+        if self.entries.contains_key(&key) {
+            self.entries.insert(key.clone(), track);
+            if let Some(pos) = self.order.iter().position(|k| k == &key) {
+                let k = self.order.remove(pos);
+                self.order.push(k);
+            }
+            return;
+        }
+
+        while self.entries.len() >= self.capacity {
+            if !self.order.is_empty() {
+                let oldest = self.order.remove(0);
+                self.entries.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+
+        self.order.push(key.clone());
+        self.entries.insert(key, track);
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
+}
+
+static RESOLVED_CACHE: LazyLock<Mutex<ResolvedCache>> =
+    LazyLock::new(|| Mutex::new(ResolvedCache::new(MAX_RESOLVED_CACHE_ENTRIES)));
 
 pub fn get_cached_track(track: &Track) -> Option<Track> {
     if !track.stream_url.is_empty() {
         return Some(track.clone());
     }
 
-    let guard = RESOLVED_CACHE.lock().ok()?;
+    let mut guard = match RESOLVED_CACHE.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
 
     if let Some(id) = &track.spotify_id
         && let Some(cached) = guard.get(id)
     {
-        return Some(cached.clone());
+        return Some(cached);
     }
-
-    let key = format!(
-        "{}—{}",
-        track.title.to_lowercase().trim(),
-        track.artist.to_lowercase().trim()
-    );
-    guard.get(&key).cloned()
+    guard.get(&track.cache_key())
 }
 
 pub fn cache_resolved_track(track: &Track) {
@@ -56,112 +112,143 @@ pub fn cache_resolved_track(track: &Track) {
         return;
     }
 
-    if let Ok(mut guard) = RESOLVED_CACHE.lock() {
-        if let Some(id) = &track.spotify_id {
-            guard.insert(id.clone(), track.clone());
+    let mut guard = match RESOLVED_CACHE.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    if let Some(id) = &track.spotify_id {
+        guard.insert(id.clone(), track.clone());
+    }
+    guard.insert(track.cache_key(), track.clone());
+}
+
+pub fn clear_resolved_cache() {
+    let mut guard = match RESOLVED_CACHE.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.clear();
+}
+
+pub fn resolved_cache_len() -> usize {
+    let guard = match RESOLVED_CACHE.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.len()
+}
+
+pub fn initialize_backend<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyModule>> {
+    let backend_dir = crate::paths::backend_dir();
+    if !backend_dir.is_dir() {
+        return Err(pyo3::exceptions::PyFileNotFoundError::new_err(format!(
+            "Backend directory does not exist: {}",
+            backend_dir.display()
+        )));
+    }
+
+    let bridge_file = backend_dir.join("bridge.py");
+    if !bridge_file.is_file() {
+        return Err(pyo3::exceptions::PyFileNotFoundError::new_err(format!(
+            "Backend bridge script not found: {}",
+            bridge_file.display()
+        )));
+    }
+
+    let sys = PyModule::import(py, "sys")?;
+    let path = sys.getattr("path")?.cast_into::<PyList>()?;
+    let backend_str = backend_dir.to_string_lossy();
+
+    let already_present = path.iter().any(|item| {
+        item.extract::<String>()
+            .map(|s| s == backend_str.as_ref())
+            .unwrap_or(false)
+    });
+
+    if !already_present {
+        path.insert(0, backend_str.as_ref())?;
+    }
+
+    PyModule::import(py, "bridge")
+}
+
+pub fn format_py_error(py: Python<'_>, err: PyErr) -> String {
+    let type_name = err
+        .get_type(py)
+        .name()
+        .map(|n| n.to_string())
+        .unwrap_or_default();
+    let message = err.value(py).to_string();
+
+    match type_name.as_str() {
+        "NetworkError" => {
+            if message.is_empty() {
+                "Network connection failed. Please check your internet connection.".to_string()
+            } else {
+                format!("Network error: {message}")
+            }
         }
-        let key = format!(
-            "{}—{}",
-            track.title.to_lowercase().trim(),
-            track.artist.to_lowercase().trim()
-        );
-        guard.insert(key, track.clone());
+        "RateLimitError" => {
+            if message.is_empty() {
+                "Rate limit exceeded. Please wait a moment before retrying.".to_string()
+            } else {
+                format!("Rate limit exceeded: {message}")
+            }
+        }
+        "AuthenticationError" => {
+            if message.is_empty() {
+                "Authentication failed. Please check provider credentials.".to_string()
+            } else {
+                format!("Authentication error: {message}")
+            }
+        }
+        "TrackNotFoundError" => {
+            if message.is_empty() {
+                "Track not found on provider.".to_string()
+            } else {
+                message
+            }
+        }
+        "ProviderError" => {
+            if message.is_empty() {
+                "Provider error occurred.".to_string()
+            } else {
+                message
+            }
+        }
+        _ => {
+            if !message.is_empty() {
+                message
+            } else {
+                err.to_string()
+            }
+        }
     }
 }
 
-fn ensure_backend_path(py: Python<'_>) -> PyResult<()> {
-    static INIT: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
-
-    let res = INIT.get_or_init(|| {
-        let sys = PyModule::import(py, "sys").map_err(|e| e.to_string())?;
-        let attr = sys.getattr("path").map_err(|e| e.to_string())?;
-        let path = attr.cast_into::<PyList>().map_err(|e| e.to_string())?;
-
-        let backend_path = crate::paths::data_dir().join("backend");
-        let backend_str = backend_path.to_string_lossy();
-
-        let already_present = path.iter().any(|item| {
-            item.extract::<String>()
-                .map(|s| s == backend_str.as_ref())
-                .unwrap_or(false)
-        });
-
-        if !already_present {
-            path.insert(0, backend_str.as_ref())
-                .map_err(|e| e.to_string())?;
-        }
-
-        Ok(())
-    });
-
-    match res {
-        Ok(()) => Ok(()),
-        Err(err) => Err(pyo3::exceptions::PyRuntimeError::new_err(err.clone())),
-    }
+pub fn with_backend<T>(
+    f: impl for<'py> FnOnce(Python<'py>, &Bound<'py, PyModule>) -> PyResult<T>,
+) -> Result<T, String> {
+    Python::attach(|py| {
+        let bridge = initialize_backend(py).map_err(|err| format_py_error(py, err))?;
+        f(py, &bridge).map_err(|err| format_py_error(py, err))
+    })
 }
 
 pub fn search_music(query: String, provider: Provider) -> SearchResult {
-    let result = Python::attach(|py| -> PyResult<Vec<Track>> {
-        ensure_backend_path(py)?;
-
-        let bridge = PyModule::import(py, "bridge")?;
+    let result = with_backend(|_py, bridge| {
         let results = bridge
             .getattr("search_music")?
             .call1((query.clone(), provider.as_str()))?
             .cast_into::<PyList>()?;
 
-        let mut tracks = Vec::new();
-
+        let mut tracks = Vec::with_capacity(results.len());
         for item in results.iter() {
-            let title = item.get_item("title")?.extract::<String>()?;
-            let artist = item.get_item("artist")?.extract::<String>()?;
-            let stream_url = item
-                .get_item("stream_url")
-                .and_then(|v| v.extract::<String>())
-                .unwrap_or_default();
-            let art_url = item
-                .get_item("art_url")
-                .and_then(|v| v.extract::<String>())
-                .unwrap_or_default();
-
-            let spotify_id = item
-                .get_item("spotify_id")
-                .ok()
-                .and_then(|v| v.extract::<String>().ok())
-                .filter(|s| !s.is_empty());
-
-            let artists = item
-                .get_item("artists")
-                .ok()
-                .and_then(|v| v.extract::<Vec<String>>().ok())
-                .unwrap_or_else(|| vec![artist.clone()]);
-
-            let album = item
-                .get_item("album")
-                .ok()
-                .and_then(|v| v.extract::<String>().ok())
-                .filter(|s| !s.is_empty());
-
-            let duration_ms = item
-                .get_item("duration_ms")
-                .ok()
-                .and_then(|v| v.extract::<u64>().ok());
-
-            tracks.push(Track {
-                title,
-                artist,
-                stream_url,
-                art_url,
-                spotify_id,
-                artists,
-                album,
-                duration_ms,
-            });
+            tracks.push(Track::from_py(&item)?);
         }
-
         Ok(tracks)
-    })
-    .map_err(|error| error.to_string());
+    });
 
     (query, result)
 }
@@ -182,15 +269,34 @@ pub fn spawn_search(
     });
 }
 
+pub fn spawn_resolve(
+    track: Track,
+    source: PlaybackSource,
+    generation: u64,
+    tx: std::sync::mpsc::Sender<ResolveResponse>,
+) {
+    let spotify_id = track.spotify_id.clone();
+    let title = track.title.clone();
+    let artist = track.artist.clone();
+
+    std::thread::spawn(move || {
+        let result = resolve_playable(&track);
+        let _ = tx.send(ResolveResponse {
+            generation,
+            source,
+            spotify_id,
+            title,
+            artist,
+            result,
+        });
+    });
+}
+
 pub fn resolve_playable(track: &Track) -> Result<Track, String> {
     if let Some(cached) = get_cached_track(track) {
         return Ok(cached);
     }
-    let resolved_track = Python::attach(|py| -> PyResult<Track> {
-        ensure_backend_path(py)?;
-
-        let bridge = PyModule::import(py, "bridge")?;
-
+    let resolved_track = with_backend(|py, bridge| {
         let dict = PyDict::new(py);
         dict.set_item("title", &track.title)?;
         dict.set_item("artist", &track.artist)?;
@@ -208,54 +314,141 @@ pub fn resolve_playable(track: &Track) -> Result<Track, String> {
         }
         let resolved = bridge.getattr("resolve_playable")?.call1((dict,))?;
 
-        let title = resolved.get_item("title")?.extract::<String>()?;
-        let artist = resolved.get_item("artist")?.extract::<String>()?;
-        let stream_url = resolved
-            .get_item("stream_url")
-            .and_then(|v| v.extract::<String>())
-            .unwrap_or_default();
-        let art_url = resolved
-            .get_item("art_url")
-            .and_then(|v| v.extract::<String>())
-            .unwrap_or_else(|_| track.art_url.clone());
+        let mut resolved_track = Track::from_py(&resolved)?;
+        if !resolved_track.has_stream_url() {
+            resolved_track.stream_url = track.stream_url.clone();
+        }
+        if resolved_track.art_url.is_empty() {
+            resolved_track.art_url = track.art_url.clone();
+        }
+        if resolved_track.spotify_id.is_none() {
+            resolved_track.spotify_id = track.spotify_id.clone();
+        }
+        if resolved_track.artists.is_empty() {
+            resolved_track.artists = track.artists.clone();
+        }
+        if resolved_track.album.is_none() {
+            resolved_track.album = track.album.clone();
+        }
+        if resolved_track.duration_ms.is_none() {
+            resolved_track.duration_ms = track.duration_ms;
+        }
 
-        let spotify_id = resolved
-            .get_item("spotify_id")
-            .ok()
-            .and_then(|v| v.extract::<String>().ok())
-            .or_else(|| track.spotify_id.clone());
-
-        let artists = resolved
-            .get_item("artists")
-            .ok()
-            .and_then(|v| v.extract::<Vec<String>>().ok())
-            .unwrap_or_else(|| track.artists.clone());
-
-        let album = resolved
-            .get_item("album")
-            .ok()
-            .and_then(|v| v.extract::<String>().ok())
-            .or_else(|| track.album.clone());
-
-        let duration_ms = resolved
-            .get_item("duration_ms")
-            .ok()
-            .and_then(|v| v.extract::<u64>().ok())
-            .or(track.duration_ms);
-
-        Ok(Track {
-            title,
-            artist,
-            stream_url,
-            art_url,
-            spotify_id,
-            artists,
-            album,
-            duration_ms,
-        })
-    })
-    .map_err(|error| error.to_string())?;
+        Ok(resolved_track)
+    })?;
 
     cache_resolved_track(&resolved_track);
     Ok(resolved_track)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_initialize_backend_loads_bridge_and_functions() {
+        let _guard = crate::paths::ENV_LOCK.lock().unwrap();
+        let res = with_backend(|_py, bridge| {
+            assert!(bridge.hasattr("search_music").unwrap());
+            assert!(bridge.hasattr("resolve_playable").unwrap());
+            Ok(())
+        });
+        assert!(
+            res.is_ok(),
+            "Backend initialization must succeed: {:?}",
+            res.err()
+        );
+    }
+
+    #[test]
+    fn test_sys_path_no_redundant_entries() {
+        let _guard = crate::paths::ENV_LOCK.lock().unwrap();
+        Python::attach(|py| {
+            // First call
+            let _ = initialize_backend(py).unwrap();
+            // Second call
+            let _ = initialize_backend(py).unwrap();
+
+            let sys = PyModule::import(py, "sys").unwrap();
+            let path = sys.getattr("path").unwrap().cast_into::<PyList>().unwrap();
+            let backend_str = crate::paths::backend_dir().to_string_lossy().to_string();
+
+            let count = path
+                .iter()
+                .filter(|item| {
+                    item.extract::<String>()
+                        .map(|s| s == backend_str)
+                        .unwrap_or(false)
+                })
+                .count();
+
+            assert_eq!(
+                count, 1,
+                "backend directory must appear exactly once in sys.path"
+            );
+        });
+    }
+
+    #[test]
+    fn test_missing_backend_directory_produces_useful_error() {
+        let _guard = crate::paths::ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("ANSIMUZ_DATA_DIR", "/tmp/nonexistent_ansimuz_dir_12345");
+        }
+
+        let res = with_backend(|_py, _bridge| Ok(()));
+        assert!(
+            res.is_err(),
+            "Missing backend directory must produce an error"
+        );
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("Backend directory does not exist")
+                || err.contains("Backend bridge script not found"),
+            "Error must clearly state missing backend, got: {err}"
+        );
+
+        unsafe {
+            std::env::remove_var("ANSIMUZ_DATA_DIR");
+        }
+    }
+    #[test]
+    fn test_format_py_error_converts_custom_exceptions_cleanly() {
+        let _guard = crate::paths::ENV_LOCK.lock().unwrap();
+        Python::attach(|py| {
+            let bridge = initialize_backend(py).expect("initialize backend");
+            let net_cls = bridge.getattr("NetworkError").unwrap();
+            let net_err = net_cls.call1(("Connection timed out",)).unwrap();
+            let net_pyerr = PyErr::from_value(net_err);
+            let formatted_net = format_py_error(py, net_pyerr);
+            assert_eq!(formatted_net, "Network error: Connection timed out");
+            assert!(!formatted_net.contains("Traceback"));
+            assert!(!formatted_net.contains("<class"));
+
+            let rate_cls = bridge.getattr("RateLimitError").unwrap();
+            let rate_err = rate_cls.call1(("HTTP 429 quota exceeded",)).unwrap();
+            let rate_pyerr = PyErr::from_value(rate_err);
+            let formatted_rate = format_py_error(py, rate_pyerr);
+            assert_eq!(
+                formatted_rate,
+                "Rate limit exceeded: HTTP 429 quota exceeded"
+            );
+
+            let auth_cls = bridge.getattr("AuthenticationError").unwrap();
+            let auth_err = auth_cls.call1(("HTTP 401 invalid token",)).unwrap();
+            let auth_pyerr = PyErr::from_value(auth_err);
+            let formatted_auth = format_py_error(py, auth_pyerr);
+            assert_eq!(
+                formatted_auth,
+                "Authentication error: HTTP 401 invalid token"
+            );
+
+            let not_found_cls = bridge.getattr("TrackNotFoundError").unwrap();
+            let not_found_err = not_found_cls
+                .call1(("No confident match for 'Song'",))
+                .unwrap();
+            let not_found_pyerr = PyErr::from_value(not_found_err);
+            let formatted_not_found = format_py_error(py, not_found_pyerr);
+            assert_eq!(formatted_not_found, "No confident match for 'Song'");
+        });
+    }
 }

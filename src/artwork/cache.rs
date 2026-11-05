@@ -14,6 +14,8 @@ use super::decode::{MAX_IMAGE_BYTES, decode_artwork};
 
 const RETRY_COOLDOWN: Duration = Duration::from_secs(5);
 
+pub const MAX_ARTWORK_CACHE_ENTRIES: usize = 48;
+
 #[derive(Clone)]
 pub enum CacheEntry {
     Loading,
@@ -21,13 +23,84 @@ pub enum CacheEntry {
     Failed { error: String, failed_at: Instant },
 }
 
-type ArtCache = Mutex<HashMap<(String, u32), CacheEntry>>;
-
-pub fn art_cache() -> &'static ArtCache {
-    static CACHE: LazyLock<ArtCache> = LazyLock::new(|| Mutex::new(HashMap::new()));
-    &CACHE
+pub struct BoundedArtCache {
+    entries: HashMap<(String, u32), CacheEntry>,
+    order: Vec<(String, u32)>,
+    capacity: usize,
 }
 
+impl BoundedArtCache {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: Vec::new(),
+            capacity: capacity.max(1),
+        }
+    }
+
+    pub fn get(&mut self, key: &(String, u32)) -> Option<CacheEntry> {
+        let entry = self.entries.get(key)?.clone();
+        if let Some(pos) = self.order.iter().position(|k| k == key) {
+            let k = self.order.remove(pos);
+            self.order.push(k);
+        }
+        Some(entry)
+    }
+
+    pub fn insert(&mut self, key: (String, u32), value: CacheEntry) {
+        if self.entries.contains_key(&key) {
+            self.entries.insert(key.clone(), value);
+            if let Some(pos) = self.order.iter().position(|k| k == &key) {
+                let k = self.order.remove(pos);
+                self.order.push(k);
+            }
+            return;
+        }
+
+        while self.entries.len() >= self.capacity {
+            if !self.order.is_empty() {
+                let oldest = self.order.remove(0);
+                self.entries.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+
+        self.order.push(key.clone());
+        self.entries.insert(key, value);
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&(String, u32), &CacheEntry)> {
+        self.entries.iter()
+    }
+}
+
+static ART_CACHE: LazyLock<Mutex<BoundedArtCache>> =
+    LazyLock::new(|| Mutex::new(BoundedArtCache::new(MAX_ARTWORK_CACHE_ENTRIES)));
+
+pub fn art_cache() -> &'static Mutex<BoundedArtCache> {
+    &ART_CACHE
+}
+
+pub fn art_cache_len() -> usize {
+    match art_cache().lock() {
+        Ok(g) => g.len(),
+        Err(poisoned) => poisoned.into_inner().len(),
+    }
+}
 pub fn cache_dir() -> PathBuf {
     crate::config::artwork_cache_dir()
 }
@@ -38,6 +111,7 @@ pub fn clear_memory_cache() {
         Err(poisoned) => poisoned.into_inner(),
     };
     guard.clear();
+    super::render::clear_resize_cache();
 }
 
 pub fn cache_path(url: &str) -> PathBuf {
@@ -124,7 +198,9 @@ pub fn load_image(url: &str) -> Result<DynamicImage, String> {
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("art");
-    let _ = crate::config::write_cache_atomic(&cache_dir(), file_stem, "img", &bytes);
+    if let Err(e) = crate::config::write_cache_atomic(&cache_dir(), file_stem, "img", &bytes) {
+        eprintln!("Warning: Failed to write artwork cache for {file_stem}: {e}");
+    }
     Ok(image)
 }
 
@@ -146,7 +222,7 @@ pub fn request_art(url: &str, side: u32) -> Result<Arc<DynamicImage>, String> {
 
     if let Some(entry) = guard.get(&key) {
         match entry {
-            CacheEntry::Ready(img) => return Ok(Arc::clone(img)),
+            CacheEntry::Ready(img) => return Ok(img),
             CacheEntry::Loading => return Err("loading".into()),
             CacheEntry::Failed { error, failed_at } => {
                 if failed_at.elapsed() < RETRY_COOLDOWN {
@@ -162,6 +238,7 @@ pub fn request_art(url: &str, side: u32) -> Result<Arc<DynamicImage>, String> {
     drop(guard);
 
     let owned_url = url.to_string();
+    let epoch = crate::config::current_cache_epoch();
 
     thread::spawn(move || {
         let result = load_image(&owned_url).map(|image| {
@@ -172,10 +249,19 @@ pub fn request_art(url: &str, side: u32) -> Result<Arc<DynamicImage>, String> {
             }
         });
 
+        // If cache was cleared during download, discard result without repopulating cache
+        if crate::config::current_cache_epoch() != epoch {
+            return;
+        }
+
         let mut guard = match art_cache().lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
+
+        if crate::config::current_cache_epoch() != epoch {
+            return;
+        }
 
         match result {
             Ok(arc_image) => {
@@ -197,12 +283,28 @@ pub fn request_art(url: &str, side: u32) -> Result<Arc<DynamicImage>, String> {
     Err("loading".into())
 }
 
-pub fn prefetch(url: &str) {
+pub fn prefetch(url: &str) -> Result<(), String> {
     if url.trim().is_empty() {
-        return;
+        return Err("No artwork URL".into());
     }
 
-    let _ = request_art(url, 64);
+    match request_art(url, 64) {
+        Ok(_) => Ok(()),
+        Err(e) if e == "loading" => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+pub fn artwork_status(url: &str, side: u32) -> Option<CacheEntry> {
+    if url.trim().is_empty() {
+        return None;
+    }
+    let key = (url.to_string(), side);
+    let mut guard = match art_cache().lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.get(&key)
 }
 
 #[cfg(test)]
@@ -244,5 +346,35 @@ mod tests {
         if let CacheEntry::Failed { failed_at, .. } = entry_expired {
             assert!(failed_at.elapsed() >= RETRY_COOLDOWN);
         }
+    }
+
+    #[test]
+    fn test_artwork_status_observable() {
+        let url = "https://example.com/status_test";
+        assert!(artwork_status(url, 64).is_none());
+
+        let key = (url.to_string(), 64);
+        let dummy = Arc::new(DynamicImage::new_rgb8(10, 10));
+        art_cache()
+            .lock()
+            .unwrap()
+            .insert(key, CacheEntry::Ready(dummy));
+
+        let status = artwork_status(url, 64);
+        assert!(status.is_some());
+        assert!(matches!(status.unwrap(), CacheEntry::Ready(_)));
+    }
+
+    #[test]
+    fn test_clear_memory_cache_clears_art_cache_and_resize_cache() {
+        let dummy = Arc::new(DynamicImage::new_rgb8(10, 10));
+        art_cache()
+            .lock()
+            .unwrap()
+            .insert(("test_url".into(), 0), CacheEntry::Ready(dummy));
+        assert!(!art_cache().lock().unwrap().is_empty());
+
+        clear_memory_cache();
+        assert!(art_cache().lock().unwrap().is_empty());
     }
 }

@@ -45,10 +45,7 @@ fn test_manual_next_plays_queue_item_before_search_results() {
         resolve_tx.clone(),
         0,
     );
-    assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
-        Some("S0")
-    );
+    assert_eq!(app.now_playing().map(|t| t.title.as_str()), Some("S0"));
     assert_eq!(app.playing, Some(0));
 
     // Enqueue Q0
@@ -59,10 +56,7 @@ fn test_manual_next_plays_queue_item_before_search_results() {
     // Press Next (manual next): must play Q0 first, NOT S1!
     let advanced = play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
     assert!(advanced);
-    assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
-        Some("Q0")
-    );
+    assert_eq!(app.now_playing().map(|t| t.title.as_str()), Some("Q0"));
     assert_eq!(app.playing, None, "Queued track must have playing = None");
     assert_eq!(
         app.queue.len(),
@@ -91,7 +85,6 @@ fn test_automatic_advance_queue_priority_and_exhaustion() {
         resolve_tx.clone(),
         0,
     );
-    app.played_once = true;
 
     // Enqueue Q0 and Q1
     app.enqueue(make_test_track("Q0", "Artist", "http://stream/q0"));
@@ -101,10 +94,7 @@ fn test_automatic_advance_queue_priority_and_exhaustion() {
     // Search 0 ends: queue priority plays Q0, Search 0 pushed to history
     let adv1 = advance_playback(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
     assert!(adv1);
-    assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
-        Some("Q0")
-    );
+    assert_eq!(app.now_playing().map(|t| t.title.as_str()), Some("Q0"));
     assert_eq!(app.queue.len(), 1);
     assert_eq!(app.history.len(), 1);
     assert_eq!(app.history[0].title, "Search 0");
@@ -112,10 +102,7 @@ fn test_automatic_advance_queue_priority_and_exhaustion() {
     // Q0 ends: queue priority plays Q1, Q0 pushed to history
     let adv2 = advance_playback(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
     assert!(adv2);
-    assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
-        Some("Q1")
-    );
+    assert_eq!(app.now_playing().map(|t| t.title.as_str()), Some("Q1"));
     assert_eq!(app.queue.len(), 0);
     assert_eq!(app.history.len(), 2);
     assert_eq!(app.history[1].title, "Q0");
@@ -126,7 +113,7 @@ fn test_automatic_advance_queue_priority_and_exhaustion() {
         !adv3,
         "Playback must end when queue exhausts without Repeat::All"
     );
-    assert!(app.now_playing.is_none());
+    assert!(app.now_playing().is_none());
     assert_eq!(app.history.len(), 3);
     assert_eq!(app.history[2].title, "Q1");
 }
@@ -152,7 +139,6 @@ fn test_repeat_one_overrides_queue_advance() {
         resolve_tx.clone(),
         0,
     );
-    app.played_once = true;
 
     // Enqueue an item
     app.enqueue(make_test_track(
@@ -165,7 +151,7 @@ fn test_repeat_one_overrides_queue_advance() {
     let advanced = advance_playback(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
     assert!(advanced);
     assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        app.now_playing().map(|t| t.title.as_str()),
         Some("Looping Song")
     );
     assert_eq!(
@@ -196,7 +182,6 @@ fn test_repeat_one_does_not_repeat_on_playback_failure() {
         resolve_tx.clone(),
         0,
     );
-    app.played_once = true;
 
     // Simulate playback error
     player.record_error("Media error: stream closed unexpectedly".to_string());
@@ -204,7 +189,7 @@ fn test_repeat_one_does_not_repeat_on_playback_failure() {
     // Advance playback: must NOT repeat on playback failure!
     let advanced = advance_playback(&mut app, &mut player, player_tx, resolve_tx);
     assert!(!advanced, "Repeat One must not restart failed playback");
-    assert!(app.now_playing.is_none());
+    assert!(app.now_playing().is_none());
     assert_eq!(app.history.len(), 1);
     assert_eq!(app.history[0].title, "Failing Song");
 }
@@ -226,10 +211,7 @@ fn test_playback_error_advances_to_next_queued_track() {
         song_a,
         PlaybackSource::SearchResult { index: 0 },
     );
-    assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
-        Some("Song A")
-    );
+    assert_eq!(app.now_playing().map(|t| t.title.as_str()), Some("Song A"));
     assert!(player.is_playing());
 
     // Queue has Song B
@@ -243,8 +225,9 @@ fn test_playback_error_advances_to_next_queued_track() {
     // Simulate the runner loop logic when playback fails while queued items remain:
     let error = player.error().map(|e| e.to_string());
     assert!(error.is_some());
-    if let Some(current) = app.now_playing.take() {
+    if let Some(current) = app.current_track().cloned() {
         app.push_history(current);
+        app.set_stopped();
     }
     let advanced = advance_playback(&mut app, &mut player, player_tx, resolve_tx);
 
@@ -253,10 +236,7 @@ fn test_playback_error_advances_to_next_queued_track() {
         advanced,
         "Must advance to next queued track on playback error"
     );
-    assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
-        Some("Song B")
-    );
+    assert_eq!(app.now_playing().map(|t| t.title.as_str()), Some("Song B"));
     assert!(
         app.queue.is_empty(),
         "Queue must be consumed as Song B starts"
@@ -279,7 +259,7 @@ fn test_previous_track_rewinds_history_and_prepends_to_queue() {
 
     // History: [Song 1]. Currently playing: Song 2. Queue: [Song 3].
     app.push_history(make_test_track("Song 1", "Artist", "http://stream/1"));
-    app.now_playing = Some(make_test_track("Song 2", "Artist", "http://stream/2"));
+    app.set_playing(make_test_track("Song 2", "Artist", "http://stream/2"));
     app.enqueue(make_test_track("Song 3", "Artist", "http://stream/3"));
 
     assert_eq!(app.history.len(), 1);
@@ -290,10 +270,7 @@ fn test_previous_track_rewinds_history_and_prepends_to_queue() {
     assert!(prev_ok);
 
     // Song 1 must be playing now!
-    assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
-        Some("Song 1")
-    );
+    assert_eq!(app.now_playing().map(|t| t.title.as_str()), Some("Song 1"));
     assert_eq!(app.history.len(), 0);
 
     // Song 2 must be prepended to the front of the queue, in front of Song 3!
@@ -304,10 +281,7 @@ fn test_previous_track_rewinds_history_and_prepends_to_queue() {
     // Now user presses Next: Song 1 goes to history, Song 2 is played!
     let next_ok = play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
     assert!(next_ok);
-    assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
-        Some("Song 2")
-    );
+    assert_eq!(app.now_playing().map(|t| t.title.as_str()), Some("Song 2"));
     assert_eq!(app.history.len(), 1);
     assert_eq!(app.history[0].title, "Song 1");
     assert_eq!(app.queue.len(), 1);
@@ -333,7 +307,7 @@ fn test_previous_track_preserves_selected_queue_entry_id() {
         "Artist",
         "http://stream/prev",
     ));
-    app.now_playing = Some(make_test_track(
+    app.set_playing(make_test_track(
         "Track Current",
         "Artist",
         "http://stream/cur",
@@ -393,10 +367,7 @@ fn test_next_and_previous_do_not_operate_on_search_results() {
         resolve_tx.clone(),
         1,
     );
-    assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
-        Some("S1")
-    );
+    assert_eq!(app.now_playing().map(|t| t.title.as_str()), Some("S1"));
     assert!(app.queue.is_empty());
     assert!(app.history.is_empty());
 
@@ -404,19 +375,13 @@ fn test_next_and_previous_do_not_operate_on_search_results() {
     let next_result = play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
     assert!(!next_result);
     assert!(app.status.contains("QUEUE IS EMPTY"));
-    assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
-        Some("S1")
-    );
+    assert_eq!(app.now_playing().map(|t| t.title.as_str()), Some("S1"));
 
     // Pressing Previouswith empty history MUST NOT play S0 from search results!
     let prev_result = play_previous(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
     assert!(prev_result);
     assert!(app.status.contains("REPLAYING TRACK"));
-    assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
-        Some("S1")
-    );
+    assert_eq!(app.now_playing().map(|t| t.title.as_str()), Some("S1"));
 }
 
 #[test]
@@ -438,13 +403,13 @@ fn test_removed_resolving_queue_entry_does_not_start_playback() {
         resolve_tx.clone(),
         0,
     );
-    assert!(app.is_resolving);
+    assert!(app.is_resolving());
     let generation = app.resolve_generation;
     assert_eq!(app.pending_queue_entry_id, Some(entry_id));
 
     // User cancels / removes pending resolution
     app.cancel_pending_resolution();
-    assert!(!app.is_resolving);
+    assert!(!app.is_resolving());
     assert_eq!(app.pending_queue_entry_id, None);
 
     // Resolution response arrives
@@ -466,7 +431,7 @@ fn test_removed_resolving_queue_entry_does_not_start_playback() {
         "Stale resolution for removed/cancelled queue item must be rejected"
     );
     assert!(
-        app.now_playing.is_none(),
+        app.now_playing().is_none(),
         "Removed track must NOT start playing"
     );
 }
@@ -515,7 +480,7 @@ fn test_failed_queue_resolution_skips_to_next_queued_item() {
     assert!(app.status.contains("PLAYING: Working Track"));
     // Player automatically skips and starts the working track!
     assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        app.now_playing().map(|t| t.title.as_str()),
         Some("Working Track")
     );
     assert_eq!(app.queue.len(), 0);
@@ -538,7 +503,6 @@ fn test_repeat_one_does_not_interfere_with_failed_queue_resolution() {
         resolve_tx.clone(),
         0,
     );
-    app.played_once = true;
 
     // Queue: [Q_fail (unresolved), Q_good (resolved)]
     let fail_track = make_test_track("Q Fail", "Artist", "");
@@ -548,7 +512,7 @@ fn test_repeat_one_does_not_interfere_with_failed_queue_resolution() {
 
     // Manual Next: plays Q_fail
     play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
-    assert!(app.is_resolving);
+    assert!(app.is_resolving());
     let generation = app.resolve_generation;
 
     // Resolution fails for Q_fail
@@ -565,7 +529,7 @@ fn test_repeat_one_does_not_interfere_with_failed_queue_resolution() {
 
     // Must NOT restart Song A! Must advance to Q_good!
     assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        app.now_playing().map(|t| t.title.as_str()),
         Some("Q Good"),
         "Repeat::One on previous song must not restart previous song when a queued track fails"
     );
@@ -584,17 +548,11 @@ fn test_repeat_all_loops_session_history_when_queue_exhausted() {
 
     // Play Track 1
     play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
-    assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
-        Some("Track 1")
-    );
+    assert_eq!(app.now_playing().map(|t| t.title.as_str()), Some("Track 1"));
 
     // Play Track 2 (Track 1 pushed to history)
     play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
-    assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
-        Some("Track 2")
-    );
+    assert_eq!(app.now_playing().map(|t| t.title.as_str()), Some("Track 2"));
     assert_eq!(app.queue.len(), 0);
     assert_eq!(app.history.len(), 1);
     assert_eq!(app.history[0].title, "Track 1");
@@ -602,10 +560,7 @@ fn test_repeat_all_loops_session_history_when_queue_exhausted() {
     // Track 2 ends: Repeat::All re-enqueues History and loops!
     let advanced = advance_playback(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
     assert!(advanced);
-    assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
-        Some("Track 1")
-    );
+    assert_eq!(app.now_playing().map(|t| t.title.as_str()), Some("Track 1"));
 }
 
 #[test]
@@ -631,10 +586,7 @@ fn test_repeat_all_single_track_manual_next() {
         0,
     );
 
-    assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
-        Some("Song A")
-    );
+    assert_eq!(app.now_playing().map(|t| t.title.as_str()), Some("Song A"));
     assert!(app.queue.is_empty());
     assert!(app.history.is_empty());
 
@@ -645,7 +597,7 @@ fn test_repeat_all_single_track_manual_next() {
         "play_next on Repeat::All with single track must succeed"
     );
     assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        app.now_playing().map(|t| t.title.as_str()),
         Some("Song A"),
         "Song A must replay under Repeat::All"
     );
@@ -663,10 +615,7 @@ fn test_new_search_does_not_affect_active_queue_playback() {
     app.enqueue(make_test_track("Q0", "Artist", "http://stream/q0"));
     app.enqueue(make_test_track("Q1", "Artist", "http://stream/q1"));
     play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
-    assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
-        Some("Q0")
-    );
+    assert_eq!(app.now_playing().map(|t| t.title.as_str()), Some("Q0"));
 
     // User searches for something else
     let new_tracks = vec![
@@ -684,24 +633,18 @@ fn test_new_search_does_not_affect_active_queue_playback() {
     );
 
     // Q0 continues playing unaffected
-    assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
-        Some("Q0")
-    );
+    assert_eq!(app.now_playing().map(|t| t.title.as_str()), Some("Q0"));
 
     // Next plays Q1 from queue, NOT any of the new search results!
     let next_ok = play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
     assert!(next_ok);
-    assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
-        Some("Q1")
-    );
+    assert_eq!(app.now_playing().map(|t| t.title.as_str()), Some("Q1"));
 
     // When Q1 ends, playback stops; does NOT play New Search 0!
     let advance_result =
         advance_playback(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
     assert!(!advance_result);
-    assert!(app.now_playing.is_none());
+    assert!(app.now_playing().is_none());
 }
 
 #[test]
@@ -722,10 +665,7 @@ fn test_failed_queue_resolution_preserves_currently_playing_track_when_player_ac
         PlaybackSource::SearchResult { index: 0 },
     );
     assert!(player.is_playing(), "Player must be active playing Song A");
-    assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
-        Some("Song A")
-    );
+    assert_eq!(app.now_playing().map(|t| t.title.as_str()), Some("Song A"));
 
     // You press Next, selecting an unresolved queued song (Song B)
     let song_b = make_test_track("Song B", "Artist", "");
@@ -733,15 +673,12 @@ fn test_failed_queue_resolution_preserves_currently_playing_track_when_player_ac
 
     let next_ok = play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
     assert!(next_ok);
-    assert!(app.is_resolving);
+    assert!(app.is_resolving());
     let generation = app.resolve_generation;
 
     // Song A continues playing while the new song resolves
     assert!(player.is_playing());
-    assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
-        Some("Song A")
-    );
+    assert_eq!(app.now_playing().map(|t| t.title.as_str()), Some("Song A"));
     assert_eq!(app.queue.len(), 1, "Song B stays in queue while resolving");
 
     // The queued song fails to resolve
@@ -758,7 +695,7 @@ fn test_failed_queue_resolution_preserves_currently_playing_track_when_player_ac
     let handled =
         handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, fail_resp);
     assert!(!handled);
-    assert!(!app.is_resolving);
+    assert!(!app.is_resolving());
     assert_eq!(
         app.queue.len(),
         0,
@@ -768,7 +705,7 @@ fn test_failed_queue_resolution_preserves_currently_playing_track_when_player_ac
     // Critical assertions:
     // Audio/app state: Song A must remain now_playing and must NOT be cleared!
     assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        app.now_playing().map(|t| t.title.as_str()),
         Some("Song A"),
         "Song A must remain now_playing while MPV is still playing it"
     );
@@ -823,7 +760,7 @@ fn test_shuffle_once_strategy_predictably_plays_head_of_queue() {
     let next_ok = play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
     assert!(next_ok);
     assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        app.now_playing().map(|t| t.title.as_str()),
         Some(expected_first.as_str()),
         "Shuffle-once must play visible top item (index 0) of queue"
     );
@@ -833,7 +770,7 @@ fn test_shuffle_once_strategy_predictably_plays_head_of_queue() {
     let next_ok_2 = play_next(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
     assert!(next_ok_2);
     assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
+        app.now_playing().map(|t| t.title.as_str()),
         Some(expected_second.as_str()),
         "Subsequent play must continue consuming index 0"
     );
@@ -891,10 +828,7 @@ fn test_mpv_startup_failure_preserves_previous_track_in_history() {
         song_a,
         PlaybackSource::SearchResult { index: 0 },
     );
-    assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
-        Some("Song A")
-    );
+    assert_eq!(app.now_playing().map(|t| t.title.as_str()), Some("Song A"));
     assert!(player.is_playing());
     assert!(app.history.is_empty());
 
@@ -916,7 +850,7 @@ fn test_mpv_startup_failure_preserves_previous_track_in_history() {
         "Song A must be preserved in history on MPV startup failure"
     );
     assert_eq!(app.history[0].title, "Song A");
-    assert!(app.now_playing.is_none());
+    assert!(app.now_playing().is_none());
     assert!(!player.is_playing());
     assert!(app.status.contains("PLAYER ERROR"));
 
@@ -927,10 +861,7 @@ fn test_mpv_startup_failure_preserves_previous_track_in_history() {
         prev_ok,
         "Previous Track must be able to restore Song A from history"
     );
-    assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
-        Some("Song A")
-    );
+    assert_eq!(app.now_playing().map(|t| t.title.as_str()), Some("Song A"));
 }
 
 #[test]
@@ -954,7 +885,7 @@ fn test_cancellation_during_resolution_preserves_queue_entry() {
         0,
     );
     assert!(ok);
-    assert!(app.is_resolving);
+    assert!(app.is_resolving());
     let generation = app.resolve_generation;
 
     // Track must remain in app.queue while resolution is pending!
@@ -977,7 +908,7 @@ fn test_cancellation_during_resolution_preserves_queue_entry() {
             result: Ok(new_search_results),
         },
     );
-    assert!(!app.is_resolving);
+    assert!(!app.is_resolving());
     assert_eq!(app.resolve_generation, generation + 1);
 
     // Queued track must NOT have been silently dropped!
@@ -1123,7 +1054,7 @@ fn test_queue_failure_does_not_cause_endless_repeat_all_retries() {
         app.queue.is_empty(),
         "Queue must not be refilled on failure"
     );
-    assert!(app.now_playing.is_none());
+    assert!(app.now_playing().is_none());
 }
 
 #[test]
@@ -1145,7 +1076,7 @@ fn test_repeat_all_history_to_queue_refill_and_duplicate_handling() {
     app.push_history(track_b.clone()); // duplicate
 
     let current = make_test_track("Current Track", "Artist", "http://stream/cur");
-    app.now_playing = Some(current.clone());
+    app.set_playing(current.clone());
 
     let refilled = refill_queue_from_repeat_all(&mut app);
     assert!(refilled);
@@ -1159,7 +1090,7 @@ fn test_repeat_all_history_to_queue_refill_and_duplicate_handling() {
     assert!(titles.contains(&"Current Track"));
 
     // Now playing should have been cleared
-    assert!(app.now_playing.is_none());
+    assert!(app.now_playing().is_none());
     // History should have been consumed
     assert!(app.history.is_empty());
 }
@@ -1183,7 +1114,7 @@ fn test_resolution_cancellation_switching_removing_and_cancelling() {
         resolve_tx.clone(),
         0,
     );
-    assert!(app.is_resolving);
+    assert!(app.is_resolving());
     let gen_first = app.resolve_generation;
 
     // Switch to track 1
@@ -1194,7 +1125,7 @@ fn test_resolution_cancellation_switching_removing_and_cancelling() {
         resolve_tx.clone(),
         1,
     );
-    assert!(!app.is_resolving);
+    assert!(!app.is_resolving());
     assert_eq!(app.resolve_generation, gen_first + 1);
 
     // Late response for track 0 arrives
@@ -1213,10 +1144,7 @@ fn test_resolution_cancellation_switching_removing_and_cancelling() {
     let handled =
         handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, late_resp);
     assert!(!handled, "Late resolution must be rejected on track switch");
-    assert_eq!(
-        app.now_playing.as_ref().map(|t| t.title.as_str()),
-        Some("Track 1")
-    );
+    assert_eq!(app.now_playing().map(|t| t.title.as_str()), Some("Track 1"));
 
     // Removing queue entry while resolving
     let unresolved_q = make_test_track("Queued Unresolved", "Artist", "");
@@ -1228,14 +1156,14 @@ fn test_resolution_cancellation_switching_removing_and_cancelling() {
         resolve_tx.clone(),
         0,
     );
-    assert!(app.is_resolving);
+    assert!(app.is_resolving());
     assert_eq!(app.pending_queue_entry_id, Some(q_id));
 
     // Remove the queue item being resolved
     let removed = app.remove_queue_item(0);
     assert!(removed.is_some());
     assert!(
-        !app.is_resolving,
+        !app.is_resolving(),
         "Resolution must be cancelled on removing queue item"
     );
     assert_eq!(app.status, "RESOLVE CANCELLED");
@@ -1250,10 +1178,10 @@ fn test_resolution_cancellation_switching_removing_and_cancelling() {
         resolve_tx.clone(),
         0,
     );
-    assert!(app.is_resolving);
+    assert!(app.is_resolving());
     let gen_cancel = app.resolve_generation;
 
     app.cancel_pending_resolution();
-    assert!(!app.is_resolving);
+    assert!(!app.is_resolving());
     assert_eq!(app.resolve_generation, gen_cancel + 1);
 }
