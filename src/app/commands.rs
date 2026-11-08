@@ -3,7 +3,8 @@ use std::sync::mpsc::Sender;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{
-    runner::{now_playing, play_next, play_previous, play_queue_item, play_search_result},
+    playback::{now_playing, play_next, play_previous, play_queue_item, play_search_result},
+    search::refetch_if_needed,
     state::{App, ListFocus, Mode},
 };
 use crate::playback::{AudioPlayer, PlayerEvent, Repeat};
@@ -248,17 +249,18 @@ pub fn dispatch_action(
 ) {
     match action {
         Action::PlayPause => {
-            if app.is_resolving {
+            if app.is_resolving() {
                 app.cancel_pending_resolution();
                 app.set_status("RESOLVE CANCELLED");
                 return;
             }
 
-            if app.playing.is_some() || app.now_playing.is_some() {
+            if app.playing.is_some() || app.current_track().is_some() {
                 match player.toggle_pause() {
                     Ok(()) => {
-                        app.set_paused(!app.paused);
-                        app.set_status(if app.paused {
+                        let new_paused = !app.is_paused();
+                        app.set_paused(new_paused);
+                        app.set_status(if app.is_paused() {
                             "PAUSED".to_string()
                         } else {
                             now_playing(app)
@@ -358,7 +360,7 @@ pub fn dispatch_action(
             } else {
                 app.set_status(format!("PROVIDER: {}", app.settings.provider.label()));
             }
-            crate::app::runner::refetch_if_needed(app, search_tx);
+            refetch_if_needed(app, search_tx);
         }
         Action::ClearCache => match crate::config::clear_caches() {
             Ok(()) => app.set_status("CACHES CLEARED"),

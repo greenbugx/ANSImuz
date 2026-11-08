@@ -1,5 +1,6 @@
 use std::{
-    sync::{LazyLock, OnceLock},
+    collections::HashMap,
+    sync::{Arc, LazyLock, Mutex, OnceLock},
     time::Instant,
 };
 
@@ -10,10 +11,151 @@ use ratatui::{
     style::{Color, Modifier, Style},
     widgets::Paragraph,
 };
-use ratatui_image::{Image as TerminalImage, Resize, picker::Picker};
+use ratatui_image::{Image as TerminalImage, Resize, picker::Picker, protocol::Protocol};
 
 use super::{cache::request_art, decode::HQ_SOURCE_SIDE};
 
+pub const RESIZE_CACHE_CAPACITY: usize = 12;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ResizeKey {
+    pub artwork_id: String,
+    pub target_width: u32,
+    pub target_height: u32,
+}
+
+#[derive(Clone)]
+pub struct CachedRender {
+    pub image: Arc<DynamicImage>,
+    pub protocol: Option<Protocol>,
+}
+
+pub struct ResizeCache {
+    entries: HashMap<ResizeKey, CachedRender>,
+    order: Vec<ResizeKey>,
+    capacity: usize,
+}
+
+impl ResizeCache {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: Vec::new(),
+            capacity: capacity.max(1),
+        }
+    }
+
+    pub fn get(&mut self, key: &ResizeKey) -> Option<CachedRender> {
+        let entry = self.entries.get(key)?.clone();
+        if let Some(pos) = self.order.iter().position(|k| k == key) {
+            let k = self.order.remove(pos);
+            self.order.push(k);
+        }
+        Some(entry)
+    }
+
+    pub fn insert(&mut self, key: ResizeKey, value: CachedRender) {
+        if self.entries.contains_key(&key) {
+            self.entries.insert(key.clone(), value);
+            if let Some(pos) = self.order.iter().position(|k| k == &key) {
+                let k = self.order.remove(pos);
+                self.order.push(k);
+            }
+            return;
+        }
+
+        while self.entries.len() >= self.capacity {
+            if !self.order.is_empty() {
+                let oldest = self.order.remove(0);
+                self.entries.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+
+        self.order.push(key.clone());
+        self.entries.insert(key, value);
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+static RESIZE_CACHE: LazyLock<Mutex<ResizeCache>> =
+    LazyLock::new(|| Mutex::new(ResizeCache::new(RESIZE_CACHE_CAPACITY)));
+
+pub fn clear_resize_cache() {
+    if let Ok(mut lock) = RESIZE_CACHE.lock() {
+        lock.clear();
+    }
+}
+
+pub fn get_cached_resize(key: &ResizeKey) -> Option<CachedRender> {
+    let mut lock = RESIZE_CACHE.lock().ok()?;
+    lock.get(key)
+}
+
+pub fn artwork_id_for_url(url: &str) -> String {
+    if url.is_empty() {
+        return "empty".to_string();
+    }
+    let hash = url.bytes().fold(2166136261u32, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(16777619)
+    });
+    format!("{hash:08x}")
+}
+
+pub fn get_or_create_resized(
+    artwork_id: &str,
+    target_width: u32,
+    target_height: u32,
+    image: &DynamicImage,
+) -> Arc<DynamicImage> {
+    let key = ResizeKey {
+        artwork_id: artwork_id.to_string(),
+        target_width,
+        target_height,
+    };
+
+    let cached = {
+        let mut lock = match RESIZE_CACHE.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        lock.get(&key)
+    };
+
+    if let Some(entry) = cached {
+        return entry.image;
+    }
+
+    // Resize without holding lock
+    let resized = image.resize(target_width, target_height, FilterType::Triangle);
+    let arc_img = Arc::new(resized);
+
+    let entry = CachedRender {
+        image: Arc::clone(&arc_img),
+        protocol: None,
+    };
+
+    let mut lock = match RESIZE_CACHE.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    lock.insert(key, entry);
+
+    arc_img
+}
 static PICKER: OnceLock<Option<Picker>> = OnceLock::new();
 
 pub fn init_picker() {
@@ -79,7 +221,7 @@ pub fn render_art(
             render_animated_frame(frame, art_area, &frame_img);
         } else {
             let fallback = fallback_image(side);
-            if !(hq && render_hq(frame, hq_area, &fallback)) {
+            if !(hq && render_hq(frame, hq_area, &fallback, "fallback")) {
                 render_pixels(frame, art_area, fallback, side);
             }
         }
@@ -88,9 +230,10 @@ pub fn render_art(
     if url.is_empty() {
         render_fallback(frame);
     } else {
+        let art_id = artwork_id_for_url(url);
         match request_art(url, HQ_SOURCE_SIDE) {
             Ok(image) => {
-                if !(hq && render_hq(frame, hq_area, &image)) {
+                if !(hq && render_hq(frame, hq_area, &image, &art_id)) {
                     let (width, height) = image.dimensions();
                     let crop = width.min(height);
                     let cropped =
@@ -113,7 +256,7 @@ pub fn render_art(
     }
 }
 
-fn render_hq(frame: &mut Frame, area: Rect, image: &DynamicImage) -> bool {
+fn render_hq(frame: &mut Frame, area: Rect, image: &DynamicImage, artwork_id: &str) -> bool {
     let Some(picker) = picker() else {
         return false;
     };
@@ -122,10 +265,37 @@ fn render_hq(frame: &mut Frame, area: Rect, image: &DynamicImage) -> bool {
     let target_w = (area.width as u32 * u32::from(font_size.width)).max(1);
     let target_h = (area.height as u32 * u32::from(font_size.height)).max(1);
 
-    let scaled = image.resize(target_w, target_h, FilterType::Triangle);
+    let key = ResizeKey {
+        artwork_id: artwork_id.to_string(),
+        target_width: target_w,
+        target_height: target_h,
+    };
+
+    // Check cache under lock
+    let cached = {
+        let mut lock = match RESIZE_CACHE.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        lock.get(&key)
+    };
+
+    if let Some(cached) = &cached
+        && let Some(protocol) = &cached.protocol
+    {
+        frame.render_widget(TerminalImage::new(protocol).allow_clipping(true), area);
+        return true;
+    }
+
+    // Cache MISS: Perform expensive resize and protocol generation WITHOUT holding cache lock!
+    let scaled = if let Some(cached) = &cached {
+        (*cached.image).clone()
+    } else {
+        image.resize(target_w, target_h, FilterType::Triangle)
+    };
 
     let Ok(protocol) = picker.new_protocol(
-        scaled,
+        scaled.clone(),
         Size::new(area.width, area.height),
         Resize::Fit(Some(FilterType::Triangle)),
     ) else {
@@ -133,6 +303,18 @@ fn render_hq(frame: &mut Frame, area: Rect, image: &DynamicImage) -> bool {
     };
 
     frame.render_widget(TerminalImage::new(&protocol).allow_clipping(true), area);
+
+    // Store both scaled image and protocol in bounded cache
+    let entry = CachedRender {
+        image: Arc::new(scaled),
+        protocol: Some(protocol),
+    };
+
+    let mut lock = match RESIZE_CACHE.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    lock.insert(key, entry);
 
     true
 }
@@ -142,7 +324,9 @@ pub fn render_static_image(frame: &mut Frame, area: Rect, image: &DynamicImage) 
         return;
     }
 
-    if render_hq(frame, area, image) {
+    let (w, h) = image.dimensions();
+    let static_id = format!("static_{w}x{h}");
+    if render_hq(frame, area, image, &static_id) {
         return;
     }
 
@@ -163,7 +347,6 @@ pub fn render_static_image(frame: &mut Frame, area: Rect, image: &DynamicImage) 
 }
 
 fn render_animated_frame(frame: &mut Frame, art_area: Rect, image: &DynamicImage) {
-    // Make animation smaller (~68% of art_area height, at least 4 rows)
     let anim_rows = if art_area.height >= 12 {
         (art_area.height * 68 / 100).max(4)
     } else if art_area.height >= 8 {
@@ -191,7 +374,8 @@ fn render_animated_frame(frame: &mut Frame, art_area: Rect, image: &DynamicImage
 
     // Animation is HD only: always use high-definition terminal image protocol
     // if supported by the terminal, unaffected by the art_hq setting.
-    if render_hq(frame, hq_area, image) {
+    let frame_id = format!("anim_{}", super::animation::current_frame_index());
+    if render_hq(frame, hq_area, image, &frame_id) {
         return;
     }
 
@@ -408,4 +592,127 @@ fn render_pixels(frame: &mut Frame, area: Rect, image: DynamicImage, side: u32) 
     }
 
     frame.render_widget(Paragraph::new(lines), rect);
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_repeated_rendering_reuses_resized_image() {
+        let _guard = crate::artwork::ARTWORK_TEST_LOCK.lock().unwrap();
+        clear_resize_cache();
+        let dummy = DynamicImage::new_rgb8(200, 200);
+
+        let res1 = get_or_create_resized("art_1", 80, 80, &dummy);
+        let res2 = get_or_create_resized("art_1", 80, 80, &dummy);
+
+        assert!(
+            Arc::ptr_eq(&res1, &res2),
+            "Repeated rendering with same key must return identical cached Arc allocation without re-resizing"
+        );
+    }
+
+    #[test]
+    fn test_dimension_change_causes_natural_cache_miss_and_new_resize() {
+        let _guard = crate::artwork::ARTWORK_TEST_LOCK.lock().unwrap();
+        clear_resize_cache();
+        let dummy = DynamicImage::new_rgb8(200, 200);
+
+        let res1 = get_or_create_resized("art_1", 80, 80, &dummy);
+        let res2 = get_or_create_resized("art_1", 120, 120, &dummy);
+
+        assert!(
+            !Arc::ptr_eq(&res1, &res2),
+            "Changed dimensions must trigger a cache miss and new resize"
+        );
+        assert_eq!(res1.width(), 80);
+        assert_eq!(res1.height(), 80);
+        assert_eq!(res2.width(), 120);
+        assert_eq!(res2.height(), 120);
+    }
+
+    #[test]
+    fn test_artwork_change_causes_natural_cache_miss() {
+        let _guard = crate::artwork::ARTWORK_TEST_LOCK.lock().unwrap();
+        clear_resize_cache();
+        let dummy = DynamicImage::new_rgb8(200, 200);
+
+        let res1 = get_or_create_resized("art_1", 80, 80, &dummy);
+        let res2 = get_or_create_resized("art_2", 80, 80, &dummy);
+
+        assert!(
+            !Arc::ptr_eq(&res1, &res2),
+            "Different artwork IDs must naturally miss"
+        );
+    }
+
+    #[test]
+    fn test_resize_cache_bounded_capacity_and_lru_eviction() {
+        let mut cache = ResizeCache::new(RESIZE_CACHE_CAPACITY);
+        let dummy = Arc::new(DynamicImage::new_rgb8(50, 50));
+
+        for i in 0..(RESIZE_CACHE_CAPACITY + 5) {
+            let key = ResizeKey {
+                artwork_id: format!("eviction_test_{i}"),
+                target_width: 40,
+                target_height: 40,
+            };
+            cache.insert(
+                key,
+                CachedRender {
+                    image: Arc::clone(&dummy),
+                    protocol: None,
+                },
+            );
+        }
+
+        assert_eq!(
+            cache.len(),
+            RESIZE_CACHE_CAPACITY,
+            "Cache must be strictly bounded at capacity"
+        );
+
+        // Oldest entry (eviction_test_0) must have been evicted
+        let old_key = ResizeKey {
+            artwork_id: "eviction_test_0".to_string(),
+            target_width: 40,
+            target_height: 40,
+        };
+        assert!(
+            cache.get(&old_key).is_none(),
+            "Oldest entry must be evicted"
+        );
+
+        // Most recent entry must still be in cache
+        let recent_key = ResizeKey {
+            artwork_id: format!("eviction_test_{}", RESIZE_CACHE_CAPACITY + 4),
+            target_width: 40,
+            target_height: 40,
+        };
+        assert!(
+            cache.get(&recent_key).is_some(),
+            "Most recent entry must remain in cache"
+        );
+    }
+
+    #[test]
+    fn test_clear_resize_cache() {
+        let _guard = crate::artwork::ARTWORK_TEST_LOCK.lock().unwrap();
+        let dummy = DynamicImage::new_rgb8(50, 50);
+        let _ = get_or_create_resized("to_be_cleared", 40, 40, &dummy);
+
+        assert!(!RESIZE_CACHE.lock().unwrap().is_empty());
+        clear_resize_cache();
+        assert!(RESIZE_CACHE.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_artwork_id_for_url_is_deterministic_and_compact() {
+        let url = "https://img.youtube.com/vi/abc123xyz/hqdefault.jpg";
+        let id1 = artwork_id_for_url(url);
+        let id2 = artwork_id_for_url(url);
+        assert_eq!(id1, id2);
+        assert_eq!(id1.len(), 8);
+        assert_eq!(artwork_id_for_url(""), "empty");
+    }
 }

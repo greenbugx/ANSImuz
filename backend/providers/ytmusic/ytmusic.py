@@ -1,14 +1,13 @@
 from ytmusicapi import YTMusic
 
 from artwork.thumbnails import prewarm_artwork_cache
-
-
+from exceptions import classify_error
 def search(query):
     try:
         yt = YTMusic()
         search_results = yt.search(query, filter="songs")
     except Exception as e:
-        raise RuntimeError(f"YT Music search failed: {e}") from e
+        raise classify_error("YouTube Music search failed", e) from e
 
     tracks = []
     for item in search_results[:10]:

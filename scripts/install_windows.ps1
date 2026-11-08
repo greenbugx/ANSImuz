@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Automated Windows installation script for ANSImuz.
 .DESCRIPTION
@@ -18,6 +18,8 @@ $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 $TotalSteps = 6
+$CheckMark = [char]0x2713
+$ArrowMark = [char]0x2192
 
 function Write-Step {
     param (
@@ -32,13 +34,13 @@ function Write-Step {
 
 function Write-Success {
     param ([string]$Message)
-    Write-Host "  ✓ " -ForegroundColor Green -NoNewline
+    Write-Host "  $CheckMark " -ForegroundColor Green -NoNewline
     Write-Host "$Message" -ForegroundColor Gray
 }
 
 function Write-Info {
     param ([string]$Message)
-    Write-Host "  → " -ForegroundColor Yellow -NoNewline
+    Write-Host "  $ArrowMark " -ForegroundColor Yellow -NoNewline
     Write-Host "$Message" -ForegroundColor Gray
 }
 
@@ -53,19 +55,19 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = Resolve-Path (Join-Path $ScriptDir "..")
 Set-Location -Path $RepoRoot
 
-Write-Host @"
-
- ▄░░░▄ ░░░░▄ ▄░░░ ░░ ▄░░▄░░░▄ ░░ ░░ ░░░▄      ░░ ░░░░▄ ▄░░░ ░░░░░░  ▄░░░▄ ░░  ░░  ▄░░░  ░░░░▄
- ░░ ░░ ░░ ░░ ░░   ░░ ░░ ░░ ░░ ░░ ░░   ░░      ░░ ░░ ░░ ░░   ▀ ░░ ▀  ░░ ░░ ░░  ░░  ░░ ▀  ░░ ░░
- ▒▒▒▒▒ ▒▒ ▒▒ ▀▒▒▄ ▒▒ ▒▒ ▒▒ ▒▒ ▒▒ ▒▒ ▄▒▒▀      ▒▒ ▒▒ ▒▒ ▀▒▒▄   ▒▒    ▒▒▒▒▒ ▒▒  ▒▒  ▒▒▒   ▒▒▒▒▀
- ▓█ ▓█ ▓█ ▓█   ▓█ ▓█ ▓█ ▓█ ▓█ ▓█ ▓█ ▓█        ▓█ ▓█ ▓█   ▓█   ▓█    ▓█ ▓█ ▓█  ▓█  ▓█    ▓█ ▓█
- ▄▄ ▄▄ ▄▄ ▄▄   ▄▄ ▄▄ ▄▄ ▄▄ ▄▄ ▄▄ ▄▄ ▄▄        ▄▄ ▄▄ ▄▄   ▄▄   ▄▄    ▄▄ ▄▄ ▄▄  ▄▄  ▄▄    ▄▄ ▄▄
- ░░ ░░ ░░ ░░   ░░ ░░ ░░ ░░ ░░ ░░ ░░ ░░        ░░ ░░ ░░   ░░   ░░    ░░ ░░ ▓▓  ▓▓  ░░    ░░ ░░
- ▒▒ ▒▒ ▒▒ ▒▒   ▒▒ ▒▒ ▒▒    ▒▒ ▒▒ ▒▒ ▒▒        ▒▒ ▒▒ ▒▒   ▒▒   ▒▒    ▒▒ ▒▒ ▒▒  ▒▒  ▒▒ ▄  ▒▒ ▒▒
-▄▓▓ ▓▓ ▓▓ ▓▓ ▓▓▓▀ ▓▓ ▓▓    ▓▓ ▀▓▓▓▀ ▀▓▓▓      ▓▓ ▓▓ ▓▓ ▓▓▓▀  ▄▓▓▄  ▄▓▓ ▓▓ ▀▓▓ ▀▓▓ ▀▓▓▓ ▄▓▓ ▓▓
-
-"@ -ForegroundColor Green
-
+$AsciiArtPath = Join-Path $RepoRoot "ascii.art"
+if (Test-Path $AsciiArtPath) {
+    Get-Content $AsciiArtPath -Encoding UTF8 | ForEach-Object { Write-Host $_ -ForegroundColor Green }
+} else {
+    Write-Host "`n  ▄████████ ███▄▄▄▄      ▄████████  ▄█    ▄▄▄▄███▄▄▄▄   ███    █▄   ▄███████▄  " -ForegroundColor Green
+    Write-Host "  ███    ███ ███▀▀▀██▄   ███    ███ ███  ▄██▀▀▀███▀▀▀██▄ ███    ███ ██▀     ▄██ " -ForegroundColor Green
+    Write-Host "  ███    ███ ███   ███   ███    █▀  ███▌ ███   ███   ███ ███    ███       ▄███▀ " -ForegroundColor Green
+    Write-Host "  ███    ███ ███   ███   ███        ███▌ ███   ███   ███ ███    ███  ▀█▀▄███▀▄▄ " -ForegroundColor Green
+    Write-Host "▀███████████ ███   ███ ▀███████████ ███▌ ███   ███   ███ ███    ███   ▄███▀   ▀ " -ForegroundColor Green
+    Write-Host "  ███    ███ ███   ███          ███ ███  ███   ███   ███ ███    ███ ▄███▀       " -ForegroundColor Green
+    Write-Host "  ███    ███ ███   ███    ▄█    ███ ███  ███   ███   ███ ███    ███ ███▄     ▄█ " -ForegroundColor Green
+    Write-Host "  ███    █▀   ▀█   █▀   ▄████████▀  █▀    ▀█   ███   █▀  ████████▀   ▀████████▀ `n" -ForegroundColor Green
+}
 Write-Host "ANSImuz Windows Automated Installation Script" -ForegroundColor White
 Write-Host "Target repository: $RepoRoot`n" -ForegroundColor Gray
 

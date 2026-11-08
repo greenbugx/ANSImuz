@@ -356,9 +356,8 @@ pub fn render_player(
     frame.render_widget(player_block, layout.col_player);
 
     let current = app
-        .now_playing
-        .as_ref()
-        .or(app.pending_track.as_ref())
+        .current_track()
+        .or(app.pending_track())
         .or_else(|| app.tracks.get(app.selected));
 
     if layout.show_logo {
@@ -415,7 +414,7 @@ pub fn render_player(
         theme.bold_primary,
     );
 
-    let song_loading = (app.now_playing.is_some() || app.is_resolving) && playback.is_none();
+    let song_loading = (app.current_track().is_some() || app.is_resolving()) && playback.is_none();
     render_progress_bar(
         frame,
         layout.bar_area,
@@ -430,7 +429,7 @@ pub fn render_player(
         frame,
         &layout.controls_slots,
         app.shuffle,
-        app.paused,
+        app.is_paused(),
         app.repeat,
         theme.bold_primary,
         theme.dim,

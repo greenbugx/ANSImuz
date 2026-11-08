@@ -16,9 +16,8 @@ fn current_palette_color(app: &App) -> Option<(u8, u8, u8)> {
     }
 
     let current = app
-        .now_playing
-        .as_ref()
-        .or(app.pending_track.as_ref())
+        .current_track()
+        .or(app.pending_track())
         .or_else(|| app.tracks.get(app.selected));
 
     current.and_then(|track| crate::artwork::dominant_color(&track.art_url))

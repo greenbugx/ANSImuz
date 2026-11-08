@@ -12,16 +12,19 @@ All contributors and participants are expected to adhere to our [Code of Conduct
 
 ---
 
-## Development Prerequisites
+## Supported Operating Systems & Prerequisites
+
+ANSImuz supports:
+- **Linux** (x86_64): Primary platform (tested on Arch Linux, Fedora). Uses Unix-domain sockets for MPV IPC.
+- **Windows** (x86_64): Native Windows 10/11 support via PowerShell installer (`scripts/install_windows.ps1`), native `mpv`/`yt-dlp`, and cross-platform IPC over Windows Named Pipes (`\\.\pipe\...`). Also supported through `WSL2`.
 
 Ensure the following tools are installed on your system:
 
 - **Rust toolchain**: 1.85+ (compatible with the Rust 2024 edition).
 - **Python**: 3.10 or higher (with development headers for PyO3 linking).
-- **[mpv](https://mpv.io/)**: For audio playback.
-- **[yt-dlp](https://github.com/yt-dlp/yt-dlp)**: For stream resolution and media fetching.
+- **[mpv](https://mpv.io/)**: Version 0.35+ recommended, with JSON IPC enabled (Unix-domain sockets on Linux, Named Pipes on Windows).
+- **[yt-dlp](https://github.com/yt-dlp/yt-dlp)**: For stream resolution and media extraction.
 - **OpenSSL / libssl-dev**: Required for native network operations.
-
 ---
 
 ## Setting Up Your Environment
@@ -65,18 +68,31 @@ The codebase is organized into modular boundaries:
 ```
 ANSImuz/
 ├── src/
-│   ├── app/          # State management (queue, history, focus), key routing, runner
-│   ├── artwork/      # Image decoding, thumbnail cache, palette extraction, and renderer
-│   ├── config/       # Settings persistence and platform-aware cache paths
-│   ├── music/        # Track models, search interfaces, and lazy resolution
-│   ├── playback/     # MPV IPC process supervision, volume, and playback controls
+│   ├── app/          # Application loop, state machine, and orchestration
+│   │   ├── runner.rs     # Main application event loop and terminal interaction
+│   │   ├── playback.rs   # Playback lifecycle, queue sequencing, history, and resolution
+│   │   ├── search.rs     # Search result handling, refetching, and pagination
+│   │   ├── events.rs     # Raw key event handling and input routing
+│   │   ├── commands.rs   # Command palette actions and dispatch
+│   │   ├── state.rs      # Authoritative PlaybackState and application state
+│   │   └── mod.rs        # App module re-exports
+│   ├── artwork/      # Image decoding, bounded memory cache, resize cache, renderer
+│   ├── config/       # Settings persistence (TOML), platform cache dirs, atomic writes
+│   ├── music/        # Track model, identity policy, backend PyO3 bridge execution
+│   ├── playback/     # MPV IPC process supervision, cross-platform transport (ipc.rs), audio prefetch
+│   │   ├── events.rs     # PlayerEvent enum (Position, Ended, Failed)
+│   │   ├── ipc.rs        # Cross-platform local IPC endpoints & streams (interprocess)
+│   │   ├── mpv.rs        # AudioPlayer implementation, observer loop, stream dumping
+│   │   ├── repeat.rs     # Repeat mode sequencing
+│   │   └── mod.rs        # Playback module exports
 │   ├── terminal/     # Terminal raw mode setup and clean teardown
 │   ├── ui/           # Ratatui components (queue_list, track_list), screens, theme
 │   ├── paths.rs      # Runtime data directory resolution (backend/ and assets/)
 │   ├── lib.rs        # Library interface for integration tests
-│   └── main.rs       # Minimal application entry point
+│   └── main.rs       # Application entry point (cleans stale caches, boots TUI)
 ├── backend/
 │   ├── bridge.py     # PyO3 integration boundary
+│   ├── exceptions.py # Structured provider exception hierarchy
 │   ├── artwork/      # Python thumbnail utilities and prewarming
 │   ├── providers/    # Music provider implementations (ytmusic, spotify)
 │   └── tests/        # Python backend unit and smoke tests
@@ -85,7 +101,13 @@ ANSImuz/
 ├── packaging/
 │   ├── arch/         # PKGBUILD for Arch Linux
 │   └── rpm/          # RPM specs for Fedora (COPR)
-├── tests/            # Integration test suites (queue, queue_playback, resolution, artwork)
+├── tests/            # Integration test suites:
+│   ├── queue.rs          # Queue manipulation and focus interactions
+│   ├── queue_playback.rs # Queue priority, repeat modes, failure continuation
+│   ├── resolution.rs     # Generation tracking, slot identity, cancellation
+│   ├── lifecycle.rs      # Explicit Ended/Failed events, shutdown, track switching
+│   ├── memory_session.rs # Long-session cache bounds, memory leakage, cache clearing
+│   └── artwork.rs        # Disk cache persistence, corruption handling
 └── .github/          # CI workflows
 ```
 
@@ -97,6 +119,9 @@ ANSImuz/
 - **Queue Deduplication**: Use `app.enqueue()` or `app.queue_contains()` to prevent duplicate tracks from being added to the queue.
 - **Unicode Safety**: Never slice strings by raw byte offsets when displaying text in the TUI. Use character-based bounds or the project's `truncate` helper (`crate::ui::theme::truncate`) to prevent panics on multibyte characters.
 - **Runtime Data Paths**: Locate `backend/` and `assets/` only through `crate::paths::data_dir()`. Never use `env!("CARGO_MANIFEST_DIR")` or other compile-time paths for files needed at runtime, because that bakes the build directory into release binaries and breaks packaged installs. Use `option_env!` only for optional build-time overrides such as `ANSIMUZ_DATA_DIR`.
+- **Cross-Platform IPC**: MPV communication uses `IpcEndpoint` and `IpcStream` (`crate::playback::ipc`). On Unix, endpoints use filesystem paths (`.sock`); on Windows, endpoints use named pipes (`\\.\pipe\...`). Never invoke filesystem existence checks or deletions (`Path::exists()`, `fs::remove_file()`) on Windows named pipes.
+- **Observer Thread Concurrency & Reaping**: The observer decouples periodic query writing from continuous response reading to support platforms (such as Windows named pipes) that lack socket-level read timeouts. Background writer threads must always be wrapped in a RAII guard (`WriterThreadGuard`) and joined when the observer exits, and `AudioPlayer::stop()` must join the observer thread.
+- **Test Concurrency & State Isolation**: Tests that mutate shared global caches (such as `RESIZE_CACHE` or `art_cache()`) must acquire `crate::artwork::ARTWORK_TEST_LOCK` to prevent race conditions during parallel test execution. Self-contained data structure tests (like `ResizeCache`) must instantiate local, isolated instances.
 - **Style & Consistency**: Keep code formatting consistent. Avoid unnecessary abstractions or dead code.
 - **Comments**: Keep comments minimal and focused strictly on explaining non-obvious requirements.
 
@@ -164,6 +189,84 @@ Notes for maintainers:
 - Build `python-spotifyscraper` before `ansimuz`, and build both for **every Fedora release enabled in the project**. Packages depend on that release's Python version, so a release missing a build fails to install with `nothing provides python(abi) = ...`.
 - Do not commit `*.rpm`, `*.src.rpm`, or source tarballs.
 
+
+---
+
+## Packaging (Windows Portable Release)
+
+ANSImuz provides a zero-dependency standalone portable archive (`ansimuz-v<x>-windows-x64.zip`) for Windows 10/11. The bundle packages the compiled binary, visual assets, backend bridge, and an **embedded Python runtime**, allowing users to run ANSImuz without needing Python pre-installed on their systems.
+
+### Bundle Structure
+
+```text
+ansimuz-v<x>-windows-x64/
+├── ansimuz.exe              # Release binary compiled with MSVC
+├── assets/                  # Logos and visualizer animation frames
+│   ├── frames/
+│   ├── logo_nobg.png 
+│   └── logo.png      
+├── backend/                 # PyO3 Python bridge and providers
+│   ├── bridge.py
+│   ├── exceptions.py
+│   ├── artwork/
+│   └── providers/
+├── python314.dll            # Python dynamic library (matching PyO3 build version)
+├── python3.dll              # Python stable ABI stub
+├── python314.zip            # Standard library archive from embeddable package
+├── python314._pth           # Module search path configuration
+├── *.pyd                    # Native C extension modules from embeddable package (_socket, _ssl, etc.)
+└── Lib/
+    └── site-packages/       # Organized dependencies (requests, ytmusicapi, spotifyscraper, pillow)
+```
+### Packaging Steps
+
+1. **Build the release binary**:
+   
+   ```powershell
+   cargo build --release
+   ```
+
+2. **Download the matching Python Windows Embeddable Package**:
+
+   Download `python-3.x.x-embed-amd64.zip` from [python.org](https://www.python.org/downloads/windows/) matching your build toolchain's Python version. Extract its contents into the staging directory.
+
+3. **Install Python dependencies into the organized `Lib\site-packages` subfolder**:
+
+   Run this command from your **ANSImuz repository root** using your development environment's `pip` (pip is not included in the embeddable `python.exe`):
+
+   ```powershell
+   # From the repository root using pip:
+   pip install --target "$StagingDir\Lib\site-packages" -r requirements.txt
+
+   # Or using your virtual environment Python:
+   .\.venv\Scripts\python.exe -m pip install --target "$StagingDir\Lib\site-packages" -r requirements.txt
+   ```
+4. **Append `Lib\site-packages` to the `._pth` file**:
+
+   Open the `._pth` file in the staging directory (e.g. `python314._pth`) and add:
+   
+   ```text
+   Lib\site-packages
+   ```
+   
+   *(Note: ANSImuz also auto-detects `Lib/site-packages` at startup).*
+
+5. **Copy assets and binaries**:
+
+   Copy `target\release\ansimuz.exe`, `backend\`, and `assets\` into the staging directory next to `python3XX.dll`.
+
+6. **Create the zip archive**:
+   
+   ```powershell
+   Compress-Archive -Path "$StagingDir\*" -DestinationPath "ansimuz-windows-x64.zip"
+   ```
+
+### Verifying the Portable Release
+
+To verify the portable bundle before publishing:
+1. Extract the `.zip` archive on a clean Windows machine (or in a sandbox/VM) without Python registered in system `PATH`.
+2. Ensure `mpv` and `yt-dlp` are installed in `PATH`.
+3. Run `ansimuz.exe` from the unzipped directory and confirm search, playback, artwork decoding, and animation frames initialize properly.
 ---
 
 ## Validation Before Submitting
@@ -180,26 +283,48 @@ cargo check --all-targets
 # Run Clippy lints (warnings treated as errors)
 cargo clippy --all-targets -- -D warnings
 
-# Run the test suite
+# Run all unit and integration tests
 cargo test
 
+# Run a specific integration test target:
+cargo test --test queue             # Queue operations and cursor focus
+cargo test --test queue_playback    # Queue priority, repeat modes, error recovery
+cargo test --test resolution        # Async track resolution, stale generation rejection
+cargo test --test lifecycle         # Explicit Ended/Failed lifecycle events, track switching
+cargo test --test memory_session    # Bounded cache capacities, long session memory stability
+cargo test --test artwork           # Disk caching, file format detection, corruption recovery
+
 # Check Python syntax and run backend tests
-python -m py_compile backend/bridge.py backend/artwork/thumbnails.py backend/providers/spotify/spotify.py backend/providers/ytmusic/ytmusic.py
-python -m unittest discover -s backend/tests -p "test_*.py"
+python -m py_compile backend/bridge.py backend/exceptions.py backend/artwork/thumbnails.py backend/providers/spotify/spotify.py backend/providers/ytmusic/ytmusic.py
+python -m unittest discover -s backend/tests -p "test_*.py" -v
+```
 
-If your change touches `packaging/arch/` or `packaging/rpm/`, also run the matching packaging test: [Packaging (Arch Linux)](#packaging-arch-linux) or [Packaging (Fedora / COPR)](#packaging-fedora--copr).
+### Testing MPV Process Supervision & IPC
 
+ANSImuz separates player orchestration from system processes using `AudioPlayer::new_mock()`, allowing all test suites to run deterministically offline without requiring audio hardware.
+
+To test real MPV process lifecycle management, graceful shutdown, SIGKILL timeouts, and JSON IPC parsing:
+
+```bash
+# Run MPV supervision and cross-platform IPC transport unit tests:
+cargo test --lib playback::
+
+# Smoke test live audio playback and streaming (requires internet and active audio device):
+cargo run
+```
+
+### Network Access in Tests
+
+- **Offline Tests**: All Rust unit tests (`cargo test --lib`), integration suites (`cargo test --test <name>`), and Python unit tests run 100% offline using mock drivers.
+- **Online Operations**: Live searching, streaming, and artwork prefetching during `cargo run` require an active internet connection.
 ---
 
 ## Continuous Integration (CI)
 
-Our GitHub Actions pipeline automatically checks every push and pull request targeting `main`:
+Our GitHub Actions pipeline automatically checks every push and pull request targeting `main` across multiple platforms:
 
-- **Formatting**: `cargo fmt --check`
-- **Type & Target Checks**: `cargo check --all-targets`
-- **Linter**: `cargo clippy --all-targets -- -D warnings`
-- **Build & Tests**: `cargo build --verbose` and `cargo test --verbose`
-- **Python Syntax**: Bytecode compilation (`py_compile`) across all backend modules
+- **Linux** (`ubuntu-latest`): Formatting, type checks, Clippy, unit and integration test suites, and build.
+- **Windows** (`windows-latest`): Python tests, format check, compilation, Clippy, verbose tests, and release build on native MSVC toolchain.
 
 CI automatically skips runs when only documentation (`*.md`), `LICENSE`, or `.gitignore` files are changed.
 

@@ -12,7 +12,7 @@ use crate::artwork::render_static_image;
 use crate::ui::theme::Theme;
 
 static LOGO_IMAGE: LazyLock<Option<DynamicImage>> = LazyLock::new(|| {
-    let path = crate::paths::data_dir().join("assets/logo_nobg.png");
+    let path = crate::paths::assets_dir().join("logo_nobg.png");
     let bytes = std::fs::read(path).ok()?;
     image::load_from_memory(&bytes).ok()
 });

@@ -27,7 +27,7 @@ concurrency:
 
 jobs:
   ci:
-    name: Checks, Format & Build
+    name: Linux Build & Test
     runs-on: ubuntu-latest
 
     steps:
@@ -47,7 +47,7 @@ jobs:
 
       - name: Python syntax check and unit tests
         run: |
-          python -m py_compile backend/bridge.py backend/artwork/thumbnails.py backend/providers/spotify/spotify.py backend/providers/ytmusic/ytmusic.py
+          python -m py_compile backend/bridge.py backend/exceptions.py backend/artwork/thumbnails.py backend/providers/spotify/spotify.py backend/providers/ytmusic/ytmusic.py
           python -m unittest discover -s backend/tests -p "test_*.py" -v
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -76,3 +76,52 @@ jobs:
 
       - name: Run tests
         run: cargo test --verbose
+
+  windows:
+    name: Windows Build & Tests
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+          architecture: "x64"
+          cache: "pip"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-pc-windows-msvc
+          components: rustfmt, clippy
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Python syntax check and unit tests
+        run: |
+          python -m py_compile backend/bridge.py backend/exceptions.py backend/artwork/thumbnails.py backend/providers/spotify/spotify.py backend/providers/ytmusic/ytmusic.py
+          python -m unittest discover -s backend/tests -p "test_*.py" -v
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Cargo check
+        run: cargo check --all-targets
+
+      - name: Clippy check
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --verbose
+
+      - name: Release build
+        run: cargo build --release

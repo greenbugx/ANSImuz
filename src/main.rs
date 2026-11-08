@@ -1,6 +1,7 @@
 use ansimuz::{app, artwork, terminal};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    ansimuz::config::clean_stale_caches();
     artwork::init_picker();
 
     let mut term = terminal::setup()?;
