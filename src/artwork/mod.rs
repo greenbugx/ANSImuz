@@ -18,3 +18,6 @@ pub use render::{
     get_cached_resize, get_or_create_resized, init_picker, loading_moons, render_art,
     render_static_image,
 };
+
+#[cfg(test)]
+pub static ARTWORK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

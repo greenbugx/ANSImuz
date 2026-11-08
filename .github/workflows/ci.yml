@@ -27,7 +27,7 @@ concurrency:
 
 jobs:
   ci:
-    name: Checks, Format & Build
+    name: Linux Build & Test
     runs-on: ubuntu-latest
 
     steps:

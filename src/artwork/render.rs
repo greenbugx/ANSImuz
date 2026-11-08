@@ -347,7 +347,6 @@ pub fn render_static_image(frame: &mut Frame, area: Rect, image: &DynamicImage) 
 }
 
 fn render_animated_frame(frame: &mut Frame, art_area: Rect, image: &DynamicImage) {
-    // Make animation smaller (~68% of art_area height, at least 4 rows)
     let anim_rows = if art_area.height >= 12 {
         (art_area.height * 68 / 100).max(4)
     } else if art_area.height >= 8 {
@@ -600,6 +599,7 @@ mod tests {
 
     #[test]
     fn test_repeated_rendering_reuses_resized_image() {
+        let _guard = crate::artwork::ARTWORK_TEST_LOCK.lock().unwrap();
         clear_resize_cache();
         let dummy = DynamicImage::new_rgb8(200, 200);
 
@@ -614,6 +614,7 @@ mod tests {
 
     #[test]
     fn test_dimension_change_causes_natural_cache_miss_and_new_resize() {
+        let _guard = crate::artwork::ARTWORK_TEST_LOCK.lock().unwrap();
         clear_resize_cache();
         let dummy = DynamicImage::new_rgb8(200, 200);
 
@@ -632,6 +633,7 @@ mod tests {
 
     #[test]
     fn test_artwork_change_causes_natural_cache_miss() {
+        let _guard = crate::artwork::ARTWORK_TEST_LOCK.lock().unwrap();
         clear_resize_cache();
         let dummy = DynamicImage::new_rgb8(200, 200);
 
@@ -646,17 +648,26 @@ mod tests {
 
     #[test]
     fn test_resize_cache_bounded_capacity_and_lru_eviction() {
-        clear_resize_cache();
-        let dummy = DynamicImage::new_rgb8(50, 50);
+        let mut cache = ResizeCache::new(RESIZE_CACHE_CAPACITY);
+        let dummy = Arc::new(DynamicImage::new_rgb8(50, 50));
 
         for i in 0..(RESIZE_CACHE_CAPACITY + 5) {
-            let id = format!("eviction_test_{i}");
-            let _ = get_or_create_resized(&id, 40, 40, &dummy);
+            let key = ResizeKey {
+                artwork_id: format!("eviction_test_{i}"),
+                target_width: 40,
+                target_height: 40,
+            };
+            cache.insert(
+                key,
+                CachedRender {
+                    image: Arc::clone(&dummy),
+                    protocol: None,
+                },
+            );
         }
 
-        let mut lock = RESIZE_CACHE.lock().unwrap();
         assert_eq!(
-            lock.len(),
+            cache.len(),
             RESIZE_CACHE_CAPACITY,
             "Cache must be strictly bounded at capacity"
         );
@@ -667,7 +678,10 @@ mod tests {
             target_width: 40,
             target_height: 40,
         };
-        assert!(lock.get(&old_key).is_none(), "Oldest entry must be evicted");
+        assert!(
+            cache.get(&old_key).is_none(),
+            "Oldest entry must be evicted"
+        );
 
         // Most recent entry must still be in cache
         let recent_key = ResizeKey {
@@ -676,13 +690,14 @@ mod tests {
             target_height: 40,
         };
         assert!(
-            lock.get(&recent_key).is_some(),
+            cache.get(&recent_key).is_some(),
             "Most recent entry must remain in cache"
         );
     }
 
     #[test]
     fn test_clear_resize_cache() {
+        let _guard = crate::artwork::ARTWORK_TEST_LOCK.lock().unwrap();
         let dummy = DynamicImage::new_rgb8(50, 50);
         let _ = get_or_create_resized("to_be_cleared", 40, 40, &dummy);
 

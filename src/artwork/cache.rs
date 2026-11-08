@@ -350,9 +350,9 @@ mod tests {
 
     #[test]
     fn test_artwork_status_observable() {
+        let _guard = crate::artwork::ARTWORK_TEST_LOCK.lock().unwrap();
         let url = "https://example.com/status_test";
         assert!(artwork_status(url, 64).is_none());
-
         let key = (url.to_string(), 64);
         let dummy = Arc::new(DynamicImage::new_rgb8(10, 10));
         art_cache()
@@ -367,6 +367,7 @@ mod tests {
 
     #[test]
     fn test_clear_memory_cache_clears_art_cache_and_resize_cache() {
+        let _guard = crate::artwork::ARTWORK_TEST_LOCK.lock().unwrap();
         let dummy = Arc::new(DynamicImage::new_rgb8(10, 10));
         art_cache()
             .lock()
