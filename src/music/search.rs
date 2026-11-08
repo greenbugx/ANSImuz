@@ -170,6 +170,19 @@ pub fn initialize_backend<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyModule>
         path.insert(0, backend_str.as_ref())?;
     }
 
+    let site_packages = crate::paths::data_dir().join("Lib").join("site-packages");
+    if site_packages.is_dir() {
+        let site_str = site_packages.to_string_lossy();
+        let site_present = path.iter().any(|item| {
+            item.extract::<String>()
+                .map(|s| s == site_str.as_ref())
+                .unwrap_or(false)
+        });
+        if !site_present {
+            path.insert(0, site_str.as_ref())?;
+        }
+    }
+
     PyModule::import(py, "bridge")
 }
 
