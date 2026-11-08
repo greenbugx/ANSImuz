@@ -1185,3 +1185,66 @@ fn test_resolution_cancellation_switching_removing_and_cancelling() {
     assert!(!app.is_resolving());
     assert_eq!(app.resolve_generation, gen_cancel + 1);
 }
+
+#[test]
+fn test_non_head_queue_item_resolution_starts_playback() {
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+
+    // Queue: [Track 0 (resolved), Track 1 (unresolved), Track 2 (resolved)]
+    let t0 = make_test_track("Track 0", "Artist 0", "http://stream/0");
+    let t1 = make_test_track("Track 1", "Artist 1", "");
+    let t2 = make_test_track("Track 2", "Artist 2", "http://stream/2");
+
+    app.enqueue(t0);
+    let entry_id_1 = app.enqueue(t1).unwrap();
+    app.enqueue(t2);
+    assert_eq!(app.queue.len(), 3);
+
+    // User selects and triggers playback of non-head item at index 1
+    let started = play_queue_item(
+        &mut app,
+        &mut player,
+        player_tx.clone(),
+        resolve_tx.clone(),
+        1,
+    );
+    assert!(started);
+    assert!(app.is_resolving());
+    assert_eq!(app.pending_queue_entry_id, Some(entry_id_1));
+    let generation = app.resolve_generation;
+
+    // Resolution arrives for Track 1
+    let mut resolved_t1 = make_test_track("Track 1", "Artist 1", "http://stream/1_resolved");
+    resolved_t1.spotify_id = Some("sp_track_1".to_string());
+    let response = ResolveResponse {
+        generation,
+        source: PlaybackSource::Queue {
+            entry_id: entry_id_1,
+        },
+        spotify_id: Some("sp_track_1".to_string()),
+        title: "Track 1".to_string(),
+        artist: "Artist 1".to_string(),
+        result: Ok(resolved_t1),
+    };
+
+    let handled = handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, response);
+    assert!(handled, "Resolution response must be accepted");
+
+    // Track 1 must start playing immediately and be removed from the queue
+    assert!(!app.is_resolving());
+    assert_eq!(
+        app.now_playing().map(|t| t.title.as_str()),
+        Some("Track 1"),
+        "Non-head resolved queue item must start playback"
+    );
+    assert_eq!(
+        app.queue.len(),
+        2,
+        "Resolved item must be removed from queue"
+    );
+    assert_eq!(app.queue[0].track.title, "Track 0");
+    assert_eq!(app.queue[1].track.title, "Track 2");
+}

@@ -500,32 +500,25 @@ pub fn handle_resolve_response(
                 }
                 PlaybackSource::Queue { entry_id } => {
                     if let Some(pos) = app.queue.iter().position(|e| e.id == entry_id) {
-                        let is_first = pos == 0;
-                        if is_first {
-                            let entry = app.remove_queue_item(pos).expect("valid queue item");
-                            let mut track = resolved;
-                            track.spotify_id = entry.track.spotify_id;
-                            if let Err(error) = start_playback(
+                        let entry = app.remove_queue_item(pos).expect("valid queue item");
+                        let mut track = resolved;
+                        track.spotify_id = entry.track.spotify_id;
+                        if let Err(error) = start_playback(
+                            app,
+                            player,
+                            player_tx.clone(),
+                            track,
+                            PlaybackSource::Queue { entry_id },
+                        ) {
+                            app.set_status(format!("PLAYER ERROR: {error}"));
+                            return recover_queue_failure(
                                 app,
                                 player,
                                 player_tx.clone(),
-                                track,
-                                PlaybackSource::Queue { entry_id },
-                            ) {
-                                app.set_status(format!("PLAYER ERROR: {error}"));
-                                return recover_queue_failure(
-                                    app,
-                                    player,
-                                    player_tx.clone(),
-                                    resolve_tx.clone(),
-                                );
-                            }
-                            true
-                        } else {
-                            app.queue[pos].track = resolved;
-                            app.cancel_pending_resolution();
-                            true
+                                resolve_tx.clone(),
+                            );
                         }
+                        true
                     } else {
                         app.cancel_pending_resolution();
                         false

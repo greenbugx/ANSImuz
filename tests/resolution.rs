@@ -25,8 +25,11 @@ fn make_resolved_track(id: &str, title: &str, artist: &str, youtube_id: &str) ->
     track
 }
 
+static RESOLUTION_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn test_rapid_track_switching_ignores_stale_responses() {
+    let _guard = RESOLUTION_TEST_LOCK.lock().unwrap();
     let mut app = App::new();
     let mut player = AudioPlayer::new_mock();
     let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
@@ -145,6 +148,7 @@ fn test_rapid_track_switching_ignores_stale_responses() {
 
 #[test]
 fn test_cancelling_while_old_track_is_playing_preserves_playback() {
+    let _guard = RESOLUTION_TEST_LOCK.lock().unwrap();
     let mut app = App::new();
     let mut player = AudioPlayer::new_mock();
     let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
@@ -215,6 +219,7 @@ fn test_cancelling_while_old_track_is_playing_preserves_playback() {
 
 #[test]
 fn test_resolution_failure_preserves_playing_track() {
+    let _guard = RESOLUTION_TEST_LOCK.lock().unwrap();
     let mut app = App::new();
     let mut player = AudioPlayer::new_mock();
     let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
@@ -269,6 +274,7 @@ fn test_resolution_failure_preserves_playing_track() {
 
 #[test]
 fn test_resolution_failure_when_idle_cleans_up() {
+    let _guard = RESOLUTION_TEST_LOCK.lock().unwrap();
     let mut app = App::new();
     let mut player = AudioPlayer::new_mock();
     let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
@@ -308,6 +314,7 @@ fn test_resolution_failure_when_idle_cleans_up() {
 
 #[test]
 fn test_stale_response_rejected_on_slot_mismatch() {
+    let _guard = RESOLUTION_TEST_LOCK.lock().unwrap();
     let mut app = App::new();
     let mut player = AudioPlayer::new_mock();
     let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
@@ -350,6 +357,7 @@ fn test_stale_response_rejected_on_slot_mismatch() {
 
 #[test]
 fn test_queue_track_resolution_plays_directly_without_touching_search_results() {
+    let _guard = RESOLUTION_TEST_LOCK.lock().unwrap();
     let mut app = App::new();
     let mut player = AudioPlayer::new_mock();
     let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
@@ -419,6 +427,7 @@ fn test_queue_track_resolution_plays_directly_without_touching_search_results() 
 
 #[test]
 fn test_concurrent_search_and_resolve_non_blocking() {
+    let _guard = RESOLUTION_TEST_LOCK.lock().unwrap();
     use ansimuz::config::Provider;
     use ansimuz::music::{resolve_playable, search_music};
     use pyo3::prelude::*;
@@ -535,6 +544,7 @@ if hasattr(bridge, "orig_resolve"):
 
 #[test]
 fn test_old_track_ended_preserves_in_flight_resolution_with_nonempty_queue() {
+    let _guard = RESOLUTION_TEST_LOCK.lock().unwrap();
     let mut app = App::new();
     let mut player = AudioPlayer::new_mock();
     let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
@@ -542,7 +552,7 @@ fn test_old_track_ended_preserves_in_flight_resolution_with_nonempty_queue() {
     let mut playback = None;
 
     // Initial state: Track 0 is currently playing
-    let t0 = make_resolved_track("inflight_end_0", "Track 0", "Artist 0", "yt0");
+    let t0 = make_resolved_track("inflight_end_0", "End Track 0", "End Artist 0", "yt0");
     play_track(
         &mut app,
         &mut player,
@@ -552,17 +562,25 @@ fn test_old_track_ended_preserves_in_flight_resolution_with_nonempty_queue() {
         PlaybackSource::SearchResult { index: 0 },
     );
     let gen0 = player.generation();
-    assert_eq!(app.now_playing().map(|t| t.title.as_str()), Some("Track 0"));
+    assert_eq!(
+        app.now_playing().map(|t| t.title.as_str()),
+        Some("End Track 0")
+    );
 
     // Non-empty queue: Queued Track
-    let q_track = make_resolved_track("inflight_end_q", "Queued Track", "Queued Artist", "ytq");
+    let q_track = make_resolved_track(
+        "inflight_end_q",
+        "End Queued Track",
+        "End Queued Artist",
+        "ytq",
+    );
     app.enqueue(q_track);
     assert_eq!(app.queue.len(), 1);
 
     // User selects Track 1 (unresolved Spotify track) from search results
-    let t1_unresolved = make_spotify_track("inflight_end_1", "Track 1", "Artist 1");
+    let t1_unresolved = make_spotify_track("inflight_end_1", "End Track 1", "End Artist 1");
     app.tracks = vec![
-        make_resolved_track("inflight_end_0", "Track 0", "Artist 0", "yt0"),
+        make_resolved_track("inflight_end_0", "End Track 0", "End Artist 0", "yt0"),
         t1_unresolved,
     ];
     play_search_result(
@@ -573,7 +591,7 @@ fn test_old_track_ended_preserves_in_flight_resolution_with_nonempty_queue() {
         1,
     );
     assert!(app.is_resolving());
-    assert_eq!(app.pending_track().unwrap().title, "Track 1");
+    assert_eq!(app.pending_track().unwrap().title, "End Track 1");
 
     // While Track 1 is resolving, Track 0 finishes playing
     let handled = handle_player_event(
@@ -592,40 +610,44 @@ fn test_old_track_ended_preserves_in_flight_resolution_with_nonempty_queue() {
     // Critical assertions: In-flight resolution must NOT be cancelled!
     // The queue item must NOT have been played/consumed over the user's selection.
     assert!(app.is_resolving(), "Resolution must remain in flight");
-    assert_eq!(app.pending_track().unwrap().title, "Track 1");
+    assert_eq!(app.pending_track().unwrap().title, "End Track 1");
     assert_eq!(app.queue.len(), 1, "Queue must remain untouched");
-    assert_eq!(app.queue[0].track.title, "Queued Track");
+    assert_eq!(app.queue[0].track.title, "End Queued Track");
     assert_eq!(app.history.len(), 1, "Finished Track 0 must be in history");
-    assert_eq!(app.history[0].title, "Track 0");
+    assert_eq!(app.history[0].title, "End Track 0");
     assert!(playback.is_none());
 
     // When resolution of Track 1 finishes, it plays successfully
-    let t1_resolved = make_resolved_track("inflight_end_1", "Track 1", "Artist 1", "yt1");
+    let t1_resolved = make_resolved_track("inflight_end_1", "End Track 1", "End Artist 1", "yt1");
     let resp = ResolveResponse {
         generation: app.resolve_generation,
         source: PlaybackSource::SearchResult { index: 1 },
         spotify_id: Some("inflight_end_1".into()),
-        title: "Track 1".into(),
-        artist: "Artist 1".into(),
+        title: "End Track 1".into(),
+        artist: "End Artist 1".into(),
         result: Ok(t1_resolved),
     };
     let handled_resolve =
         handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, resp);
     assert!(handled_resolve);
-    assert_eq!(app.now_playing().map(|t| t.title.as_str()), Some("Track 1"));
+    assert_eq!(
+        app.now_playing().map(|t| t.title.as_str()),
+        Some("End Track 1")
+    );
     assert!(!app.is_resolving());
     assert_eq!(app.queue.len(), 1, "Queued track still intact in queue");
 }
 
 #[test]
 fn test_old_track_failed_preserves_in_flight_resolution_with_nonempty_queue() {
+    let _guard = RESOLUTION_TEST_LOCK.lock().unwrap();
     let mut app = App::new();
     let mut player = AudioPlayer::new_mock();
     let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
     let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
     let mut playback = None;
 
-    let t0 = make_resolved_track("inflight_fail_0", "Track 0", "Artist 0", "yt0");
+    let t0 = make_resolved_track("inflight_fail_0", "Fail Track 0", "Fail Artist 0", "yt0");
     play_track(
         &mut app,
         &mut player,
@@ -638,15 +660,15 @@ fn test_old_track_failed_preserves_in_flight_resolution_with_nonempty_queue() {
 
     app.enqueue(make_resolved_track(
         "inflight_fail_q",
-        "Queued Track",
-        "Queued Artist",
+        "Fail Queued Track",
+        "Fail Queued Artist",
         "ytq",
     ));
     assert_eq!(app.queue.len(), 1);
 
-    let t1_unresolved = make_spotify_track("inflight_fail_1", "Track 1", "Artist 1");
+    let t1_unresolved = make_spotify_track("inflight_fail_1", "Fail Track 1", "Fail Artist 1");
     app.tracks = vec![
-        make_resolved_track("inflight_fail_0", "Track 0", "Artist 0", "yt0"),
+        make_resolved_track("inflight_fail_0", "Fail Track 0", "Fail Artist 0", "yt0"),
         t1_unresolved,
     ];
     play_search_result(
@@ -677,18 +699,19 @@ fn test_old_track_failed_preserves_in_flight_resolution_with_nonempty_queue() {
         app.is_resolving(),
         "Resolution must remain in flight after old track failure"
     );
-    assert_eq!(app.pending_track().unwrap().title, "Track 1");
+    assert_eq!(app.pending_track().unwrap().title, "Fail Track 1");
     assert_eq!(
         app.queue.len(),
         1,
         "Queue must not advance over in-flight resolution"
     );
     assert_eq!(app.history.len(), 1);
-    assert_eq!(app.history[0].title, "Track 0");
+    assert_eq!(app.history[0].title, "Fail Track 0");
 }
 
 #[test]
 fn test_old_track_ended_preserves_in_flight_resolution_with_repeat_one() {
+    let _guard = RESOLUTION_TEST_LOCK.lock().unwrap();
     let mut app = App::new();
     app.repeat = Repeat::One;
     let mut player = AudioPlayer::new_mock();
@@ -696,7 +719,7 @@ fn test_old_track_ended_preserves_in_flight_resolution_with_repeat_one() {
     let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
     let mut playback = None;
 
-    let t0 = make_resolved_track("inflight_rep_0", "Track 0", "Artist 0", "yt0");
+    let t0 = make_resolved_track("inflight_rep_0", "Rep Track 0", "Rep Artist 0", "yt0");
     play_track(
         &mut app,
         &mut player,
@@ -707,9 +730,9 @@ fn test_old_track_ended_preserves_in_flight_resolution_with_repeat_one() {
     );
     let gen0 = player.generation();
 
-    let t1_unresolved = make_spotify_track("inflight_rep_1", "Track 1", "Artist 1");
+    let t1_unresolved = make_spotify_track("inflight_rep_1", "Rep Track 1", "Rep Artist 1");
     app.tracks = vec![
-        make_resolved_track("inflight_rep_0", "Track 0", "Artist 0", "yt0"),
+        make_resolved_track("inflight_rep_0", "Rep Track 0", "Rep Artist 0", "yt0"),
         t1_unresolved,
     ];
     play_search_result(
@@ -733,7 +756,7 @@ fn test_old_track_ended_preserves_in_flight_resolution_with_repeat_one() {
 
     // Repeat::One must NOT replay Track 0 and discard Track 1!
     assert!(app.is_resolving());
-    assert_eq!(app.pending_track().unwrap().title, "Track 1");
+    assert_eq!(app.pending_track().unwrap().title, "Rep Track 1");
     assert_eq!(app.history.len(), 1);
-    assert_eq!(app.history[0].title, "Track 0");
+    assert_eq!(app.history[0].title, "Rep Track 0");
 }
