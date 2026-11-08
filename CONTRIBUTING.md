@@ -15,14 +15,14 @@ All contributors and participants are expected to adhere to our [Code of Conduct
 ## Supported Operating Systems & Prerequisites
 
 ANSImuz supports:
-- **Linux** (x86_64): Primary platform (tested on Arch Linux, Fedora).
-- **Windows** (x86_64): Windows 10/11 supported via PowerShell installer (`scripts/install_windows.ps1`) and also through `WSL2(Fedora 44)`.
+- **Linux** (x86_64): Primary platform (tested on Arch Linux, Fedora). Uses Unix-domain sockets for MPV IPC.
+- **Windows** (x86_64): Native Windows 10/11 support via PowerShell installer (`scripts/install_windows.ps1`), native `mpv`/`yt-dlp`, and cross-platform IPC over Windows Named Pipes (`\\.\pipe\...`) and also supported through `WSL2`.
 
 Ensure the following tools are installed on your system:
 
 - **Rust toolchain**: 1.85+ (compatible with the Rust 2024 edition).
 - **Python**: 3.10 or higher (with development headers for PyO3 linking).
-- **[mpv](https://mpv.io/)**: Version 0.35+ recommended, with JSON IPC enabled.
+- **[mpv](https://mpv.io/)**: Version 0.35+ recommended, with JSON IPC enabled (Unix-domain sockets on Linux, Named Pipes on Windows).
 - **[yt-dlp](https://github.com/yt-dlp/yt-dlp)**: For stream resolution and media extraction.
 - **OpenSSL / libssl-dev**: Required for native network operations.
 ---
@@ -79,7 +79,12 @@ ANSImuz/
 │   ├── artwork/      # Image decoding, bounded memory cache, resize cache, renderer
 │   ├── config/       # Settings persistence (TOML), platform cache dirs, atomic writes
 │   ├── music/        # Track model, identity policy, backend PyO3 bridge execution
-│   ├── playback/     # MPV IPC process supervision, lifecycle events, audio prefetch
+│   ├── playback/     # MPV IPC process supervision, cross-platform transport (ipc.rs), audio prefetch
+│   │   ├── events.rs     # PlayerEvent enum (Position, Ended, Failed)
+│   │   ├── ipc.rs        # Cross-platform local IPC endpoints & streams (interprocess)
+│   │   ├── mpv.rs        # AudioPlayer implementation, observer loop, stream dumping
+│   │   ├── repeat.rs     # Repeat mode sequencing
+│   │   └── mod.rs        # Playback module exports
 │   ├── terminal/     # Terminal raw mode setup and clean teardown
 │   ├── ui/           # Ratatui components (queue_list, track_list), screens, theme
 │   ├── paths.rs      # Runtime data directory resolution (backend/ and assets/)
@@ -114,6 +119,9 @@ ANSImuz/
 - **Queue Deduplication**: Use `app.enqueue()` or `app.queue_contains()` to prevent duplicate tracks from being added to the queue.
 - **Unicode Safety**: Never slice strings by raw byte offsets when displaying text in the TUI. Use character-based bounds or the project's `truncate` helper (`crate::ui::theme::truncate`) to prevent panics on multibyte characters.
 - **Runtime Data Paths**: Locate `backend/` and `assets/` only through `crate::paths::data_dir()`. Never use `env!("CARGO_MANIFEST_DIR")` or other compile-time paths for files needed at runtime, because that bakes the build directory into release binaries and breaks packaged installs. Use `option_env!` only for optional build-time overrides such as `ANSIMUZ_DATA_DIR`.
+- **Cross-Platform IPC**: MPV communication uses `IpcEndpoint` and `IpcStream` (`crate::playback::ipc`). On Unix, endpoints use filesystem paths (`.sock`); on Windows, endpoints use named pipes (`\\.\pipe\...`). Never invoke filesystem existence checks or deletions (`Path::exists()`, `fs::remove_file()`) on Windows named pipes.
+- **Observer Thread Concurrency & Reaping**: The observer decouples periodic query writing from continuous response reading to support platforms (such as Windows named pipes) that lack socket-level read timeouts. Background writer threads must always be wrapped in a RAII guard (`WriterThreadGuard`) and joined when the observer exits, and `AudioPlayer::stop()` must join the observer thread.
+- **Test Concurrency & State Isolation**: Tests that mutate shared global caches (such as `RESIZE_CACHE` or `art_cache()`) must acquire `crate::artwork::ARTWORK_TEST_LOCK` to prevent race conditions during parallel test execution. Self-contained data structure tests (like `ResizeCache`) must instantiate local, isolated instances.
 - **Style & Consistency**: Keep code formatting consistent. Avoid unnecessary abstractions or dead code.
 - **Comments**: Keep comments minimal and focused strictly on explaining non-obvious requirements.
 
@@ -220,8 +228,8 @@ ANSImuz separates player orchestration from system processes using `AudioPlayer:
 To test real MPV process lifecycle management, graceful shutdown, SIGKILL timeouts, and JSON IPC parsing:
 
 ```bash
-# Run MPV supervision unit tests against real processes:
-cargo test --lib playback::mpv::tests
+# Run MPV supervision and cross-platform IPC transport unit tests:
+cargo test --lib playback::
 
 # Smoke test live audio playback and streaming (requires internet and active audio device):
 cargo run
@@ -235,13 +243,10 @@ cargo run
 
 ## Continuous Integration (CI)
 
-Our GitHub Actions pipeline automatically checks every push and pull request targeting `main`:
+Our GitHub Actions pipeline automatically checks every push and pull request targeting `main` across multiple platforms:
 
-- **Formatting**: `cargo fmt --check`
-- **Type & Target Checks**: `cargo check --all-targets`
-- **Linter**: `cargo clippy --all-targets -- -D warnings`
-- **Build & Tests**: `cargo build --verbose` and `cargo test --verbose`
-- **Python Syntax**: Bytecode compilation (`py_compile`) across all backend modules
+- **Linux** (`ubuntu-latest`): Formatting, type checks, Clippy, unit and integration test suites, and build.
+- **Windows** (`windows-latest`): Python tests, format check, compilation, Clippy, verbose tests, and release build on native MSVC toolchain.
 
 CI automatically skips runs when only documentation (`*.md`), `LICENSE`, or `.gitignore` files are changed.
 

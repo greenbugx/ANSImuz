@@ -13,7 +13,7 @@
 > [!IMPORTANT]
 > **Disclaimer:** This project is not affiliated with, endorsed by, or in any way officially connected to Youtube or Spotify. It is intended solely for educational purposes only.
 
-ANSImuz is built with Rust, Ratatui, Python, [`ytmusicapi`](https://github.com/sigma67/ytmusicapi), and [`spotifyscraper`](https://github.com/AliAkhtari78/SpotifyScraper).
+ANSImuz is built with Rust, Ratatui, Python, [`ytmusicapi`](https://github.com/sigma67/ytmusicapi), [`spotifyscraper`](https://github.com/AliAkhtari78/SpotifyScraper), and [`interprocess`](https://github.com/kotauskas/interprocess).
 
 ## Features
 
@@ -29,13 +29,13 @@ ANSImuz is built with Rust, Ratatui, Python, [`ytmusicapi`](https://github.com/s
 
 ## Supported Operating Systems
 
-- **Linux** (x86_64): Primary platform. Tested on Arch Linux, Fedora, and generic systemd/musl environments.
-- **Windows** (x86_64): Windows 10/11 supported via PowerShell installer (`scripts/install_windows.ps1`) and native `mpv`/`yt-dlp` and also through `WSL2(Fedora 44)`.
+- **Linux** (x86_64): Primary platform. Tested on Arch Linux, Fedora, and generic systemd/musl environments. Communicates with `mpv` via Unix-domain sockets.
+- **Windows** (x86_64): Native Windows 10/11 support via PowerShell installer (`scripts/install_windows.ps1`), native `mpv`/`yt-dlp`, and cross-platform IPC over Windows Named Pipes (`\\.\pipe\...`) and also supported through `WSL2`.
 
 ## Requirements
 
 ### External Dependencies
-- **[mpv](https://mpv.io/)** (0.35+ recommended): Audio playback engine and IPC communication. Must be available in system `PATH`.
+- **[mpv](https://mpv.io/)** (0.35+ recommended): Audio playback engine and JSON IPC communication (Unix-domain sockets on Linux, Named Pipes on Windows). Must be available in system `PATH`.
 - **[yt-dlp](https://github.com/yt-dlp/yt-dlp)**: Audio stream URL resolution and media stream extraction. Must be available in system `PATH`.
 
 ### Build & Runtime Toolchain
@@ -43,6 +43,36 @@ ANSImuz is built with Rust, Ratatui, Python, [`ytmusicapi`](https://github.com/s
 - **Python**: 3.10 or higher with development headers (required for PyO3 embedding).
 - **C Compiler & System Libraries**: `gcc` / `clang`, `glibc`, and OpenSSL (`libssl-dev` / `openssl-devel`).
 
+## Installation
+
+### Windows (Portable Release)
+
+1. Download `ansimuz-windows-x64.zip` from the [Latest Release](https://github.com/greenbugx/ANSImuz/releases/latest).
+2. Extract the archive to any folder.
+3. Ensure [`mpv`](https://mpv.io/) and [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) are installed and accessible in your `PATH`:
+   ```powershell
+   winget install shinchiro.mpv yt-dlp.yt-dlp
+   ```
+4. Run `ansimuz.exe` directly from the extracted folder.
+
+### Windows (PowerShell Automated Installer)
+
+If building and installing from source, run the automated installer script in PowerShell. It verifies and installs all prerequisites (including `mpv`, `yt-dlp`, Python, and Rust via `winget`), creates the `.venv` virtual environment, installs Python packages, and compiles the release binary:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\scripts\install_windows.ps1
+```
+
+To launch ANSImuz after running the installer:
+
+```powershell
+# Activate the virtual environment
+.\.venv\Scripts\Activate.ps1
+
+# Run the release binary
+.\target\release\ansimuz.exe
+```
 ### Arch Linux (PKGBUILD)
 
 > [!WARNING]
@@ -77,7 +107,6 @@ To remove it:
 sudo dnf remove ansimuz
 sudo dnf copr remove greenbugx/ansimuz
 ```
-
 ## Source Builds vs. Packaged Installs
 
 - **Packaged Installs (Arch Linux PKGBUILD / Fedora COPR)**:
