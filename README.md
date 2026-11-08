@@ -50,6 +50,7 @@ ANSImuz is built with Rust, Ratatui, Python, [`ytmusicapi`](https://github.com/s
 1. Download `ansimuz-windows-x64.zip` from the [Latest Release](https://github.com/greenbugx/ANSImuz/releases/latest).
 2. Extract the archive to any folder.
 3. Ensure [`mpv`](https://mpv.io/) and [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) are installed and accessible in your `PATH`:
+
    ```powershell
    winget install shinchiro.mpv yt-dlp.yt-dlp
    ```

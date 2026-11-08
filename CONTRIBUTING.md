@@ -189,6 +189,79 @@ Notes for maintainers:
 - Build `python-spotifyscraper` before `ansimuz`, and build both for **every Fedora release enabled in the project**. Packages depend on that release's Python version, so a release missing a build fails to install with `nothing provides python(abi) = ...`.
 - Do not commit `*.rpm`, `*.src.rpm`, or source tarballs.
 
+
+---
+
+## Packaging (Windows Portable Release)
+
+ANSImuz provides a zero-dependency standalone portable archive (`ansimuz-v<x>-windows-x64.zip`) for Windows 10/11. The bundle packages the compiled binary, visual assets, backend bridge, and an **embedded Python runtime**, allowing users to run ANSImuz without needing Python pre-installed on their systems.
+
+### Bundle Structure
+
+```text
+ansimuz-v<x>-windows-x64/
+├── ansimuz.exe              # Release binary compiled with MSVC
+├── assets/                  # Logos and visualizer animation frames
+│   ├── frames/
+│   ├── logo_nobg.png 
+│   └── logo.png      
+├── backend/                 # PyO3 Python bridge and providers
+│   ├── bridge.py
+│   ├── exceptions.py
+│   ├── artwork/
+│   └── providers/
+├── python314.dll            # Python dynamic library (matching PyO3 build version)
+├── python3.dll              # Python stable ABI stub
+├── python314.zip            # Standard library archive from embeddable package
+├── python314._pth           # Module search path configuration
+├── *.pyd                    # Native C extension modules from embeddable package (_socket, _ssl, etc.)
+└── Lib/
+    └── site-packages/       # Organized dependencies (requests, ytmusicapi, spotifyscraper, pillow)
+```
+### Packaging Steps
+
+1. **Build the release binary**:
+   
+   ```powershell
+   cargo build --release
+   ```
+
+2. **Download the matching Python Windows Embeddable Package**:
+
+   Download `python-3.x.x-embed-amd64.zip` from [python.org](https://www.python.org/downloads/windows/) matching your build toolchain's Python version. Extract its contents into the staging directory.
+
+3. **Install Python dependencies into the organized `Lib\site-packages` subfolder**:
+ 
+   ```powershell
+   python -m pip install --target "$StagingDir\Lib\site-packages" -r requirements.txt
+   ```
+
+4. **Append `Lib\site-packages` to the `._pth` file**:
+
+   Open the `._pth` file in the staging directory (e.g. `python314._pth`) and add:
+   
+   ```text
+   Lib\site-packages
+   ```
+   
+   *(Note: ANSImuz also auto-detects `Lib/site-packages` at startup).*
+
+5. **Copy assets and binaries**:
+
+   Copy `target\release\ansimuz.exe`, `backend\`, and `assets\` into the staging directory next to `python3XX.dll`.
+
+6. **Create the zip archive**:
+   
+   ```powershell
+   Compress-Archive -Path "$StagingDir\*" -DestinationPath "ansimuz-windows-x64.zip"
+   ```
+
+### Verifying the Portable Release
+
+To verify the portable bundle before publishing:
+1. Extract the `.zip` archive on a clean Windows machine (or in a sandbox/VM) without Python registered in system `PATH`.
+2. Ensure `mpv` and `yt-dlp` are installed in `PATH`.
+3. Run `ansimuz.exe` from the unzipped directory and confirm search, playback, artwork decoding, and animation frames initialize properly.
 ---
 
 ## Validation Before Submitting
