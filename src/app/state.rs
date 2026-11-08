@@ -251,6 +251,24 @@ impl App {
         }
     }
 
+    pub fn finish_active_track_while_resolving(&mut self) {
+        let prev_active_track = match &self.playback_state {
+            PlaybackState::Resolving { active, .. } => {
+                active.as_ref().and_then(|a| a.current_track()).cloned()
+            }
+            _ => None,
+        };
+
+        if let Some(track) = prev_active_track {
+            self.push_history(track);
+        }
+
+        if let PlaybackState::Resolving { active, .. } = &mut self.playback_state {
+            *active = None;
+            self.playing = None;
+        }
+    }
+
     pub fn set_playing(&mut self, track: Track) {
         self.playback_state = PlaybackState::Playing { track };
         self.pending_queue_entry_id = None;
@@ -819,5 +837,27 @@ mod tests {
         assert_eq!(app.queue[2].track.title, "Track B");
         assert_eq!(app.queue_selected, 2);
         assert_eq!(app.queue[app.queue_selected].id, id_b);
+    }
+
+    #[test]
+    fn test_finish_active_track_while_resolving() {
+        let mut app = App::new();
+        let t0 = sample_track("Track 0");
+        let t1 = sample_track("Track 1");
+        app.set_playing(t0.clone());
+        app.set_resolving(t1.clone(), PlaybackSource::SearchResult { index: 1 });
+        assert!(app.is_resolving());
+        assert_eq!(app.now_playing().map(|t| t.title.as_str()), Some("Track 0"));
+
+        app.finish_active_track_while_resolving();
+
+        assert!(app.is_resolving());
+        assert!(app.current_track().is_none());
+        assert_eq!(app.history.len(), 1);
+        assert_eq!(app.history[0].title, "Track 0");
+
+        // Calling again does not duplicate history entry
+        app.finish_active_track_while_resolving();
+        assert_eq!(app.history.len(), 1);
     }
 }

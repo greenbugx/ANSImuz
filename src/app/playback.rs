@@ -211,7 +211,11 @@ pub fn handle_player_event(
                 return false;
             }
             *playback = None;
-            handle_playback_ended(app, player, player_tx.clone(), resolve_tx.clone());
+            if app.is_resolving() {
+                app.finish_active_track_while_resolving();
+            } else {
+                handle_playback_ended(app, player, player_tx.clone(), resolve_tx.clone());
+            }
             true
         }
         PlayerEvent::Failed {
@@ -222,7 +226,18 @@ pub fn handle_player_event(
                 return false;
             }
             *playback = None;
-            handle_playback_failed(app, player, player_tx.clone(), resolve_tx.clone(), &message);
+            if app.is_resolving() {
+                player.record_error(message.to_string());
+                app.finish_active_track_while_resolving();
+            } else {
+                handle_playback_failed(
+                    app,
+                    player,
+                    player_tx.clone(),
+                    resolve_tx.clone(),
+                    &message,
+                );
+            }
             true
         }
     }
@@ -234,6 +249,11 @@ pub fn handle_playback_ended(
     player_tx: Sender<PlayerEvent>,
     resolve_tx: Sender<ResolveResponse>,
 ) -> bool {
+    if app.is_resolving() {
+        app.finish_active_track_while_resolving();
+        return true;
+    }
+
     if app.repeat == Repeat::One
         && let Some(track) = app.current_track().cloned()
     {
@@ -268,8 +288,11 @@ pub fn handle_playback_failed(
     message: &str,
 ) -> bool {
     player.record_error(message.to_string());
+    if app.is_resolving() {
+        app.finish_active_track_while_resolving();
+        return true;
+    }
     app.set_status(format!("PLAYER ERROR: {}", message));
-
     if let Some(current) = app.current_track().cloned() {
         app.push_history(current);
     }
@@ -288,6 +311,11 @@ pub fn advance_playback(
     player_tx: Sender<PlayerEvent>,
     resolve_tx: Sender<ResolveResponse>,
 ) -> bool {
+    if app.is_resolving() {
+        app.finish_active_track_while_resolving();
+        return true;
+    }
+
     if player.error().is_some() {
         let err = player.error().unwrap().to_string();
         handle_playback_failed(app, player, player_tx, resolve_tx, &err)
