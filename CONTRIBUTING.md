@@ -231,11 +231,16 @@ ansimuz-v<x>-windows-x64/
    Download `python-3.x.x-embed-amd64.zip` from [python.org](https://www.python.org/downloads/windows/) matching your build toolchain's Python version. Extract its contents into the staging directory.
 
 3. **Install Python dependencies into the organized `Lib\site-packages` subfolder**:
- 
-   ```powershell
-   python -m pip install --target "$StagingDir\Lib\site-packages" -r requirements.txt
-   ```
 
+   Run this command from your **ANSImuz repository root** using your development environment's `pip` (pip is not included in the the embeddable `python.exe`):
+
+   ```powershell
+   # From the repository root using pip:
+   pip install --target "$StagingDir\Lib\site-packages" -r requirements.txt
+
+   # Or using your virtual environment Python:
+   .\.venv\Scripts\python.exe -m pip install --target "$StagingDir\Lib\site-packages" -r requirements.txt
+   ```
 4. **Append `Lib\site-packages` to the `._pth` file**:
 
    Open the `._pth` file in the staging directory (e.g. `python314._pth`) and add:
