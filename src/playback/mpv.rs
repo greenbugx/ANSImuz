@@ -439,7 +439,6 @@ fn observe(
     let has_duration = Arc::new(AtomicBool::new(false));
     let cancel_writer = Arc::clone(&cancelled);
     let has_dur = Arc::clone(&has_duration);
-    let events_writer = events.clone();
 
     let writer_handle = thread::spawn(move || {
         while !cancel_writer.load(Ordering::Relaxed) {
@@ -458,12 +457,10 @@ fn observe(
                 && (stream_writer.write_all(&bytes).is_err()
                     || stream_writer.write_all(b"\n").is_err())
             {
-                if !cancel_writer.swap(true, Ordering::Relaxed) {
-                    let _ = events_writer.send(PlayerEvent::Failed {
-                        generation,
-                        message: "Connection to mpv lost".into(),
-                    });
-                }
+                // Writing failed because mpv closed the IPC connection.
+                // Terminate the writer loop cleanly without setting the cancellation
+                // flag or reporting a failure, allowing the reader thread to consume
+                // any buffered terminal events i.e. end-file eof before connection closure.
                 break;
             }
 
@@ -472,9 +469,11 @@ fn observe(
                     "command": ["get_property", "duration"],
                     "request_id": REQ_ID_DURATION,
                 });
-                if let Ok(bytes) = serde_json::to_vec(&dur_cmd) {
-                    let _ = stream_writer.write_all(&bytes);
-                    let _ = stream_writer.write_all(b"\n");
+                if let Ok(bytes) = serde_json::to_vec(&dur_cmd)
+                    && (stream_writer.write_all(&bytes).is_err()
+                        || stream_writer.write_all(b"\n").is_err())
+                {
+                    break;
                 }
             }
         }
@@ -1303,6 +1302,76 @@ mod tests {
 
         assert!(got_position, "Must have received PlayerEvent::Position");
         assert!(got_ended, "Must have received PlayerEvent::Ended");
+
+        server_handle.join().expect("join server");
+        obs_handle.join().expect("join observer");
+        endpoint.cleanup();
+    }
+
+    #[test]
+    fn test_writer_write_failure_does_not_suppress_reader_ended_event() {
+        use interprocess::{
+            TryClone,
+            local_socket::{GenericFilePath, ListenerOptions, ToFsName, prelude::*},
+        };
+        use std::sync::mpsc::channel;
+
+        let endpoint = IpcEndpoint::new(8889);
+        endpoint.cleanup();
+
+        let name = endpoint
+            .as_str()
+            .to_fs_name::<GenericFilePath>()
+            .expect("valid endpoint name");
+        let listener = ListenerOptions::new()
+            .name(name)
+            .create_sync()
+            .expect("create listener");
+
+        let server_handle = thread::spawn(move || {
+            let server_stream = listener.accept().expect("server accept");
+            let mut writer = server_stream.try_clone().expect("server clone");
+            let mut reader = BufReader::new(server_stream);
+
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("server read vol");
+
+            writer
+                .write_all(b"{\"event\":\"end-file\",\"reason\":\"eof\"}\n")
+                .expect("server write end-file");
+            drop(writer);
+            drop(reader);
+        });
+
+        let (events_tx, events_rx) = channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        let cancel_obs = Arc::clone(&cancel);
+        let obs_endpoint = endpoint.clone();
+        let obs_handle = thread::spawn(move || {
+            observe(1, obs_endpoint, 80, events_tx, cancel_obs);
+        });
+
+        let mut received_ended = false;
+
+        while let Ok(event) = events_rx.recv_timeout(Duration::from_secs(3)) {
+            match event {
+                PlayerEvent::Ended { generation } => {
+                    assert_eq!(generation, 1);
+                    received_ended = true;
+                    break;
+                }
+                PlayerEvent::Failed { message, .. } => {
+                    panic!("Must not report Failed when end-file eof was sent, got: {message}");
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            received_ended,
+            "Ended event must be consumed and dispatched"
+        );
 
         server_handle.join().expect("join server");
         obs_handle.join().expect("join observer");
