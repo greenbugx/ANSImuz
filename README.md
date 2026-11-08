@@ -30,7 +30,7 @@ ANSImuz is built with Rust, Ratatui, Python, [`ytmusicapi`](https://github.com/s
 ## Supported Operating Systems
 
 - **Linux** (x86_64): Primary platform. Tested on Arch Linux, Fedora, and generic systemd/musl environments. Communicates with `mpv` via Unix-domain sockets.
-- **Windows** (x86_64): Native Windows 10/11 support via PowerShell installer (`scripts/install_windows.ps1`), native `mpv`/`yt-dlp`, and cross-platform IPC over Windows Named Pipes (`\\.\pipe\...`) and also supported through `WSL2`.
+- **Windows** (x86_64): Native Windows 10/11 support via standalone portable release bundle or PowerShell installer (`scripts/install_windows.ps1`), native `mpv`/`yt-dlp`, and cross-platform IPC over Windows Named Pipes (`\\.\pipe\...`). Also supported through `WSL2`.
 
 ## Requirements
 

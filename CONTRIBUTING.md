@@ -16,7 +16,7 @@ All contributors and participants are expected to adhere to our [Code of Conduct
 
 ANSImuz supports:
 - **Linux** (x86_64): Primary platform (tested on Arch Linux, Fedora). Uses Unix-domain sockets for MPV IPC.
-- **Windows** (x86_64): Native Windows 10/11 support via PowerShell installer (`scripts/install_windows.ps1`), native `mpv`/`yt-dlp`, and cross-platform IPC over Windows Named Pipes (`\\.\pipe\...`) and also supported through `WSL2`.
+- **Windows** (x86_64): Native Windows 10/11 support via PowerShell installer (`scripts/install_windows.ps1`), native `mpv`/`yt-dlp`, and cross-platform IPC over Windows Named Pipes (`\\.\pipe\...`). Also supported through `WSL2`.
 
 Ensure the following tools are installed on your system:
 
@@ -232,7 +232,7 @@ ansimuz-v<x>-windows-x64/
 
 3. **Install Python dependencies into the organized `Lib\site-packages` subfolder**:
 
-   Run this command from your **ANSImuz repository root** using your development environment's `pip` (pip is not included in the the embeddable `python.exe`):
+   Run this command from your **ANSImuz repository root** using your development environment's `pip` (pip is not included in the embeddable `python.exe`):
 
    ```powershell
    # From the repository root using pip:
