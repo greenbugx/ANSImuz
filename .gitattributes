@@ -1,0 +1,32 @@
+# Auto-detect text files and normalize line endings
+* text=auto
+
+# Linux packaging and shell scripts (must always be LF)
+packaging/arch/PKGBUILD text eol=lf
+packaging/rpm/*.spec text eol=lf
+scripts/*.sh text eol=lf
+*.sh text eol=lf
+
+# Windows PowerShell scripts
+scripts/*.ps1 text eol=crlf
+*.ps1 text eol=crlf
+
+# Source code files
+*.rs text eol=lf
+*.py text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
+
+# Binary assets and archives
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.img binary
+*.audio binary
+*.exe binary
+*.dll binary
+*.pyd binary
+*.zip binary
