@@ -1,0 +1,263 @@
+name: Release Packages
+
+on:
+  push:
+    tags:
+      - "v*"
+
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing or new release tag to build (e.g. v0.1.3)"
+        required: true
+        default: "v0.1.3"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Validate release
+    runs-on: ubuntu-latest
+
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+
+    steps:
+      - name: Checkout packaging configuration
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'main' || github.ref }}
+          fetch-depth: 0
+
+      - name: Validate release tag and packaging metadata
+        id: meta
+        shell: bash
+        env:
+          DISPATCH_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            TAG="$DISPATCH_TAG"
+          else
+            TAG="$GITHUB_REF_NAME"
+          fi
+
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Expected a stable tag such as v0.1.3; got: $TAG"
+            exit 1
+          fi
+
+          git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          TAG_COMMIT="$(git rev-parse "refs/tags/${TAG}^{commit}")"
+
+          TAG_VERSION="$(
+            git show "${TAG}:Cargo.toml" |
+              sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' |
+              head -n1
+          )"
+
+          if [[ -z "$TAG_VERSION" || "v${TAG_VERSION}" != "$TAG" ]]; then
+            echo "::error::The tag does not match the version in its Cargo.toml."
+            exit 1
+          fi
+
+          SPEC_VERSION="$(awk '$1 == "Version:" { print $2; exit }' packaging/rpm/ansimuz.spec)"
+          SPEC_COMMIT="$(awk '$1 == "%global" && $2 == "commit" { print $3; exit }' packaging/rpm/ansimuz.spec)"
+
+          if [[ "$SPEC_VERSION" != "$TAG_VERSION" ]]; then
+            echo "::error::ansimuz.spec Version ($SPEC_VERSION) does not match Cargo.toml ($TAG_VERSION)."
+            exit 1
+          fi
+
+          if [[ ! "$SPEC_COMMIT" =~ ^[0-9a-f]{40}$ ]] || ! git cat-file -e "${SPEC_COMMIT}^{commit}" 2>/dev/null; then
+            echo "::error::The commit pinned in ansimuz.spec is invalid or unavailable."
+            exit 1
+          fi
+
+          SPEC_SOURCE_VERSION="$(
+            git show "${SPEC_COMMIT}:Cargo.toml" |
+              sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' |
+              head -n1
+          )"
+
+          if [[ "$SPEC_SOURCE_VERSION" != "$TAG_VERSION" ]]; then
+            echo "::error::ansimuz.spec pins source version $SPEC_SOURCE_VERSION, expected $TAG_VERSION."
+            exit 1
+          fi
+
+          if ! git merge-base --is-ancestor "$SPEC_COMMIT" "$TAG_COMMIT"; then
+            echo "::error::The RPM source commit is not an ancestor of the release tag."
+            exit 1
+          fi
+
+          if ! grep -q 'ANSIMUZ_RELEASE_TAG' packaging/arch/PKGBUILD; then
+            echo "::error::PKGBUILD is missing ANSIMUZ_RELEASE_TAG support."
+            exit 1
+          fi
+
+          if ! grep -Eq '^Requires:[[:space:]]+python3dist\(spotifyscraper\)' packaging/rpm/ansimuz.spec; then
+            echo "::error::ansimuz.spec is missing the spotifyscraper runtime dependency."
+            exit 1
+          fi
+
+          if [[ ! -f packaging/rpm/python-spotifyscraper.spec ]]; then
+            echo "::error::The maintained python-spotifyscraper spec is missing."
+            exit 1
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Validated ANSImuz $TAG ($TAG_COMMIT)."
+          echo "The existing python-spotifyscraper package will not be rebuilt."
+
+  arch:
+    name: Build Arch Linux package
+    needs: prepare
+    runs-on: ubuntu-latest
+
+    container:
+      image: archlinux:latest
+
+    steps:
+      # Install Git before checkout because this job runs inside a minimal container.
+      - name: Install Arch build tools
+        run: |
+          pacman -Sy --noconfirm archlinux-keyring
+          pacman -Syu --noconfirm --needed \
+            base-devel \
+            git \
+            rust \
+            cargo \
+            cmake \
+            python \
+            openssl \
+            pkgconf \
+            shadow
+
+      - name: Checkout packaging configuration
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'main' || github.ref }}
+
+      - name: Build package as a non-root user
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          useradd --create-home --shell /bin/bash builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+
+          runuser -u builder -- env \
+            HOME=/home/builder \
+            GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            ANSIMUZ_RELEASE_TAG="$RELEASE_TAG" \
+            bash -c '
+              set -euo pipefail
+
+              cd "$GITHUB_WORKSPACE/packaging/arch"
+
+              # Runtime dependencies are recorded in the package metadata.
+              # Build tools are installed above; --nodeps avoids requiring AUR
+              # runtime packages (including python-spotifyscraper) in CI.
+              makepkg --noconfirm --cleanbuild --nodeps
+
+              mkdir -p "$GITHUB_WORKSPACE/dist/arch"
+              shopt -s nullglob
+              packages=( ./*.pkg.tar.zst )
+              if [[ ${#packages[@]} -ne 1 ]]; then
+                echo "Expected exactly one Arch package; found ${#packages[@]}"
+                exit 1
+              fi
+              cp "${packages[0]}" "$GITHUB_WORKSPACE/dist/arch/"
+              ls -lh "$GITHUB_WORKSPACE/dist/arch/"
+            '
+
+      - name: Upload Arch package artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: arch-package
+          path: dist/arch/*.pkg.tar.zst
+          if-no-files-found: error
+          retention-days: 14
+
+  fedora:
+    name: Generate Fedora source RPM
+    needs: prepare
+    runs-on: ubuntu-latest
+
+    container:
+      image: fedora:45
+
+    steps:
+      # Install Git before checkout because this job runs inside a minimal container.
+      - name: Install RPM packaging tools
+        run: |
+          dnf -y install \
+            git \
+            rpm-build \
+            rpmdevtools \
+            curl \
+            shadow-utils
+
+      - name: Checkout packaging configuration
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'main' || github.ref }}
+
+      - name: Generate ANSImuz source RPM
+        run: |
+          set -euo pipefail
+
+          useradd --create-home builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+
+          runuser -u builder -- env \
+            HOME=/home/builder \
+            GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            bash -c '
+              set -euo pipefail
+
+              cd "$GITHUB_WORKSPACE"
+              rpmdev-setuptree
+
+              cp packaging/rpm/ansimuz.spec \
+                "$HOME/rpmbuild/SPECS/ansimuz.spec"
+
+              # Fetch only the application source referenced by ansimuz.spec.
+              # python-spotifyscraper.spec is intentionally not built here.
+              spectool -g -R "$HOME/rpmbuild/SPECS/ansimuz.spec"
+
+              # Build only the SRPM; COPR will perform the binary builds.
+              rpmbuild -bs "$HOME/rpmbuild/SPECS/ansimuz.spec"
+
+              mkdir -p "$GITHUB_WORKSPACE/dist/fedora"
+              mapfile -t srpms < <(
+                find "$HOME/rpmbuild/SRPMS" -maxdepth 1 \
+                  -type f -name "ansimuz-*.src.rpm" -print
+              )
+
+              if [[ ${#srpms[@]} -ne 1 ]]; then
+                echo "Expected exactly one ANSImuz SRPM; found ${#srpms[@]}"
+                exit 1
+              fi
+
+              cp "${srpms[0]}" "$GITHUB_WORKSPACE/dist/fedora/"
+              ls -lh "$GITHUB_WORKSPACE/dist/fedora/"
+            '
+
+      - name: Upload Fedora SRPM artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: fedora-srpm
+          path: dist/fedora/*.src.rpm
+          if-no-files-found: error
+          retention-days: 14
