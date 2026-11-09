@@ -39,21 +39,25 @@ ANSImuz is built with Rust, Ratatui, Python, [`ytmusicapi`](https://github.com/s
 - **[yt-dlp](https://github.com/yt-dlp/yt-dlp)**: Audio stream URL resolution and media stream extraction. Must be available in system `PATH`.
 
 ### Build & Runtime Toolchain
-- **Rust Toolchain**: 1.85+ (compatible with the Rust 2024 edition).
-- **Python**: 3.10 or higher with development headers (required for PyO3 embedding).
-- **C Compiler & System Libraries**: `gcc` / `clang`, `glibc`, and OpenSSL (`libssl-dev` / `openssl-devel`).
+- **Rust Toolchain**: 1.85+ (compatible with the Rust 2024 edition, for source builds).
+- **Python**: 3.10 or higher with development headers.
+- **C Compiler & System Libraries**: `gcc` / `clang`, `glibc`, and OpenSSL (`libssl-dev` / `openssl-devel`, for source builds).
 
 ## Installation
 
 ### Windows (Portable Release)
 
-1. Download `ansimuz-windows-x64.zip` from the [Latest Release](https://github.com/greenbugx/ANSImuz/releases/latest).
-2. Extract the archive to any folder.
+The Windows portable release embeds its own Python 3.14 runtime and pre-packaged dependencies, so you do **not** need to install Python separately. However, it still requires **`mpv`** and **`yt-dlp`** in your system `PATH` for audio playback and stream extraction.
+
+1. Download `ansimuz-windows-v0.1.3-x64.rar` from the [Latest Release](https://github.com/greenbugx/ANSImuz/releases/latest).
+2. Extract the RAR archive to any folder (using Windows 11 built-in archive extraction, WinRAR, or 7-Zip).
 3. Ensure [`mpv`](https://mpv.io/) and [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) are installed and accessible in your `PATH`:
 
    ```powershell
-   winget install shinchiro.mpv yt-dlp.yt-dlp
+   winget install --id shinchiro.mpv -e
+   winget install --id yt-dlp.yt-dlp -e
    ```
+
 4. Run `ansimuz.exe` directly from the extracted folder.
 
 ### Windows (PowerShell Automated Installer)
@@ -110,10 +114,11 @@ sudo dnf copr remove greenbugx/ansimuz
 ```
 ## Source Builds vs. Packaged Installs
 
-- **Packaged Installs (Arch Linux PKGBUILD / Fedora COPR)**:
-  System packages install the compiled binary to `/usr/bin/ansimuz` and static runtime resources (`backend/` and `assets/`) to `/usr/share/ansimuz/`. They link against system Python modules (`python-ytmusicapi`, `python-spotifyscraper`, etc.) and require no virtual environment activation.
+- **Packaged Installs & Windows Portable Release**:
+  - **Arch Linux & Fedora**: System packages install the compiled binary to `/usr/bin/ansimuz` and static runtime resources (`backend/` and `assets/`) to `/usr/share/ansimuz/`. They link against system Python modules (`python-ytmusicapi`, `python-spotifyscraper`, etc.) and require no virtual environment activation.
+  - **Windows Portable Release**: Bundles `ansimuz.exe`, visual assets, backend bridge, and an embedded Python 3.14 runtime with all Python dependencies. It requires no Python setup, but does require `mpv` and `yt-dlp` in `PATH`.
 - **Source Builds (`cargo run` / `cargo build`)**:
-  When building from source, Python dependencies run within a project-local virtual environment (`.venv`). The `.venv` must be activated in your terminal session before starting `cargo run`. The application automatically resolves `backend/` and `assets/` directly from your repository working directory.
+  When building from source, a Rust toolchain (1.85+) and Python (3.10+) with development headers are required. Python dependencies run within a project-local virtual environment (`.venv`), which must be activated in your terminal session before starting `cargo run`. The application automatically resolves `backend/` and `assets/` directly from your repository working directory.
 
 ## Development Setup
 

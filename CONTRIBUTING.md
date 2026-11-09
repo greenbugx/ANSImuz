@@ -36,9 +36,17 @@ Ensure the following tools are installed on your system:
    ```
 
 2. **Create and activate a Python virtual environment**:
+
+   **Linux**:
    ```bash
    python -m venv .venv
    source .venv/bin/activate
+   ```
+
+   **Windows (PowerShell)**:
+   ```powershell
+   python -m venv .venv
+   .\.venv\Scripts\Activate.ps1
    ```
 
 3. **Install Python dependencies**:
@@ -155,7 +163,7 @@ Run the installed binary from a directory outside the repository to confirm sear
 
 `packaging/rpm/` contains two RPM specs, built in the [`greenbugx/ansimuz`](https://copr.fedorainfracloud.org/coprs/greenbugx/ansimuz/) COPR project:
 
-- `ansimuz.spec` builds ANSImuz from a **pinned commit** (`%global commit`). The version uses a caret snapshot, e.g. `0.1.0^20261031git0abb051`. It installs the binary to `/usr/bin/ansimuz` and `backend/` and `assets/` to `/usr/share/ansimuz/`, and builds with `ANSIMUZ_DATA_DIR=/usr/share/ansimuz`.
+- `ansimuz.spec` builds ANSImuz from a **pinned commit** (`%global commit`) matching the release version. It installs the binary to `/usr/bin/ansimuz` and `backend/` and `assets/` to `/usr/share/ansimuz/`, and builds with `ANSIMUZ_DATA_DIR=/usr/share/ansimuz`.
 - `python-spotifyscraper.spec` packages `spotifyscraper`, which is not in the Fedora repositories. `ansimuz` requires it as `python3dist(spotifyscraper)`.
 
 Update the specs when you:
@@ -164,15 +172,15 @@ Update the specs when you:
 - change how runtime data is located, or add new top-level runtime directories that must be installed
 - change the license or add files that should be installed alongside the binary
 
-To move `ansimuz.spec` to a newer upstream commit:
+To move `ansimuz.spec` to a newer commit or release:
 
 ```bash
 cd packaging/rpm
-NEW=$(git ls-remote https://github.com/greenbugx/ANSImuz HEAD | cut -f1)
-sed -i "s/^%global commit .*/%global commit $NEW/; s/^%global commitdate .*/%global commitdate $(date +%Y%m%d)/" ansimuz.spec
+NEW=$(git rev-parse HEAD)
+sed -i "s/^%global commit .*/%global commit $NEW/" ansimuz.spec
 ```
 
-Then add a `%changelog` entry with the new version, and reset `Release` to `1`.
+Then update `Version: <new_version>`, add a `%changelog` entry, and reset `Release` to `1%{?dist}`.
 
 To test a spec before uploading to COPR:
 
@@ -194,12 +202,12 @@ Notes for maintainers:
 
 ## Packaging (Windows Portable Release)
 
-ANSImuz provides a zero-dependency standalone portable archive (`ansimuz-v<x>-windows-x64.zip`) for Windows 10/11. The bundle packages the compiled binary, visual assets, backend bridge, and an **embedded Python runtime**, allowing users to run ANSImuz without needing Python pre-installed on their systems.
+ANSImuz provides a portable Windows distribution with an embedded Python runtime (`ansimuz-windows-v<version>-x64.rar`) for Windows 10/11. Users do not need a separate Python installation. MPV and yt-dlp must be installed and available in `PATH`.
 
 ### Bundle Structure
 
 ```text
-ansimuz-v<x>-windows-x64/
+ansimuz-windows-v<version>-x64/
 ├── ansimuz.exe              # Release binary compiled with MSVC
 ├── assets/                  # Logos and visualizer animation frames
 │   ├── frames/
@@ -218,6 +226,7 @@ ansimuz-v<x>-windows-x64/
 └── Lib/
     └── site-packages/       # Organized dependencies (requests, ytmusicapi, spotifyscraper, pillow)
 ```
+
 ### Packaging Steps
 
 1. **Build the release binary**:
@@ -255,19 +264,60 @@ ansimuz-v<x>-windows-x64/
 
    Copy `target\release\ansimuz.exe`, `backend\`, and `assets\` into the staging directory next to `python3XX.dll`.
 
-6. **Create the zip archive**:
+6. **Create the RAR archive**:
    
+   Create the release archive using WinRAR or `rar.exe` CLI:
+
    ```powershell
-   Compress-Archive -Path "$StagingDir\*" -DestinationPath "ansimuz-windows-x64.zip"
+   rar a -ep1 -r "ansimuz-windows-v<version>-x64.rar" "$StagingDir\*"
    ```
 
 ### Verifying the Portable Release
 
 To verify the portable bundle before publishing:
-1. Extract the `.zip` archive on a clean Windows machine (or in a sandbox/VM) without Python registered in system `PATH`.
-2. Ensure `mpv` and `yt-dlp` are installed in `PATH`.
-3. Run `ansimuz.exe` from the unzipped directory and confirm search, playback, artwork decoding, and animation frames initialize properly.
+1. Extract the `.rar` archive on a clean Windows machine (or in a sandbox/VM) without Python registered in system `PATH`.
+2. Ensure `mpv` and `yt-dlp` are installed in `PATH` (e.g. `winget install --id shinchiro.mpv -e` and `winget install --id yt-dlp.yt-dlp -e`).
+3. Run `ansimuz.exe` from the extracted directory and confirm search, playback, artwork decoding, and animation frames initialize properly.
 ---
+
+## Release Workflow
+
+ANSImuz produces releases through a combination of automated CI artifact generation and manual package distribution:
+
+### 1. GitHub Actions (Automated Package Generation)
+
+When a release tag is pushed (e.g. `v0.1.3`) or triggered manually via `workflow_dispatch` on [`.github/workflows/release.yml`](.github/workflows/release.yml):
+- **Validation**: Verifies that the tag format matches `Cargo.toml`, checks that `packaging/rpm/ansimuz.spec` references an ancestor commit of the tag, and verifies spec dependencies.
+- **Arch Linux Package (`arch-package`)**: Compiles the release binary in an `archlinux:latest` container and packages `ansimuz-git-*.pkg.tar.zst`.
+- **Fedora Source RPM (`fedora-srpm`)**: Uses `spectool` and `rpmbuild -bs` in a `fedora:45` container to build `ansimuz-*.src.rpm`.
+
+### 2. Manual Fedora COPR Publishing
+
+1. Download the generated `ansimuz-*.src.rpm` from the GitHub Actions run artifacts.
+2. Upload the SRPM to the [`greenbugx/ansimuz`](https://copr.fedorainfracloud.org/coprs/greenbugx/ansimuz/) COPR project (via the web UI or `copr-cli build greenbugx/ansimuz ansimuz-*.src.rpm`).
+3. Wait for COPR chroots (`fedora-43`, `fedora-44`, `fedora-45`, `fedora-rawhide`) to finish building.
+4. Download the compiled binary RPM packages (`ansimuz-*.rpm`).
+
+*(Note: `python-spotifyscraper` is maintained in the same COPR repository and does not need to be rebuilt unless its upstream package changes).*
+
+### 3. Windows Portable Bundle Creation
+
+Follow the [Packaging (Windows Portable Release)](#packaging-windows-portable-release) procedure to create `ansimuz-windows-v<version>-x64.rar`.
+
+### 4. Manual GitHub Release
+
+1. Create a GitHub Release corresponding to the version tag (e.g. `v0.1.x`).
+2. Generate SHA256 checksums across all distribution assets:
+
+```bash
+   sha256sum ansimuz-git-*.pkg.tar.zst ansimuz-*.rpm ansimuz-windows-*.rar > SHA256SUMS
+```
+
+3. Attach the release assets to the GitHub Release:
+   - Arch Linux package (`ansimuz-git-*.pkg.tar.zst`)
+   - Fedora binary RPM packages (`ansimuz-*.rpm`)
+   - Windows portable archive (`ansimuz-windows-v<version>-x64.rar`)
+   - `SHA256SUMS` checksum verification file
 
 ## Validation Before Submitting
 
