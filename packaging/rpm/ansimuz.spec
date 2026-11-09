@@ -1,10 +1,10 @@
-%global commit 6143266e86a28c054c8d219b291f4b309132558d
+%global commit 9b25595ed295f3259c35a40e0905d8b1c49461c1
 
 # Keep distro LTO flags out of the aws-lc-sys C build (breaks linking with rust-lld).
 %global _lto_cflags %{nil}
 
 Name:           ansimuz
-Version:        0.1.2
+Version:        0.1.3
 Release:        1%{?dist}
 Summary:        A lightweight fast TUI to stream your favourite music with pure 8-bit ANSI vibes
 
@@ -59,5 +59,5 @@ cp -a backend assets \
 %{_datadir}/ansimuz/
 
 %changelog
-* Sun Nov 01 2026 Greenbugx <jesuschetia.gg@gmail.com> - 0.1.2-1
-- Release ANSImuz v0.1.2
+* Mon Nov 09 2026 Greenbugx <jesuschetia.gg@gmail.com> - 0.1.3-1
+- Release ANSImuz v0.1.3
