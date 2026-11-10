@@ -48,6 +48,7 @@ dependencies = [
  "crossterm",
  "image",
  "interprocess",
+ "presenceforge",
  "pyo3",
  "ratatui",
  "ratatui-image",
@@ -314,6 +315,12 @@ dependencies = [
  "quote",
  "syn 3.0.9",
 ]
+
+[[package]]
+name = "byteorder"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "byteorder-lite"
@@ -2046,6 +2053,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
  "zerocopy",
+]
+
+[[package]]
+name = "presenceforge"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "560be75d8f005d68729e77cdde0564e6cec73cac2725d209704e50fc5f434850"
+dependencies = [
+ "byteorder",
+ "bytes",
+ "libc",
+ "log",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "uuid",
 ]
 
 [[package]]
