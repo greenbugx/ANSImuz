@@ -113,7 +113,7 @@ fn test_discord_client_abstraction() {
 
 #[test]
 fn test_discord_worker_thread_non_blocking() {
-    let mut worker = DiscordWorker::spawn(TEST_CLIENT_ID);
+    let mut worker = DiscordWorker::spawn(TEST_CLIENT_ID).expect("spawn worker");
 
     // Send commands non-blocking
     let track = PlaybackInfo::new("Bohemian Rhapsody", "Queen")

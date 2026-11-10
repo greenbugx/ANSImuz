@@ -87,5 +87,10 @@ pub fn run(
     }
 
     player.stop();
+
+    if let Some(mut worker) = app.discord_worker.take() {
+        worker.shutdown();
+    }
+
     Ok(())
 }

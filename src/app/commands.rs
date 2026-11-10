@@ -264,7 +264,8 @@ pub fn dispatch_action(
                             if new_paused {
                                 worker.paused();
                             } else {
-                                worker.resumed(std::time::Duration::ZERO);
+                                let pos = app.current_position.unwrap_or(std::time::Duration::ZERO);
+                                worker.resumed(pos);
                             }
                         }
                         app.set_status(if app.is_paused() {

@@ -531,3 +531,98 @@ fn test_resolve_dispatch_contract_returns_channel_response() {
     assert!(resp.result.is_ok());
     assert_eq!(resp.result.unwrap().title, "Cached Song");
 }
+
+#[test]
+fn test_player_position_generation_tracking_and_stale_rejection() {
+    let mut app = App::new();
+    let mut player = AudioPlayer::new_mock();
+    let (player_tx, _player_rx) = mpsc::channel::<PlayerEvent>();
+    let (resolve_tx, _resolve_rx) = mpsc::channel::<ResolveResponse>();
+    let mut playback = None;
+
+    let t0 = make_test_track("Track 0", "Artist", "http://stream/0");
+    play_track(
+        &mut app,
+        &mut player,
+        player_tx.clone(),
+        resolve_tx.clone(),
+        t0,
+        PlaybackSource::SearchResult { index: 0 },
+    );
+    let gen0 = player.generation();
+
+    // Valid position event for gen0
+    let accepted = handle_player_event(
+        &mut app,
+        &mut player,
+        &player_tx,
+        &resolve_tx,
+        PlayerEvent::Position {
+            generation: gen0,
+            elapsed: 15.0,
+            duration: Some(180.0),
+        },
+        &mut playback,
+    );
+    assert!(accepted);
+    assert_eq!(
+        app.current_position,
+        Some(std::time::Duration::from_secs(15))
+    );
+
+    // Track switches to Track 1 -> generation increments, position resets to 0
+    let t1 = make_test_track("Track 1", "Artist", "http://stream/1");
+    play_track(
+        &mut app,
+        &mut player,
+        player_tx.clone(),
+        resolve_tx.clone(),
+        t1,
+        PlaybackSource::SearchResult { index: 1 },
+    );
+    let gen1 = player.generation();
+    assert_ne!(gen0, gen1);
+    assert_eq!(app.current_position, Some(std::time::Duration::ZERO));
+
+    // Stale position event for gen0 arrives -> rejected!
+    let stale_accepted = handle_player_event(
+        &mut app,
+        &mut player,
+        &player_tx,
+        &resolve_tx,
+        PlayerEvent::Position {
+            generation: gen0,
+            elapsed: 30.0,
+            duration: Some(180.0),
+        },
+        &mut playback,
+    );
+    assert!(
+        !stale_accepted,
+        "Stale generation position event must be rejected"
+    );
+    assert_eq!(
+        app.current_position,
+        Some(std::time::Duration::ZERO),
+        "Stale event must not update position"
+    );
+
+    // Position event for gen1 arrives -> accepted!
+    let gen1_accepted = handle_player_event(
+        &mut app,
+        &mut player,
+        &player_tx,
+        &resolve_tx,
+        PlayerEvent::Position {
+            generation: gen1,
+            elapsed: 5.0,
+            duration: Some(180.0),
+        },
+        &mut playback,
+    );
+    assert!(gen1_accepted);
+    assert_eq!(
+        app.current_position,
+        Some(std::time::Duration::from_secs(5))
+    );
+}

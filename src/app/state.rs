@@ -129,6 +129,7 @@ pub struct App {
     pub pending_queue_entry_id: Option<u64>,
     pub history: VecDeque<Track>,
     pub playback_state: PlaybackState,
+    pub current_position: Option<Duration>,
     pub discord_worker: Option<crate::discord::DiscordWorker>,
 }
 
@@ -171,14 +172,17 @@ impl App {
             history: VecDeque::new(),
             pending_queue_entry_id: None,
             playback_state: PlaybackState::Stopped,
+            current_position: None,
             discord_worker: None,
         }
     }
 
     pub fn init_discord(&mut self) {
         if self.settings.discord_rpc && self.discord_worker.is_none() {
-            let worker = crate::discord::DiscordWorker::spawn(crate::discord::DEFAULT_CLIENT_ID);
-            self.discord_worker = Some(worker);
+            match crate::discord::DiscordWorker::spawn(crate::discord::DEFAULT_CLIENT_ID) {
+                Ok(worker) => self.discord_worker = Some(worker),
+                Err(err) => self.set_status(format!("DISCORD RPC ERROR: {err}")),
+            }
         }
     }
 
@@ -192,27 +196,42 @@ impl App {
 
     pub fn toggle_discord_rpc(&mut self) {
         self.settings.discord_rpc = !self.settings.discord_rpc;
+        if let Err(error) = self.settings.save() {
+            self.set_status(format!("SETTINGS ERROR: {error}"));
+        }
+
         if self.settings.discord_rpc {
             if self.discord_worker.is_none() {
-                let worker =
-                    crate::discord::DiscordWorker::spawn(crate::discord::DEFAULT_CLIENT_ID);
-                if let Some(track) = self.current_track() {
-                    let mut info = crate::discord::PlaybackInfo::new(&track.title, &track.artist);
-                    if let Some(album) = &track.album {
-                        info = info.with_album(album);
+                match crate::discord::DiscordWorker::spawn(crate::discord::DEFAULT_CLIENT_ID) {
+                    Ok(worker) => {
+                        if let Some(track) = self.current_track() {
+                            let mut info =
+                                crate::discord::PlaybackInfo::new(&track.title, &track.artist);
+                            if let Some(album) = &track.album {
+                                info = info.with_album(album);
+                            }
+                            if let Some(dur_ms) = track.duration_ms {
+                                info = info.with_duration(Duration::from_millis(dur_ms));
+                            }
+                            if let Some(pos) = self.current_position {
+                                info = info.with_position(pos);
+                            }
+                            if self.is_paused() {
+                                info = info.with_paused(true);
+                            }
+                            // Sharing temporary/internal stream URLs through Discord activity button
+                            // Disabled for now until proper public track URLs are available.
+                            // if track.has_stream_url() {
+                            //     info = info.with_stream_url(&track.stream_url);
+                            // }
+                            worker.track_changed(info);
+                        }
+                        self.discord_worker = Some(worker);
                     }
-                    if let Some(dur_ms) = track.duration_ms {
-                        info = info.with_duration(std::time::Duration::from_millis(dur_ms));
+                    Err(err) => {
+                        self.set_status(format!("DISCORD RPC ERROR: {err}"));
                     }
-                    if self.is_paused() {
-                        info = info.with_paused(true);
-                    }
-                    if track.has_stream_url() {
-                        info = info.with_stream_url(&track.stream_url);
-                    }
-                    worker.track_changed(info);
                 }
-                self.discord_worker = Some(worker);
             }
         } else if let Some(mut worker) = self.discord_worker.take() {
             worker.clear();
@@ -263,6 +282,7 @@ impl App {
 
     pub fn set_stopped(&mut self) {
         self.playback_state = PlaybackState::Stopped;
+        self.current_position = None;
         self.pending_queue_entry_id = None;
         self.playing = None;
     }
@@ -318,6 +338,7 @@ impl App {
 
     pub fn set_playing(&mut self, track: Track) {
         self.playback_state = PlaybackState::Playing { track };
+        self.current_position = Some(Duration::ZERO);
         self.pending_queue_entry_id = None;
     }
 

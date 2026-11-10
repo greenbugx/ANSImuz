@@ -204,9 +204,11 @@ pub fn handle_player_event(
             if generation != current {
                 return false;
             }
+            let pos_dur = Duration::from_secs_f64(elapsed);
+            app.current_position = Some(pos_dur);
             *playback = Some((elapsed, duration));
             if let Some(worker) = &app.discord_worker {
-                worker.position_changed(Duration::from_secs_f64(elapsed));
+                worker.position_changed(pos_dur);
             }
             true
         }
@@ -214,6 +216,7 @@ pub fn handle_player_event(
             if generation != current {
                 return false;
             }
+            app.current_position = None;
             *playback = None;
             if app.is_resolving() {
                 app.finish_active_track_while_resolving();
@@ -229,6 +232,7 @@ pub fn handle_player_event(
             if generation != current {
                 return false;
             }
+            app.current_position = None;
             *playback = None;
             if app.is_resolving() {
                 player.record_error(message.to_string());
@@ -432,9 +436,11 @@ pub fn start_playback(
                 if let Some(dur_ms) = track.duration_ms {
                     info = info.with_duration(Duration::from_millis(dur_ms));
                 }
-                if track.has_stream_url() {
-                    info = info.with_stream_url(&track.stream_url);
-                }
+                // Sharing temporary/internal stream URLs through Discord activity button
+                // Disabled for now until proper public track URLs are available.
+                // if track.has_stream_url() {
+                //     info = info.with_stream_url(&track.stream_url);
+                // }
                 worker.track_changed(info);
             }
             Ok(())

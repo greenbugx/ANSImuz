@@ -26,7 +26,7 @@ pub struct DiscordWorker {
 }
 
 impl DiscordWorker {
-    pub fn spawn(client_id: impl Into<String>) -> Self {
+    pub fn spawn(client_id: impl Into<String>) -> std::io::Result<Self> {
         let (sender, receiver) = channel();
         let client_id = client_id.into();
         let connected = Arc::new(AtomicBool::new(false));
@@ -36,14 +36,13 @@ impl DiscordWorker {
             .name("discord-rpc-worker".to_string())
             .spawn(move || {
                 run_worker_loop(&client_id, receiver, connected_flag);
-            })
-            .expect("Failed to spawn Discord RPC worker thread");
+            })?;
 
-        Self {
+        Ok(Self {
             sender,
             connected,
             thread_handle: Some(thread_handle),
-        }
+        })
     }
 
     pub fn is_connected(&self) -> bool {
@@ -325,13 +324,43 @@ mod tests {
 
     #[test]
     fn test_worker_lifecycle_and_channel_drain() {
-        let mut worker = DiscordWorker::spawn("dummy_id");
+        let mut worker = DiscordWorker::spawn("dummy_id").expect("spawn worker");
         assert!(!worker.is_connected());
         let track = PlaybackInfo::new("Title", "Artist");
         worker.track_changed(track);
         worker.position_changed(Duration::from_secs(10));
         worker.paused();
         worker.resumed(Duration::from_secs(10));
+        worker.clear();
+        worker.shutdown();
+    }
+
+    #[test]
+    fn test_worker_seek_and_pause_resume_commands() {
+        let mut worker = DiscordWorker::spawn("dummy_id").expect("spawn worker");
+        let track = PlaybackInfo::new("Title", "Artist")
+            .with_position(Duration::from_secs(10))
+            .with_duration(Duration::from_secs(300));
+        worker.track_changed(track);
+
+        // Small incremental tick (<= 2s should not trigger redundant seek)
+        worker.position_changed(Duration::from_secs(11));
+
+        // Forward seek (> 2s)
+        worker.position_changed(Duration::from_secs(50));
+
+        // Backward seek (> 2s)
+        worker.position_changed(Duration::from_secs(20));
+
+        // Pause
+        worker.paused();
+
+        // Position event while paused
+        worker.position_changed(Duration::from_secs(20));
+
+        // Resume at position
+        worker.resumed(Duration::from_secs(20));
+
         worker.clear();
         worker.shutdown();
     }
