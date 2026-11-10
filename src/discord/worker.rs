@@ -1,6 +1,5 @@
 use crate::discord::activity::{PlaybackInfo, build_activity};
 use crate::discord::client::DiscordClient;
-use presenceforge::activity::Activity;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -8,27 +7,13 @@ use std::time::{Duration, Instant};
 const INITIAL_RECONNECT_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_RECONNECT_INTERVAL: Duration = Duration::from_secs(60);
 
-#[derive(Clone, Debug)]
-enum StoredPresence {
-    Playback(PlaybackInfo),
-    Custom(Activity),
-}
-
-impl StoredPresence {
-    fn to_activity(&self) -> Activity {
-        match self {
-            Self::Playback(info) => build_activity(info),
-            Self::Custom(activity) => activity.clone(),
-        }
-    }
-}
-
 #[derive(Debug)]
 pub enum DiscordCommand {
-    UpdatePlayback(PlaybackInfo),
-    SetActivity(Activity),
-    ClearActivity,
-    Reconnect,
+    TrackChanged(PlaybackInfo),
+    PositionChanged(Duration),
+    Paused,
+    Resumed(Duration),
+    Clear,
     Shutdown,
 }
 
@@ -59,20 +44,24 @@ impl DiscordWorker {
         &self.sender
     }
 
-    pub fn update_playback(&self, info: PlaybackInfo) {
-        let _ = self.sender.send(DiscordCommand::UpdatePlayback(info));
+    pub fn track_changed(&self, info: PlaybackInfo) {
+        let _ = self.sender.send(DiscordCommand::TrackChanged(info));
     }
 
-    pub fn set_activity(&self, activity: Activity) {
-        let _ = self.sender.send(DiscordCommand::SetActivity(activity));
+    pub fn position_changed(&self, pos: Duration) {
+        let _ = self.sender.send(DiscordCommand::PositionChanged(pos));
     }
 
-    pub fn clear_activity(&self) {
-        let _ = self.sender.send(DiscordCommand::ClearActivity);
+    pub fn paused(&self) {
+        let _ = self.sender.send(DiscordCommand::Paused);
     }
 
-    pub fn reconnect(&self) {
-        let _ = self.sender.send(DiscordCommand::Reconnect);
+    pub fn resumed(&self, pos: Duration) {
+        let _ = self.sender.send(DiscordCommand::Resumed(pos));
+    }
+
+    pub fn clear(&self) {
+        let _ = self.sender.send(DiscordCommand::Clear);
     }
 
     pub fn shutdown(&mut self) {
@@ -92,7 +81,7 @@ impl Drop for DiscordWorker {
 fn run_worker_loop(client_id: &str, receiver: Receiver<DiscordCommand>) {
     let mut client = DiscordClient::new(client_id);
     let mut connected = client.connect().is_ok();
-    let mut current_presence: Option<StoredPresence> = None;
+    let mut current_playback: Option<PlaybackInfo> = None;
 
     let mut current_backoff = INITIAL_RECONNECT_INTERVAL;
     let mut next_reconnect_at: Option<Instant> = if connected {
@@ -102,7 +91,6 @@ fn run_worker_loop(client_id: &str, receiver: Receiver<DiscordCommand>) {
     };
 
     loop {
-        // Calculate timeout until next scheduled reconnect attempt
         let timeout = if !connected {
             if let Some(next_at) = next_reconnect_at {
                 let now = Instant::now();
@@ -115,36 +103,68 @@ fn run_worker_loop(client_id: &str, receiver: Receiver<DiscordCommand>) {
                 Duration::ZERO
             }
         } else {
-            // Idle wait when connected
             Duration::from_secs(10)
         };
 
         match receiver.recv_timeout(timeout) {
             Ok(cmd) => match cmd {
-                DiscordCommand::UpdatePlayback(info) => {
-                    let presence = StoredPresence::Playback(info);
-                    apply_presence(
+                DiscordCommand::TrackChanged(info) => {
+                    apply_playback(
                         &mut client,
                         &mut connected,
                         &mut next_reconnect_at,
                         &mut current_backoff,
-                        &presence,
+                        &info,
                     );
-                    current_presence = Some(presence);
+                    current_playback = Some(info);
                 }
-                DiscordCommand::SetActivity(activity) => {
-                    let presence = StoredPresence::Custom(activity);
-                    apply_presence(
-                        &mut client,
-                        &mut connected,
-                        &mut next_reconnect_at,
-                        &mut current_backoff,
-                        &presence,
-                    );
-                    current_presence = Some(presence);
+                DiscordCommand::PositionChanged(pos) => {
+                    if let Some(info) = &mut current_playback {
+                        let old_pos = info.position.unwrap_or(Duration::ZERO);
+                        info.position = Some(pos);
+                        // Discord automatically client-side interpolates start/end timestamps.
+                        // Only refresh activity if a seek caused a significant jump, i.e. greater than 2s
+                        let seeked = pos.abs_diff(old_pos) > Duration::from_secs(2);
+                        if seeked && !info.is_paused {
+                            apply_playback(
+                                &mut client,
+                                &mut connected,
+                                &mut next_reconnect_at,
+                                &mut current_backoff,
+                                info,
+                            );
+                        }
+                    }
                 }
-                DiscordCommand::ClearActivity => {
-                    current_presence = None;
+                DiscordCommand::Paused => {
+                    if let Some(info) = &mut current_playback
+                        && !info.is_paused
+                    {
+                        info.is_paused = true;
+                        apply_playback(
+                            &mut client,
+                            &mut connected,
+                            &mut next_reconnect_at,
+                            &mut current_backoff,
+                            info,
+                        );
+                    }
+                }
+                DiscordCommand::Resumed(pos) => {
+                    if let Some(info) = &mut current_playback {
+                        info.is_paused = false;
+                        info.position = Some(pos);
+                        apply_playback(
+                            &mut client,
+                            &mut connected,
+                            &mut next_reconnect_at,
+                            &mut current_backoff,
+                            info,
+                        );
+                    }
+                }
+                DiscordCommand::Clear => {
+                    current_playback = None;
                     if connected && client.clear_activity().is_err() {
                         mark_disconnected(
                             &mut client,
@@ -153,19 +173,6 @@ fn run_worker_loop(client_id: &str, receiver: Receiver<DiscordCommand>) {
                             &mut current_backoff,
                         );
                     }
-                }
-                DiscordCommand::Reconnect => {
-                    client.disconnect();
-                    connected = false;
-                    current_backoff = INITIAL_RECONNECT_INTERVAL;
-                    next_reconnect_at = None;
-                    try_reconnect(
-                        &mut client,
-                        &mut connected,
-                        &mut next_reconnect_at,
-                        &mut current_backoff,
-                        current_presence.as_ref(),
-                    );
                 }
                 DiscordCommand::Shutdown => {
                     if connected {
@@ -176,14 +183,13 @@ fn run_worker_loop(client_id: &str, receiver: Receiver<DiscordCommand>) {
                 }
             },
             Err(RecvTimeoutError::Timeout) => {
-                // Scheduled reconnect retry when disconnected
                 if !connected {
                     try_reconnect(
                         &mut client,
                         &mut connected,
                         &mut next_reconnect_at,
                         &mut current_backoff,
-                        current_presence.as_ref(),
+                        current_playback.as_ref(),
                     );
                 }
             }
@@ -198,30 +204,30 @@ fn run_worker_loop(client_id: &str, receiver: Receiver<DiscordCommand>) {
     }
 }
 
-fn apply_presence(
+fn apply_playback(
     client: &mut DiscordClient,
     connected: &mut bool,
     next_reconnect_at: &mut Option<Instant>,
     current_backoff: &mut Duration,
-    presence: &StoredPresence,
+    playback: &PlaybackInfo,
 ) {
     if !*connected {
         let now = Instant::now();
-        let ready_for_reconnect = next_reconnect_at.is_none_or(|next_at| now >= next_at);
-        if ready_for_reconnect {
+        let ready = next_reconnect_at.is_none_or(|next_at| now >= next_at);
+        if ready {
             try_reconnect(
                 client,
                 connected,
                 next_reconnect_at,
                 current_backoff,
-                Some(presence),
+                Some(playback),
             );
             return;
         }
     }
 
     if *connected {
-        let activity = presence.to_activity();
+        let activity = build_activity(playback);
         if client.set_activity(&activity).is_err() {
             mark_disconnected(client, connected, next_reconnect_at, current_backoff);
         }
@@ -233,7 +239,7 @@ fn try_reconnect(
     connected: &mut bool,
     next_reconnect_at: &mut Option<Instant>,
     current_backoff: &mut Duration,
-    presence: Option<&StoredPresence>,
+    playback: Option<&PlaybackInfo>,
 ) {
     client.disconnect();
     if client.connect().is_ok() {
@@ -241,8 +247,8 @@ fn try_reconnect(
         *current_backoff = INITIAL_RECONNECT_INTERVAL;
         *next_reconnect_at = None;
 
-        if let Some(p) = presence {
-            let activity = p.to_activity();
+        if let Some(info) = playback {
+            let activity = build_activity(info);
             if client.set_activity(&activity).is_err() {
                 mark_disconnected(client, connected, next_reconnect_at, current_backoff);
             }
@@ -272,9 +278,11 @@ mod tests {
     fn test_worker_lifecycle_and_channel_drain() {
         let mut worker = DiscordWorker::spawn("dummy_id");
         let track = PlaybackInfo::new("Title", "Artist");
-        worker.update_playback(track);
-        worker.clear_activity();
-        worker.reconnect();
+        worker.track_changed(track);
+        worker.position_changed(Duration::from_secs(10));
+        worker.paused();
+        worker.resumed(Duration::from_secs(10));
+        worker.clear();
         worker.shutdown();
     }
 }

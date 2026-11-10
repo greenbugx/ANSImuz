@@ -203,8 +203,14 @@ mod tests {
 
         // When paused, neither start nor end timestamps should be advertised
         if let Some(ts) = activity.timestamps.as_ref() {
-            assert!(ts.start.is_none(), "Paused track must not advertise start timestamp");
-            assert!(ts.end.is_none(), "Paused track must not advertise end timestamp");
+            assert!(
+                ts.start.is_none(),
+                "Paused track must not advertise start timestamp"
+            );
+            assert!(
+                ts.end.is_none(),
+                "Paused track must not advertise end timestamp"
+            );
         }
     }
 
