@@ -55,22 +55,24 @@ impl PlaybackInfo {
     }
 }
 
-fn truncate_bytes(s: &str, max_bytes: usize) -> String {
-    if s.len() <= max_bytes {
+fn truncate_activity_text(s: &str, max_chars: usize, max_bytes: usize) -> String {
+    if s.chars().count() <= max_chars && s.len() <= max_bytes {
         return s.to_string();
     }
-    const ELLIPSIS: &str = "…";
-    let target = max_bytes.saturating_sub(ELLIPSIS.len());
-    let mut end = 0;
-    for (idx, _) in s.char_indices() {
-        if idx <= target {
-            end = idx;
-        } else {
+
+    const ELLIPSIS: char = '…';
+    let ellipsis_bytes = ELLIPSIS.len_utf8();
+    let char_budget = max_chars.saturating_sub(1);
+    let byte_budget = max_bytes.saturating_sub(ellipsis_bytes);
+
+    let mut result = String::new();
+    for (count, ch) in s.chars().enumerate() {
+        if count >= char_budget || result.len() + ch.len_utf8() > byte_budget {
             break;
         }
+        result.push(ch);
     }
-    let mut result = s[..end].to_string();
-    result.push_str(ELLIPSIS);
+    result.push(ELLIPSIS);
     result
 }
 
@@ -82,7 +84,7 @@ pub fn build_activity(info: &PlaybackInfo) -> Activity {
     let details = if info.title.trim().is_empty() {
         "Unknown Track".to_string()
     } else {
-        truncate_bytes(info.title.trim(), 128)
+        truncate_activity_text(info.title.trim(), 128, 128)
     };
     builder = builder.details(details);
 
@@ -94,7 +96,7 @@ pub fn build_activity(info: &PlaybackInfo) -> Activity {
         _ if !info.artist.trim().is_empty() => info.artist.trim().to_string(),
         _ => "Unknown Artist".to_string(),
     };
-    builder = builder.state(truncate_bytes(&state_text, 128));
+    builder = builder.state(truncate_activity_text(&state_text, 128, 128));
 
     // Assets: ANSImuz logo and playback status indicator
     builder = builder
@@ -196,8 +198,9 @@ mod tests {
         assert_eq!(assets.small_image.as_deref(), Some("pause"));
         assert_eq!(assets.small_text.as_deref(), Some("Paused"));
 
-        // When paused, end timestamp should not be set
+        // When paused, neither start nor end timestamps should be set
         if let Some(ts) = activity.timestamps.as_ref() {
+            assert!(ts.start.is_none());
             assert!(ts.end.is_none());
         }
     }
@@ -210,7 +213,24 @@ mod tests {
 
         let activity = build_activity(&info);
 
+        assert!(activity.details.as_ref().unwrap().chars().count() <= 128);
         assert!(activity.details.as_ref().unwrap().len() <= 128);
+        assert!(activity.state.as_ref().unwrap().chars().count() <= 128);
+        assert!(activity.state.as_ref().unwrap().len() <= 128);
+        assert!(activity.validate().is_ok());
+    }
+
+    #[test]
+    fn test_build_activity_multibyte_truncation() {
+        let multibyte_title = "日本語タイトル".repeat(30); // 30 * 7 = 210 chars, 630 bytes
+        let multibyte_artist = "アーティスト名".repeat(30);
+        let info = PlaybackInfo::new(multibyte_title, multibyte_artist);
+
+        let activity = build_activity(&info);
+
+        assert!(activity.details.as_ref().unwrap().chars().count() <= 128);
+        assert!(activity.details.as_ref().unwrap().len() <= 128);
+        assert!(activity.state.as_ref().unwrap().chars().count() <= 128);
         assert!(activity.state.as_ref().unwrap().len() <= 128);
         assert!(activity.validate().is_ok());
     }
