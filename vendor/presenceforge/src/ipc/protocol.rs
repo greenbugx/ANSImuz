@@ -1,0 +1,597 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (c) 2025-2026 Sreehari Anil and project contributors
+
+use crate::error::{
+    DiscordIpcError, HandshakeFailureKind, InvalidResponseKind, ProtocolContext,
+    ProtocolViolationKind,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+fn empty_string_as_none<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    Ok(value.and_then(|s| if s.is_empty() { None } else { Some(s) }))
+}
+
+/// Partial user object from Discord READY event payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PartialUser {
+    #[serde(default, deserialize_with = "empty_string_as_none")]
+    pub id: Option<String>,
+    #[serde(default, deserialize_with = "empty_string_as_none")]
+    pub username: Option<String>,
+    #[serde(default, deserialize_with = "empty_string_as_none")]
+    pub discriminator: Option<String>,
+    #[serde(default, deserialize_with = "empty_string_as_none")]
+    pub avatar: Option<String>,
+    pub bot: Option<bool>,
+}
+
+/// READY event payload returned by Discord IPC after handshake.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadyEvent {
+    pub user: Option<PartialUser>,
+}
+
+/// Payload for ACTIVITY_JOIN event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityJoinEvent {
+    pub secret: String,
+}
+
+/// Payload for ACTIVITY_SPECTATE event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivitySpectateEvent {
+    pub secret: String,
+}
+
+/// Payload for ACTIVITY_JOIN_REQUEST event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityJoinRequestEvent {
+    pub user: PartialUser,
+}
+
+/// Payload for ERROR event from Discord
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ErrorEvent {
+    pub code: i32,
+    pub message: String,
+}
+
+/// Parsed Discord IPC events.
+#[derive(Debug, Clone)]
+pub enum EventData {
+    Ready(ReadyEvent),
+    ActivityJoin(ActivityJoinEvent),
+    ActivitySpectate(ActivitySpectateEvent),
+    ActivityJoinRequest(ActivityJoinRequestEvent),
+    Error(ErrorEvent),
+    Unknown { name: String, data: Option<Value> },
+}
+
+/// Discord IPC Opcodes
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Opcode {
+    Handshake = 0,
+    Frame = 1,
+    Close = 2,
+    Ping = 3,
+    Pong = 4,
+}
+
+impl Opcode {
+    /// Check if this opcode is a response to a handshake
+    /// In Discord IPC protocol, handshake responses actually use the Frame opcode (1)
+    pub fn is_handshake_response(&self) -> bool {
+        *self == Opcode::Frame
+    }
+
+    /// Check if this opcode is a response to a frame
+    pub fn is_frame_response(&self) -> bool {
+        *self == Opcode::Frame
+    }
+}
+
+impl TryFrom<u32> for Opcode {
+    type Error = DiscordIpcError;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Opcode::Handshake),
+            1 => Ok(Opcode::Frame),
+            2 => Ok(Opcode::Close),
+            3 => Ok(Opcode::Ping),
+            4 => Ok(Opcode::Pong),
+            _ => {
+                let context = ProtocolContext {
+                    expected_opcode: None,
+                    received_opcode: Some(value),
+                    payload_size: None,
+                };
+                Err(DiscordIpcError::protocol_violation(
+                    ProtocolViolationKind::InvalidOpcodeValue,
+                    format!("Invalid opcode value: {}", value),
+                    context,
+                ))
+            }
+        }
+    }
+}
+
+impl From<Opcode> for u32 {
+    fn from(opcode: Opcode) -> Self {
+        opcode as u32
+    }
+}
+
+/// Discord IPC Commands
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum Command {
+    SetActivity,
+    Subscribe,
+    Unsubscribe,
+}
+
+/// Discord IPC Message structure
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IpcMessage {
+    pub cmd: Command,
+    pub args: Value,
+    pub nonce: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evt: Option<String>,
+}
+
+/// Handshake payload
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandshakePayload {
+    pub v: u32,
+    pub client_id: String,
+}
+
+/// Response from Discord IPC
+#[derive(Debug, Clone, Deserialize)]
+pub struct IpcResponse {
+    pub cmd: Option<String>,
+    pub data: Option<Value>,
+    pub evt: Option<String>,
+    pub nonce: Option<String>,
+}
+
+impl IpcResponse {
+    /// Parse this response into a typed event payload when `evt` is present.
+    pub fn parse_event(&self) -> Result<Option<EventData>, DiscordIpcError> {
+        let Some(event_name) = self.evt.as_deref() else {
+            return Ok(None);
+        };
+
+        match event_name {
+            "READY" => {
+                let data = self.data.clone().ok_or_else(|| {
+                    DiscordIpcError::invalid_response(
+                        InvalidResponseKind::MissingEventData,
+                        "READY event is missing the data payload".to_string(),
+                    )
+                })?;
+                let ready = serde_json::from_value::<ReadyEvent>(data)
+                    .map_err(DiscordIpcError::DeserializationFailed)?;
+                Ok(Some(EventData::Ready(ready)))
+            }
+            "ACTIVITY_JOIN" => {
+                let data = self.data.clone().ok_or_else(|| {
+                    DiscordIpcError::invalid_response(
+                        InvalidResponseKind::MissingEventData,
+                        "ACTIVITY_JOIN event is missing data".to_string(),
+                    )
+                })?;
+                let event = serde_json::from_value::<ActivityJoinEvent>(data)
+                    .map_err(DiscordIpcError::DeserializationFailed)?;
+                Ok(Some(EventData::ActivityJoin(event)))
+            }
+            "ACTIVITY_SPECTATE" => {
+                let data = self.data.clone().ok_or_else(|| {
+                    DiscordIpcError::invalid_response(
+                        InvalidResponseKind::MissingEventData,
+                        "ACTIVITY_SPECTATE event is missing data".to_string(),
+                    )
+                })?;
+                let event = serde_json::from_value::<ActivitySpectateEvent>(data)
+                    .map_err(DiscordIpcError::DeserializationFailed)?;
+                Ok(Some(EventData::ActivitySpectate(event)))
+            }
+            "ACTIVITY_JOIN_REQUEST" => {
+                let data = self.data.clone().ok_or_else(|| {
+                    DiscordIpcError::invalid_response(
+                        InvalidResponseKind::MissingEventData,
+                        "ACTIVITY_JOIN_REQUEST event is missing data".to_string(),
+                    )
+                })?;
+                let event = serde_json::from_value::<ActivityJoinRequestEvent>(data)
+                    .map_err(DiscordIpcError::DeserializationFailed)?;
+                Ok(Some(EventData::ActivityJoinRequest(event)))
+            }
+            "ERROR" => {
+                let data = self.data.clone().ok_or_else(|| {
+                    DiscordIpcError::invalid_response(
+                        InvalidResponseKind::MissingEventData,
+                        "ERROR event is missing data".to_string(),
+                    )
+                })?;
+                let event = serde_json::from_value::<ErrorEvent>(data)
+                    .map_err(DiscordIpcError::DeserializationFailed)?;
+                Ok(Some(EventData::Error(event)))
+            }
+            other => Ok(Some(EventData::Unknown {
+                name: other.to_string(),
+                data: self.data.clone(),
+            })),
+        }
+    }
+
+    /// Parse this response as the READY dispatch required to complete the initial handshake.
+    pub fn parse_ready_handshake(self) -> Result<ReadyEvent, DiscordIpcError> {
+        match self.cmd.as_deref() {
+            Some("DISPATCH") => {}
+            Some(other) => {
+                return Err(DiscordIpcError::handshake_failed(
+                    HandshakeFailureKind::UnexpectedCommand,
+                    format!("Expected DISPATCH command in handshake response, got {other}"),
+                ));
+            }
+            None => {
+                return Err(DiscordIpcError::handshake_failed(
+                    HandshakeFailureKind::UnexpectedCommand,
+                    "Handshake response is missing cmd".to_string(),
+                ));
+            }
+        }
+
+        match self.evt.as_deref() {
+            Some("READY") => {}
+            Some(other) => {
+                return Err(DiscordIpcError::handshake_failed(
+                    HandshakeFailureKind::UnexpectedEvent,
+                    format!("Expected READY event in handshake response, got {other}"),
+                ));
+            }
+            None => {
+                return Err(DiscordIpcError::handshake_failed(
+                    HandshakeFailureKind::UnexpectedEvent,
+                    "Handshake response is missing evt".to_string(),
+                ));
+            }
+        }
+
+        let data = self.data.ok_or_else(|| {
+            DiscordIpcError::handshake_failed(
+                HandshakeFailureKind::MissingReadyData,
+                "READY handshake response is missing data".to_string(),
+            )
+        })?;
+
+        serde_json::from_value::<ReadyEvent>(data).map_err(DiscordIpcError::DeserializationFailed)
+    }
+}
+
+/// Validate a handshake response and return the typed READY payload.
+pub fn validate_handshake_response(
+    opcode: Opcode,
+    payload: &Value,
+) -> Result<ReadyEvent, DiscordIpcError> {
+    if let Some(err) = payload.get("error") {
+        if let (Some(code), Some(message)) = (
+            err.get("code").and_then(|c| c.as_i64()),
+            err.get("message").and_then(|m| m.as_str()),
+        ) {
+            return Err(DiscordIpcError::discord_error(code as i32, message));
+        }
+
+        return Err(DiscordIpcError::handshake_failed(
+            HandshakeFailureKind::InvalidErrorPayload,
+            format!("Invalid error format: {}", err),
+        ));
+    }
+
+    if !opcode.is_handshake_response() {
+        return Err(DiscordIpcError::handshake_failed(
+            HandshakeFailureKind::UnexpectedOpcode,
+            format!("Expected handshake response opcode, got {:?}", opcode),
+        ));
+    }
+
+    let response: IpcResponse =
+        serde_json::from_value(payload.clone()).map_err(DiscordIpcError::DeserializationFailed)?;
+    response.parse_ready_handshake()
+}
+
+/// Constants and configuration for Discord IPC protocol
+pub mod constants {
+    /// Discord IPC protocol version
+    ///
+    /// This is the version number sent during the handshake process.
+    /// Discord currently uses version 1 for its IPC protocol.
+    /// This should match the version Discord expects.
+    pub const IPC_VERSION: u32 = 1;
+
+    /// Maximum number of IPC socket/pipe instances to scan
+    ///
+    /// Discord creates numbered IPC sockets from 0 to 9 (discord-ipc-0 through discord-ipc-9).
+    /// Each socket represents a potential Discord client instance.
+    /// Value of 10 allows checking all possible Discord instances.
+    ///
+    /// # Background
+    /// - Discord can run multiple instances (PTB, Canary, Stable)
+    /// - Each instance may use a different socket number
+    /// - The official Discord RPC client scans up to 10 sockets
+    ///
+    /// # Platform Notes
+    /// - Unix: Named sockets in XDG_RUNTIME_DIR or /tmp
+    /// - Windows: Named pipes (\\\\.\\pipe\\discord-ipc-N)
+    pub const MAX_IPC_SOCKETS: u8 = 10;
+
+    /// IPC socket name prefix used for socket discovery
+    ///
+    /// Discord IPC sockets follow the naming pattern: `discord-ipc-{N}`
+    /// where N is a number from 0 to MAX_IPC_SOCKETS-1.
+    pub const IPC_SOCKET_PREFIX: &str = "discord-ipc-";
+
+    /// Default connection retry interval in milliseconds
+    ///
+    /// When auto-discovery fails to find an available socket,
+    /// the connection attempt waits this amount of time before retrying.
+    /// 100ms provides a good balance between responsiveness and CPU usage.
+    pub const DEFAULT_RETRY_INTERVAL_MS: u64 = 100;
+
+    /// Maximum size for IPC payload data (16 MB)
+    ///
+    /// Discord IPC messages should not exceed this size.
+    /// This is a safety limit to prevent excessive memory allocation
+    /// from malformed or malicious data.
+    ///
+    /// # Note
+    /// Typical Discord Rich Presence payloads are less than 1 KB.
+    /// This limit is intentionally generous for future compatibility.
+    pub const MAX_PAYLOAD_SIZE: u32 = 16 * 1024 * 1024;
+
+    /// Size of the IPC message header in bytes
+    ///
+    /// Discord IPC protocol uses an 8-byte header:
+    /// - 4 bytes: Opcode (u32, little-endian)
+    /// - 4 bytes: Payload length (u32, little-endian)
+    pub const IPC_HEADER_SIZE: usize = 8;
+}
+
+/// Configuration for Discord IPC protocol behavior
+///
+/// Allows customization of protocol parameters for different Discord setups
+/// or special use cases (testing, non-standard installations, etc.)
+#[derive(Debug, Clone)]
+pub struct IpcConfig {
+    /// Maximum number of socket instances to scan during auto-discovery
+    pub max_sockets: u8,
+
+    /// Retry interval in milliseconds when connection fails
+    pub retry_interval_ms: u64,
+
+    /// Maximum allowed payload size in bytes
+    pub max_payload_size: u32,
+
+    /// IPC protocol version to use in handshake
+    pub ipc_version: u32,
+}
+
+impl Default for IpcConfig {
+    fn default() -> Self {
+        Self {
+            max_sockets: constants::MAX_IPC_SOCKETS,
+            retry_interval_ms: constants::DEFAULT_RETRY_INTERVAL_MS,
+            max_payload_size: constants::MAX_PAYLOAD_SIZE,
+            ipc_version: constants::IPC_VERSION,
+        }
+    }
+}
+
+impl IpcConfig {
+    /// Create a new IpcConfig with default values
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a configuration optimized for faster connection attempts
+    ///
+    /// Useful when you know Discord is running and want quick connection.
+    /// Reduces retry interval and socket scan range.
+    pub fn fast_connect() -> Self {
+        Self {
+            max_sockets: 3,        // Only check first 3 sockets
+            retry_interval_ms: 50, // Retry faster
+            ..Default::default()
+        }
+    }
+
+    /// Create a configuration for testing or non-standard Discord installations
+    ///
+    /// Allows scanning more socket instances and has longer retry intervals
+    /// for slower systems or unusual configurations.
+    pub fn extended() -> Self {
+        Self {
+            max_sockets: 10,
+            retry_interval_ms: 200,
+            ..Default::default()
+        }
+    }
+
+    /// Set the maximum number of sockets to scan
+    pub fn with_max_sockets(mut self, max_sockets: u8) -> Self {
+        self.max_sockets = max_sockets;
+        self
+    }
+
+    /// Set the retry interval in milliseconds
+    pub fn with_retry_interval(mut self, retry_interval_ms: u64) -> Self {
+        self.retry_interval_ms = retry_interval_ms;
+        self
+    }
+
+    /// Set the maximum payload size in bytes
+    pub fn with_max_payload_size(mut self, max_payload_size: u32) -> Self {
+        self.max_payload_size = max_payload_size;
+        self
+    }
+
+    /// Validate the configuration
+    ///
+    /// Returns true if all parameters are within acceptable ranges
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.max_sockets == 0 {
+            return Err("max_sockets must be greater than 0");
+        }
+        if self.max_sockets > 100 {
+            return Err("max_sockets exceeds reasonable limit (100)");
+        }
+        if self.retry_interval_ms == 0 {
+            return Err("retry_interval_ms must be greater than 0");
+        }
+        if self.retry_interval_ms > 10_000 {
+            return Err("retry_interval_ms exceeds reasonable limit (10 seconds)");
+        }
+        if self.max_payload_size < 1024 {
+            return Err("max_payload_size too small (minimum 1 KB)");
+        }
+        if self.max_payload_size > 100 * 1024 * 1024 {
+            return Err("max_payload_size too large (maximum 100 MB)");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opcode_try_from_valid_and_invalid_values() {
+        assert_eq!(Opcode::try_from(0).unwrap(), Opcode::Handshake);
+        assert_eq!(Opcode::try_from(4).unwrap(), Opcode::Pong);
+
+        let err = Opcode::try_from(42).unwrap_err();
+        assert!(matches!(err, DiscordIpcError::ProtocolViolation { .. }));
+    }
+
+    #[test]
+    fn opcode_response_checks_match_protocol() {
+        assert!(Opcode::Frame.is_handshake_response());
+        assert!(Opcode::Frame.is_frame_response());
+        assert!(!Opcode::Handshake.is_frame_response());
+    }
+
+    #[test]
+    fn ipc_config_validate_bounds() {
+        let valid = IpcConfig::default();
+        assert!(valid.validate().is_ok());
+
+        let too_many = IpcConfig::default().with_max_sockets(0);
+        assert!(too_many.validate().is_err());
+
+        let huge_payload = IpcConfig::default().with_max_payload_size(200 * 1024 * 1024);
+        assert!(huge_payload.validate().is_err());
+    }
+
+    #[test]
+    fn ipc_message_roundtrips_through_json() {
+        let message = IpcMessage {
+            cmd: Command::SetActivity,
+            args: serde_json::json!({"foo": "bar"}),
+            nonce: "1234".to_string(),
+            evt: None,
+        };
+
+        let json = serde_json::to_string(&message).expect("serialize message");
+        let deserialized: IpcMessage = serde_json::from_str(&json).expect("deserialize message");
+
+        assert_eq!(deserialized.nonce, "1234");
+        assert!(matches!(deserialized.cmd, Command::SetActivity));
+        assert_eq!(
+            deserialized.args.get("foo").and_then(Value::as_str),
+            Some("bar")
+        );
+    }
+
+    #[test]
+    fn parse_activity_join_event() {
+        let response = IpcResponse {
+            cmd: Some("DISPATCH".to_string()),
+            data: Some(serde_json::json!({"secret": "join_me"})),
+            evt: Some("ACTIVITY_JOIN".to_string()),
+            nonce: None,
+        };
+
+        let event = response.parse_event().unwrap().unwrap();
+        if let EventData::ActivityJoin(e) = event {
+            assert_eq!(e.secret, "join_me");
+        } else {
+            panic!("Expected ActivityJoin event");
+        }
+    }
+
+    #[test]
+    fn parse_error_event() {
+        let response = IpcResponse {
+            cmd: Some("DISPATCH".to_string()),
+            data: Some(serde_json::json!({"code": 4000, "message": "Bad request"})),
+            evt: Some("ERROR".to_string()),
+            nonce: None,
+        };
+
+        let event = response.parse_event().unwrap().unwrap();
+        if let EventData::Error(e) = event {
+            assert_eq!(e.code, 4000);
+            assert_eq!(e.message, "Bad request");
+        } else {
+            panic!("Expected Error event");
+        }
+    }
+
+    #[test]
+    fn validate_handshake_response_requires_ready_dispatch() {
+        let payload = serde_json::json!({
+            "cmd": "DISPATCH",
+            "evt": "READY",
+            "data": {
+                "user": {
+                    "id": "1234",
+                    "username": "tester"
+                }
+            }
+        });
+
+        let ready = validate_handshake_response(Opcode::Frame, &payload).unwrap();
+        assert_eq!(
+            ready.user.and_then(|u| u.username),
+            Some("tester".to_string())
+        );
+    }
+
+    #[test]
+    fn validate_handshake_response_rejects_non_ready_events() {
+        let payload = serde_json::json!({
+            "cmd": "DISPATCH",
+            "evt": "SOMETHING_ELSE",
+            "data": {}
+        });
+
+        let err = validate_handshake_response(Opcode::Frame, &payload).unwrap_err();
+        assert!(matches!(
+            err,
+            DiscordIpcError::HandshakeFailed {
+                kind: HandshakeFailureKind::UnexpectedEvent,
+                ..
+            }
+        ));
+    }
+}

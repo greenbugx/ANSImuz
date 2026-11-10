@@ -2058,8 +2058,6 @@ dependencies = [
 [[package]]
 name = "presenceforge"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "560be75d8f005d68729e77cdde0564e6cec73cac2725d209704e50fc5f434850"
 dependencies = [
  "byteorder",
  "bytes",
