@@ -90,7 +90,7 @@ static RESOLVED_CACHE: LazyLock<Mutex<ResolvedCache>> =
     LazyLock::new(|| Mutex::new(ResolvedCache::new(MAX_RESOLVED_CACHE_ENTRIES)));
 
 pub fn get_cached_track(track: &Track) -> Option<Track> {
-    if !track.stream_url.is_empty() {
+    if track.has_stream_url() {
         return Some(track.clone());
     }
 
@@ -99,6 +99,11 @@ pub fn get_cached_track(track: &Track) -> Option<Track> {
         Err(poisoned) => poisoned.into_inner(),
     };
 
+    if let Some(id) = &track.track_id
+        && let Some(cached) = guard.get(id)
+    {
+        return Some(cached);
+    }
     if let Some(id) = &track.spotify_id
         && let Some(cached) = guard.get(id)
     {
@@ -108,7 +113,7 @@ pub fn get_cached_track(track: &Track) -> Option<Track> {
 }
 
 pub fn cache_resolved_track(track: &Track) {
-    if track.stream_url.is_empty() {
+    if !track.has_stream_url() {
         return;
     }
 
@@ -117,6 +122,9 @@ pub fn cache_resolved_track(track: &Track) {
         Err(poisoned) => poisoned.into_inner(),
     };
 
+    if let Some(id) = &track.track_id {
+        guard.insert(id.clone(), track.clone());
+    }
     if let Some(id) = &track.spotify_id {
         guard.insert(id.clone(), track.clone());
     }
@@ -311,10 +319,22 @@ pub fn resolve_playable(track: &Track) -> Result<Track, String> {
     }
     let resolved_track = with_backend(|py, bridge| {
         let dict = PyDict::new(py);
+        dict.set_item("provider", &track.provider)?;
+        if let Some(id) = &track.track_id {
+            dict.set_item("track_id", id)?;
+        }
         dict.set_item("title", &track.title)?;
         dict.set_item("artist", &track.artist)?;
-        dict.set_item("stream_url", &track.stream_url)?;
-        dict.set_item("art_url", &track.art_url)?;
+        if let Some(stream_url) = &track.stream_url {
+            dict.set_item("stream_url", stream_url)?;
+        } else {
+            dict.set_item("stream_url", py.None())?;
+        }
+        if let Some(art_url) = &track.art_url {
+            dict.set_item("art_url", art_url)?;
+        } else {
+            dict.set_item("art_url", py.None())?;
+        }
         if let Some(id) = &track.spotify_id {
             dict.set_item("spotify_id", id)?;
         }
@@ -331,8 +351,11 @@ pub fn resolve_playable(track: &Track) -> Result<Track, String> {
         if !resolved_track.has_stream_url() {
             resolved_track.stream_url = track.stream_url.clone();
         }
-        if resolved_track.art_url.is_empty() {
+        if resolved_track.art_url.is_none() {
             resolved_track.art_url = track.art_url.clone();
+        }
+        if resolved_track.track_id.is_none() {
+            resolved_track.track_id = track.track_id.clone();
         }
         if resolved_track.spotify_id.is_none() {
             resolved_track.spotify_id = track.spotify_id.clone();

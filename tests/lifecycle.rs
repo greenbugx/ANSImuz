@@ -4,16 +4,9 @@ use ansimuz::app::{handle_player_event, play_next, play_track, state::App};
 use ansimuz::music::{PlaybackSource, ResolveResponse, Track};
 use ansimuz::playback::{AudioPlayer, PlayerEvent, Repeat};
 fn make_test_track(title: &str, artist: &str, stream_url: &str) -> Track {
-    Track {
-        title: title.into(),
-        artist: artist.into(),
-        stream_url: stream_url.into(),
-        art_url: String::new(),
-        spotify_id: None,
-        artists: vec![artist.into()],
-        album: None,
-        duration_ms: Some(180_000),
-    }
+    Track::new(title, artist)
+        .with_stream_url(stream_url)
+        .with_duration_ms(180_000)
 }
 
 #[test]

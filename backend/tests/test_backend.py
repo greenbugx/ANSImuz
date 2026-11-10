@@ -243,5 +243,130 @@ class TestArtworkThumbnails(unittest.TestCase):
         self.assertFalse(thumbnails._is_gray_placeholder(color_img))
 
 
+class TestStandardizedTrackMetadata(unittest.TestCase):
+    @patch("providers.ytmusic.ytmusic.YTMusic")
+    def test_ytmusic_standardized_metadata_with_and_without_art(self, mock_yt_cls):
+        from providers.ytmusic import ytmusic
+
+        mock_yt = MagicMock()
+        mock_yt_cls.return_value = mock_yt
+        mock_yt.search.return_value = [
+            {
+                "videoId": "vid_full",
+                "title": "Night Falls",
+                "artists": [{"name": "Jody Wisternoff"}, {"name": "Booka Shade"}],
+                "album": {"name": "Night Falls Album"},
+                "thumbnails": [
+                    {"url": "https://img.example.com/small.jpg", "width": 100, "height": 100},
+                    {"url": "https://img.example.com/large.jpg", "width": 500, "height": 500},
+                ],
+            },
+            {
+                "videoId": "vid_no_art",
+                "title": "No Art Track",
+                "artists": [{"name": "Solo Artist"}],
+                "album": "Single Album",
+                "thumbnails": [],
+            },
+            {
+                "videoId": None,
+                "title": "Missing Video ID",
+                "artists": [],
+                "album": None,
+                "thumbnails": [],
+            },
+        ]
+
+        tracks = ytmusic.search("night falls")
+        self.assertEqual(len(tracks), 3)
+
+        # Full track
+        t1 = tracks[0]
+        self.assertEqual(t1["provider"], "ytmusic")
+        self.assertEqual(t1["track_id"], "vid_full")
+        self.assertEqual(t1["title"], "Night Falls")
+        self.assertEqual(t1["artist"], "Jody Wisternoff, Booka Shade")
+        self.assertEqual(t1["album"], "Night Falls Album")
+        self.assertEqual(t1["art_url"], "https://img.example.com/large.jpg")
+        self.assertEqual(t1["stream_url"], "https://youtube.com/watch?v=vid_full")
+
+        # Track with no artwork from search (falls back to maxresdefault or None)
+        t2 = tracks[1]
+        self.assertEqual(t2["provider"], "ytmusic")
+        self.assertEqual(t2["track_id"], "vid_no_art")
+        self.assertEqual(t2["album"], "Single Album")
+        self.assertEqual(t2["art_url"], "https://img.youtube.com/vi/vid_no_art/maxresdefault.jpg")
+
+        # Track with no video_id and no artwork
+        t3 = tracks[2]
+        self.assertEqual(t3["provider"], "ytmusic")
+        self.assertIsNone(t3["track_id"])
+        self.assertIsNone(t3["album"])
+        self.assertIsNone(t3["art_url"])
+        self.assertIsNone(t3["stream_url"])
+
+    @patch("providers.spotify.spotify.SpotifyClient")
+    def test_spotify_standardized_metadata_with_and_without_art(self, mock_client_cls):
+        from providers.spotify import spotify
+
+        mock_client = MagicMock()
+        mock_client.__enter__.return_value = mock_client
+        mock_client_cls.return_value = mock_client
+
+        # Mock track objects returned by spotify_scraper
+        artist_a = MagicMock()
+        artist_a.name = "Artist A"
+        album_a = MagicMock()
+        album_a.name = "Album A"
+
+        item_full = MagicMock()
+        item_full.name = "Spotify Track"
+        item_full.id = "sp_123"
+        item_full.url = "https://open.spotify.com/track/sp_123"
+        item_full.duration_ms = 180000
+        item_full.artists = [artist_a]
+        item_full.album = album_a
+        item_full.images = [
+            {"url": "https://i.scdn.co/image/large", "width": 640, "height": 640},
+            {"url": "https://i.scdn.co/image/small", "width": 300, "height": 300},
+        ]
+
+        artist_b = MagicMock()
+        artist_b.name = "Artist B"
+
+        item_no_art = MagicMock()
+        item_no_art.name = "No Art Track"
+        item_no_art.id = "sp_456"
+        item_no_art.url = "https://open.spotify.com/track/sp_456"
+        item_no_art.duration_ms = 120000
+        item_no_art.artists = [artist_b]
+        item_no_art.album = None
+        item_no_art.images = []
+
+        response = MagicMock()
+        response.tracks = [item_full, item_no_art]
+        mock_client.search.return_value = response
+
+        tracks = spotify.search("spotify track")
+        self.assertEqual(len(tracks), 2)
+
+        t1 = tracks[0]
+        self.assertEqual(t1["provider"], "spotify")
+        self.assertEqual(t1["track_id"], "sp_123")
+        self.assertEqual(t1["title"], "Spotify Track")
+        self.assertEqual(t1["artist"], "Artist A")
+        self.assertEqual(t1["album"], "Album A")
+        self.assertEqual(t1["art_url"], "https://i.scdn.co/image/large")
+        self.assertIsNone(t1["stream_url"])  # lazy resolution
+
+        t2 = tracks[1]
+        self.assertEqual(t2["provider"], "spotify")
+        self.assertEqual(t2["track_id"], "sp_456")
+        self.assertEqual(t2["title"], "No Art Track")
+        self.assertIsNone(t2["album"])
+        self.assertIsNone(t2["art_url"])
+        self.assertIsNone(t2["stream_url"])
+
+
 if __name__ == "__main__":
     unittest.main()

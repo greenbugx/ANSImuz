@@ -15,16 +15,13 @@ use std::sync::Arc;
 use std::sync::mpsc;
 
 fn make_test_track(id: &str, title: &str, stream_url: &str) -> Track {
-    Track {
-        title: title.into(),
-        artist: "Artist".into(),
-        stream_url: stream_url.into(),
-        art_url: format!("https://img.youtube.com/vi/{id}/hqdefault.jpg"),
-        spotify_id: Some(id.into()),
-        artists: vec!["Artist".into()],
-        album: Some("Album".into()),
-        duration_ms: Some(180_000),
-    }
+    Track::new(title, "Artist")
+        .with_track_id(id)
+        .with_spotify_id(id)
+        .with_stream_url(stream_url)
+        .with_art_url(format!("https://img.youtube.com/vi/{id}/hqdefault.jpg"))
+        .with_album("Album")
+        .with_duration_ms(180_000)
 }
 static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

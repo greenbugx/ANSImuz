@@ -2,6 +2,8 @@ from ytmusicapi import YTMusic
 
 from artwork.thumbnails import prewarm_artwork_cache
 from exceptions import classify_error
+
+
 def search(query):
     try:
         yt = YTMusic()
@@ -11,18 +13,45 @@ def search(query):
 
     tracks = []
     for item in search_results[:10]:
-        artist = "Unknown Artist"
-        if "artists" in item and item["artists"]:
-            artist = item["artists"][0]["name"]
+        artists = [
+            a["name"]
+            for a in item.get("artists", [])
+            if isinstance(a, dict) and a.get("name")
+        ]
+        artist = ", ".join(artists) if artists else "Unknown Artist"
 
-        video_id = item.get("videoId", "")
-        art_url = f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg" if video_id else ""
+        video_id = item.get("videoId") or ""
+        track_id = video_id if video_id else None
+
+        album = None
+        album_val = item.get("album")
+        if isinstance(album_val, dict):
+            album = album_val.get("name")
+        elif isinstance(album_val, str) and album_val.strip():
+            album = album_val.strip()
+
+        thumbnails = item.get("thumbnails") or []
+        art_url = None
+        if thumbnails:
+            best = max(
+                thumbnails,
+                key=lambda t: (t.get("width") or 0) * (t.get("height") or 0),
+            )
+            art_url = best.get("url") or None
+        if not art_url and video_id:
+            art_url = f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg"
+
+        stream_url = f"https://youtube.com/watch?v={video_id}" if video_id else None
 
         tracks.append({
+            "provider": "ytmusic",
+            "track_id": track_id,
             "title": item.get("title", "Unknown Track"),
             "artist": artist,
-            "stream_url": f"https://youtube.com/watch?v={video_id}",
+            "album": album,
             "art_url": art_url,
+            "stream_url": stream_url,
+            "artists": artists,
             "source": "youtube",
         })
 

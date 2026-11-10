@@ -605,13 +605,15 @@ mod tests {
         assert_eq!(*app.playback_state(), PlaybackState::Stopped);
 
         let track = Track {
+            provider: "ytmusic".into(),
+            track_id: None,
             title: "Test Track".into(),
             artist: "Test Artist".into(),
-            stream_url: "".into(),
-            art_url: "".into(),
+            album: None,
+            stream_url: None,
+            art_url: None,
             spotify_id: None,
             artists: vec![],
-            album: None,
             duration_ms: None,
         };
 
@@ -637,7 +639,7 @@ mod tests {
 
         // Playing
         let mut resolved = track.clone();
-        resolved.stream_url = "http://stream/test".into();
+        resolved.stream_url = Some("http://stream/test".into());
         app.set_playing(resolved.clone());
         assert_eq!(
             *app.playback_state(),
@@ -654,13 +656,15 @@ mod tests {
 
         // Resolving a second track while first is playing preserves active
         let track2 = Track {
+            provider: "ytmusic".into(),
+            track_id: None,
             title: "Second Track".into(),
             artist: "Second Artist".into(),
-            stream_url: "".into(),
-            art_url: "".into(),
+            album: None,
+            stream_url: None,
+            art_url: None,
             spotify_id: None,
             artists: vec![],
-            album: None,
             duration_ms: None,
         };
         app.set_resolving(track2.clone(), PlaybackSource::SearchResult { index: 1 });
@@ -727,13 +731,15 @@ mod tests {
 
         app.set_resolving(
             Track {
+                provider: "spotify".into(),
+                track_id: Some("spotify123".into()),
                 title: "Test Track".into(),
                 artist: "Test Artist".into(),
-                stream_url: String::new(),
-                art_url: String::new(),
+                album: Some("Test Album".into()),
+                stream_url: None,
+                art_url: None,
                 spotify_id: Some("spotify123".into()),
                 artists: vec!["Test Artist".into()],
-                album: Some("Test Album".into()),
                 duration_ms: Some(180_000),
             },
             PlaybackSource::SearchResult { index: 0 },
@@ -751,13 +757,15 @@ mod tests {
 
     fn sample_track(title: &str) -> Track {
         Track {
+            provider: "ytmusic".into(),
+            track_id: None,
             title: title.into(),
             artist: "Sample Artist".into(),
-            stream_url: format!("https://example.com/{title}.mp3"),
-            art_url: String::new(),
+            album: Some("Sample Album".into()),
+            stream_url: Some(format!("https://example.com/{title}.mp3")),
+            art_url: None,
             spotify_id: None,
             artists: vec!["Sample Artist".into()],
-            album: Some("Sample Album".into()),
             duration_ms: Some(210_000),
         }
     }

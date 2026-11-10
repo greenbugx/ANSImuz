@@ -50,7 +50,7 @@ pub fn play_queue_item(
         }
     }
 
-    if entry.track.stream_url.is_empty() {
+    if !entry.track.has_stream_url() {
         play_track(
             app,
             player,
@@ -349,7 +349,7 @@ pub fn play_track(
         }
     }
 
-    if track.stream_url.is_empty() {
+    if !track.has_stream_url() {
         app.cancel_pending_resolution();
         let generation = app.resolve_generation;
         app.set_resolving(track.clone(), source);
@@ -391,9 +391,10 @@ pub fn start_playback(
     track: Track,
     source: PlaybackSource,
 ) -> Result<(), String> {
-    let audio_source = AudioPlayer::cached_audio(&track.stream_url)
+    let raw_stream = track.stream_url.as_deref().unwrap_or_default();
+    let audio_source = AudioPlayer::cached_audio(raw_stream)
         .map(|path| path.to_string_lossy().into_owned())
-        .unwrap_or_else(|| track.stream_url.clone());
+        .unwrap_or_else(|| raw_stream.to_string());
 
     match player.play(&audio_source, app.volume, events) {
         Ok(()) => {
@@ -418,14 +419,20 @@ pub fn start_playback(
             }
 
             if let Some(next_queue) = app.queue.first() {
-                if app.settings.audio_cache {
-                    player.prefetch_later(&next_queue.track.stream_url, 25);
+                if app.settings.audio_cache
+                    && let Some(stream_url) = &next_queue.track.stream_url
+                {
+                    player.prefetch_later(stream_url, 25);
                 }
-                let _ = crate::artwork::prefetch(&next_queue.track.art_url);
+                if let Some(art_url) = &next_queue.track.art_url {
+                    let _ = crate::artwork::prefetch(art_url);
+                }
             }
 
-            if app.settings.audio_cache {
-                player.prefetch_later(&track.stream_url, 15);
+            if app.settings.audio_cache
+                && let Some(stream_url) = &track.stream_url
+            {
+                player.prefetch_later(stream_url, 15);
             }
 
             if let Some(worker) = &app.discord_worker {
