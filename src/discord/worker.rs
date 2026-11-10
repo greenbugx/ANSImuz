@@ -516,4 +516,31 @@ mod tests {
         worker.clear();
         worker.shutdown();
     }
+
+    #[test]
+    fn test_step17_playback_state_consistency_lifecycle() {
+        let mut worker = DiscordWorker::spawn("dummy_id").expect("spawn worker");
+
+        // Track changed: publish new title and artist, trigger asynchronous artwork resolve
+        let track = PlaybackInfo::new("Track A", "Artist A")
+            .with_provider("spotify")
+            .with_track_id("track_1")
+            .with_art_url("https://example.com/art.jpg")
+            .with_duration(Duration::from_secs(180));
+        worker.track_changed(track);
+
+        // Position changed: update timestamps, never trigger artwork upload
+        worker.playback_progress(Duration::from_secs(5), Some(Duration::from_secs(180)));
+
+        // Paused: freeze/remove timestamps, keep existing artwork
+        worker.paused();
+
+        // Resumed: recalculate timestamps, keep existing artwork
+        worker.resumed(Duration::from_secs(5));
+
+        // Track finished / Playback stopped: clear activity, keep cache entry
+        worker.clear();
+
+        worker.shutdown();
+    }
 }

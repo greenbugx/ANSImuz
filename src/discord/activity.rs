@@ -307,6 +307,41 @@ mod tests {
     }
 
     #[test]
+    fn test_build_activity_resumed_recalculates_timestamps_and_preserves_artwork() {
+        let mut info = PlaybackInfo::new("Song", "Artist")
+            .with_position(Duration::from_secs(45))
+            .with_duration(Duration::from_secs(200))
+            .with_large_image("https://files.catbox.moe/abc123.jpg")
+            .with_paused(true);
+
+        // Paused state: timestamps removed/omitted, artwork preserved
+        let paused_activity = build_activity(&info);
+        assert_eq!(
+            paused_activity.assets.as_ref().unwrap().large_image.as_deref(),
+            Some("https://files.catbox.moe/abc123.jpg")
+        );
+        if let Some(ts) = paused_activity.timestamps.as_ref() {
+            assert!(ts.start.is_none());
+            assert!(ts.end.is_none());
+        }
+
+        // Resumed state: timestamps recalculated with start and end, artwork preserved
+        info.is_paused = false;
+        info.position = Some(Duration::from_secs(50));
+        let resumed_activity = build_activity(&info);
+        assert_eq!(
+            resumed_activity.assets.as_ref().unwrap().large_image.as_deref(),
+            Some("https://files.catbox.moe/abc123.jpg")
+        );
+        let ts = resumed_activity
+            .timestamps
+            .as_ref()
+            .expect("timestamps exist on resumed");
+        assert!(ts.start.is_some());
+        assert!(ts.end.is_some());
+    }
+
+    #[test]
     fn test_build_activity_truncation() {
         let very_long_title = "a".repeat(200);
         let very_long_artist = "b".repeat(200);

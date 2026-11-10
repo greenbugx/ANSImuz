@@ -183,6 +183,9 @@ pub fn recover_queue_failure(
         app.push_history(current);
     }
     app.set_stopped();
+    if let Some(worker) = &app.discord_worker {
+        worker.clear();
+    }
     false
 }
 
@@ -293,6 +296,9 @@ pub fn handle_playback_ended(
     }
     app.set_stopped();
     app.set_status("PLAYBACK ENDED");
+    if let Some(worker) = &app.discord_worker {
+        worker.clear();
+    }
     false
 }
 
@@ -317,6 +323,9 @@ pub fn handle_playback_failed(
     if !app.queue.is_empty() {
         play_queue_item(app, player, player_tx, resolve_tx, 0)
     } else {
+        if let Some(worker) = &app.discord_worker {
+            worker.clear();
+        }
         false
     }
 }
