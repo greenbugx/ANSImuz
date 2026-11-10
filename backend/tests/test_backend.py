@@ -287,7 +287,7 @@ class TestStandardizedTrackMetadata(unittest.TestCase):
         self.assertEqual(t1["title"], "Night Falls")
         self.assertEqual(t1["artist"], "Jody Wisternoff, Booka Shade")
         self.assertEqual(t1["album"], "Night Falls Album")
-        self.assertEqual(t1["art_url"], "https://img.example.com/large.jpg")
+        self.assertEqual(t1["art_url"], "https://img.youtube.com/vi/vid_full/maxresdefault.jpg")
         self.assertEqual(t1["stream_url"], "https://youtube.com/watch?v=vid_full")
 
         # Track with no artwork from search (falls back to maxresdefault or None)

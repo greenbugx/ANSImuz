@@ -198,9 +198,7 @@ pub fn load_image(url: &str) -> Result<DynamicImage, String> {
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("art");
-    if let Err(e) = crate::config::write_cache_atomic(&cache_dir(), file_stem, "img", &bytes) {
-        eprintln!("Warning: Failed to write artwork cache for {file_stem}: {e}");
-    }
+    let _ = crate::config::write_cache_atomic(&cache_dir(), file_stem, "img", &bytes);
     Ok(image)
 }
 

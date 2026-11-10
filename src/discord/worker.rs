@@ -1,4 +1,6 @@
 use crate::discord::activity::{PlaybackInfo, build_activity};
+use crate::discord::artwork::worker::{ArtworkEvent, ArtworkWorker};
+use crate::discord::artwork::types::{ArtworkError, ArtworkRequest, ArtworkResult};
 use crate::discord::client::DiscordClient;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -11,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const INITIAL_RECONNECT_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_RECONNECT_INTERVAL: Duration = Duration::from_secs(60);
 
-fn log_discord(msg: &str) {
+pub(crate) fn log_discord(msg: &str) {
     let log_dir = crate::config::cache_base_dir();
     let _ = std::fs::create_dir_all(&log_dir);
     let log_path = log_dir.join("discord_rpc.log");
@@ -32,6 +34,11 @@ pub enum DiscordCommand {
     Resumed(Duration),
     Clear,
     Shutdown,
+    #[doc(hidden)]
+    ArtworkResolved {
+        generation: u64,
+        result: Result<ArtworkResult, ArtworkError>,
+    },
 }
 
 pub struct DiscordWorker {
@@ -46,11 +53,12 @@ impl DiscordWorker {
         let client_id = client_id.into();
         let connected = Arc::new(AtomicBool::new(false));
         let connected_flag = Arc::clone(&connected);
+        let internal_sender = sender.clone();
 
         let thread_handle = thread::Builder::new()
             .name("discord-rpc-worker".to_string())
             .spawn(move || {
-                run_worker_loop(&client_id, receiver, connected_flag);
+                run_worker_loop(&client_id, receiver, connected_flag, internal_sender);
             })?;
 
         Ok(Self {
@@ -106,6 +114,7 @@ fn run_worker_loop(
     client_id: &str,
     receiver: Receiver<DiscordCommand>,
     connected_flag: Arc<AtomicBool>,
+    internal_sender: Sender<DiscordCommand>,
 ) {
     let mut client = DiscordClient::new(client_id);
     let mut connected = match client.connect() {
@@ -120,6 +129,27 @@ fn run_worker_loop(
     };
     connected_flag.store(connected, Ordering::Relaxed);
     let mut current_playback: Option<PlaybackInfo> = None;
+    let mut current_generation: u64 = 0;
+
+    // Dedicated artwork worker keeping network operations off the playback path
+    let (art_tx, art_rx) = channel::<ArtworkEvent>();
+    let artwork_worker = match ArtworkWorker::spawn(art_tx) {
+        Ok(w) => {
+            let tx_clone = internal_sender;
+            let _ = thread::Builder::new()
+                .name("discord-artwork-forwarder".to_string())
+                .spawn(move || {
+                    while let Ok(ArtworkEvent::Resolved { generation, result }) = art_rx.recv() {
+                        let _ = tx_clone.send(DiscordCommand::ArtworkResolved { generation, result });
+                    }
+                });
+            Some(w)
+        }
+        Err(e) => {
+            log_discord(&format!("[Discord RPC] Failed to spawn artwork worker: {e}"));
+            None
+        }
+    };
 
     let mut current_backoff = INITIAL_RECONNECT_INTERVAL;
     let mut next_reconnect_at: Option<Instant> = if connected {
@@ -147,10 +177,16 @@ fn run_worker_loop(
         match receiver.recv_timeout(timeout) {
             Ok(cmd) => match cmd {
                 DiscordCommand::TrackChanged(info) => {
+                    // Generation tracking
+                    current_generation += 1;
+                    let generation = current_generation;
+
                     log_discord(&format!(
-                        "[Discord RPC] Track changed: {} — {}",
+                        "[Discord RPC] Track changed (gen {generation}): {} — {}",
                         info.title, info.artist
                     ));
+
+                    // Publish initial activity immediately using default fallback asset ("logo")
                     apply_playback(
                         &mut client,
                         &mut connected,
@@ -159,7 +195,56 @@ fn run_worker_loop(
                         &mut current_backoff,
                         &info,
                     );
+
+                    // Request artwork resolution in parallel without blocking
+                    if let Some(ref art_url) = info.art_url
+                        && !art_url.trim().is_empty()
+                        && let Some(ref aw) = artwork_worker
+                    {
+                        let req = ArtworkRequest::new(
+                            info.provider.clone().unwrap_or_else(|| "unknown".to_string()),
+                            info.track_id.clone(),
+                            art_url.clone(),
+                        );
+                        aw.resolve(generation, req);
+                    }
+
                     current_playback = Some(info);
+                }
+                DiscordCommand::ArtworkResolved { generation, result } => {
+                    // Only apply resolved artwork if generation matches currently playing track
+                    if generation != current_generation {
+                        log_discord(&format!(
+                            "[Discord RPC] Ignoring stale artwork for gen {generation} (current: {current_generation})"
+                        ));
+                        continue;
+                    }
+
+                    match result {
+                        Ok(art_res) => {
+                            log_discord(&format!(
+                                "[Discord RPC] Artwork resolved for gen {generation}: {}",
+                                art_res.hosted_url
+                            ));
+                            if let Some(info) = &mut current_playback {
+                                // Update the activity's large_image with the hosted URL and re-publish
+                                info.large_image = Some(art_res.hosted_url);
+                                apply_playback(
+                                    &mut client,
+                                    &mut connected,
+                                    &connected_flag,
+                                    &mut next_reconnect_at,
+                                    &mut current_backoff,
+                                    info,
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            log_discord(&format!(
+                                "[Discord RPC] Artwork resolution failed for gen {generation}: {e}; keeping default asset"
+                            ));
+                        }
+                    }
                 }
                 DiscordCommand::PositionChanged(pos) => {
                     if let Some(info) = &mut current_playback {
@@ -212,6 +297,7 @@ fn run_worker_loop(
                     }
                 }
                 DiscordCommand::Clear => {
+                    current_generation += 1;
                     current_playback = None;
                     if connected && client.clear_activity().is_err() {
                         mark_disconnected(
@@ -224,6 +310,9 @@ fn run_worker_loop(
                     }
                 }
                 DiscordCommand::Shutdown => {
+                    if let Some(mut aw) = artwork_worker {
+                        aw.shutdown();
+                    }
                     if connected {
                         let _ = client.clear_activity();
                     }
@@ -265,38 +354,19 @@ fn apply_playback(
     playback: &PlaybackInfo,
 ) {
     if !*connected {
-        let now = Instant::now();
-        let ready = next_reconnect_at.is_none_or(|next_at| now >= next_at);
-        if ready {
-            try_reconnect(
-                client,
-                connected,
-                connected_flag,
-                next_reconnect_at,
-                current_backoff,
-                Some(playback),
-            );
-            return;
-        }
+        return;
     }
 
-    if *connected {
-        let activity = build_activity(playback);
-        match client.set_activity(&activity) {
-            Ok(()) => {
-                log_discord("[Discord RPC] Activity published successfully");
-            }
-            Err(err) => {
-                log_discord(&format!("[Discord RPC] Failed to publish activity: {err}"));
-                mark_disconnected(
-                    client,
-                    connected,
-                    connected_flag,
-                    next_reconnect_at,
-                    current_backoff,
-                );
-            }
-        }
+    let activity = build_activity(playback);
+    if let Err(err) = client.set_activity(&activity) {
+        log_discord(&format!("[Discord RPC] Failed to set activity: {err}"));
+        mark_disconnected(
+            client,
+            connected,
+            connected_flag,
+            next_reconnect_at,
+            current_backoff,
+        );
     }
 }
 
@@ -308,33 +378,28 @@ fn try_reconnect(
     current_backoff: &mut Duration,
     playback: Option<&PlaybackInfo>,
 ) {
-    client.disconnect();
+    log_discord("[Discord RPC] Attempting reconnection...");
     match client.connect() {
         Ok(()) => {
-            log_discord("[Discord RPC] Connected (reconnected)");
+            log_discord("[Discord RPC] Reconnected successfully");
             *connected = true;
             connected_flag.store(true, Ordering::Relaxed);
-            *current_backoff = INITIAL_RECONNECT_INTERVAL;
             *next_reconnect_at = None;
+            *current_backoff = INITIAL_RECONNECT_INTERVAL;
 
             if let Some(info) = playback {
                 let activity = build_activity(info);
-                match client.set_activity(&activity) {
-                    Ok(()) => {
-                        log_discord("[Discord RPC] Activity published after reconnect");
-                    }
-                    Err(err) => {
-                        log_discord(&format!(
-                            "[Discord RPC] Failed to publish activity after reconnect: {err}"
-                        ));
-                        mark_disconnected(
-                            client,
-                            connected,
-                            connected_flag,
-                            next_reconnect_at,
-                            current_backoff,
-                        );
-                    }
+                if let Err(err) = client.set_activity(&activity) {
+                    log_discord(&format!(
+                        "[Discord RPC] Failed to restore activity on reconnect: {err}"
+                    ));
+                    mark_disconnected(
+                        client,
+                        connected,
+                        connected_flag,
+                        next_reconnect_at,
+                        current_backoff,
+                    );
                 }
             }
         }
@@ -373,7 +438,10 @@ mod tests {
     fn test_worker_lifecycle_and_channel_drain() {
         let mut worker = DiscordWorker::spawn("dummy_id").expect("spawn worker");
         assert!(!worker.is_connected());
-        let track = PlaybackInfo::new("Title", "Artist");
+        let track = PlaybackInfo::new("Title", "Artist")
+            .with_provider("ytmusic")
+            .with_track_id("vid1")
+            .with_art_url("https://example.com/art.jpg");
         worker.track_changed(track);
         worker.position_changed(Duration::from_secs(10));
         worker.paused();

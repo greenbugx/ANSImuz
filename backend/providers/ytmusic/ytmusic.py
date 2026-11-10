@@ -30,16 +30,11 @@ def search(query):
         elif isinstance(album_val, str) and album_val.strip():
             album = album_val.strip()
 
-        thumbnails = item.get("thumbnails") or []
-        art_url = None
-        if thumbnails:
-            best = max(
-                thumbnails,
-                key=lambda t: (t.get("width") or 0) * (t.get("height") or 0),
-            )
-            art_url = best.get("url") or None
-        if not art_url and video_id:
-            art_url = f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg"
+        art_url = (
+            f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg"
+            if video_id
+            else None
+        )
 
         stream_url = f"https://youtube.com/watch?v={video_id}" if video_id else None
 

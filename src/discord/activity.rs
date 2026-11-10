@@ -4,6 +4,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_LARGE_IMAGE: &str = "logo";
 pub const DEFAULT_LARGE_TEXT: &str = "ANSImuz";
+pub const DEFAULT_SMALL_IMAGE: &str = "logo";
+pub const DEFAULT_SMALL_TEXT: &str = "ANSImuz";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlaybackInfo {
@@ -14,6 +16,13 @@ pub struct PlaybackInfo {
     pub duration: Option<Duration>,
     pub is_paused: bool,
     pub stream_url: Option<String>,
+    pub provider: Option<String>,
+    pub track_id: Option<String>,
+    pub art_url: Option<String>,
+    pub large_image: Option<String>,
+    pub large_text: Option<String>,
+    pub small_image: Option<String>,
+    pub small_text: Option<String>,
 }
 
 impl PlaybackInfo {
@@ -26,6 +35,13 @@ impl PlaybackInfo {
             duration: None,
             is_paused: false,
             stream_url: None,
+            provider: None,
+            track_id: None,
+            art_url: None,
+            large_image: None,
+            large_text: None,
+            small_image: None,
+            small_text: None,
         }
     }
 
@@ -51,6 +67,41 @@ impl PlaybackInfo {
 
     pub fn with_stream_url(mut self, url: impl Into<String>) -> Self {
         self.stream_url = Some(url.into());
+        self
+    }
+
+    pub fn with_provider(mut self, provider: impl Into<String>) -> Self {
+        self.provider = Some(provider.into());
+        self
+    }
+
+    pub fn with_track_id(mut self, track_id: impl Into<String>) -> Self {
+        self.track_id = Some(track_id.into());
+        self
+    }
+
+    pub fn with_art_url(mut self, art_url: impl Into<String>) -> Self {
+        self.art_url = Some(art_url.into());
+        self
+    }
+
+    pub fn with_large_image(mut self, image: impl Into<String>) -> Self {
+        self.large_image = Some(image.into());
+        self
+    }
+
+    pub fn with_large_text(mut self, text: impl Into<String>) -> Self {
+        self.large_text = Some(text.into());
+        self
+    }
+
+    pub fn with_small_image(mut self, image: impl Into<String>) -> Self {
+        self.small_image = Some(image.into());
+        self
+    }
+
+    pub fn with_small_text(mut self, text: impl Into<String>) -> Self {
+        self.small_text = Some(text.into());
         self
     }
 }
@@ -88,28 +139,53 @@ pub fn build_activity(info: &PlaybackInfo) -> Activity {
     };
     builder = builder.details(details);
 
-    // State: artist or artist • album
-    let state_text = match &info.album {
-        Some(album) if !album.trim().is_empty() => {
-            format!("{} • {}", info.artist.trim(), album.trim())
-        }
-        _ if !info.artist.trim().is_empty() => info.artist.trim().to_string(),
-        _ => "Unknown Artist".to_string(),
-    };
-    builder = builder.state(truncate_activity_text(&state_text, 128, 128));
-
-    // Assets: ANSImuz logo and playback status indicator
-    builder = builder
-        .large_image(DEFAULT_LARGE_IMAGE)
-        .large_text(DEFAULT_LARGE_TEXT);
-
-    if info.is_paused {
-        builder = builder.small_image("pause").small_text("Paused");
+    // State: artist names
+    let state_text = if info.artist.trim().is_empty() {
+        "Unknown Artist".to_string()
     } else {
-        builder = builder.small_image("play").small_text("Playing");
+        truncate_activity_text(info.artist.trim(), 128, 128)
+    };
+    builder = builder.state(state_text);
 
-        // Timestamps
-        // applied only when actively playing
+    // Assets:
+    // large_image: hosted album artwork URL or fallback asset key ("logo")
+    let large_image = info
+        .large_image
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(DEFAULT_LARGE_IMAGE);
+
+    // large_text: album name (or fallback to ANSImuz)
+    let large_text = info
+        .large_text
+        .as_deref()
+        .or(info.album.as_deref())
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| truncate_activity_text(s.trim(), 128, 128))
+        .unwrap_or_else(|| DEFAULT_LARGE_TEXT.to_string());
+
+    // small_image: ANSImuz application asset key ("logo")
+    let small_image = info
+        .small_image
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(DEFAULT_SMALL_IMAGE);
+
+    // small_text: ANSImuz
+    let small_text = info
+        .small_text
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(DEFAULT_SMALL_TEXT);
+
+    builder = builder
+        .large_image(large_image)
+        .large_text(large_text)
+        .small_image(small_image)
+        .small_text(small_text);
+
+    // Timestamps and playback status logic
+    if !info.is_paused {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -168,13 +244,12 @@ mod tests {
         assert_eq!(activity.r#type, Some(ActivityType::Listening));
 
         assert_eq!(activity.details.as_deref(), Some("Bohemian Rhapsody"));
-        assert_eq!(
-            activity.state.as_deref(),
-            Some("Queen • A Night at the Opera")
-        );
+        assert_eq!(activity.state.as_deref(), Some("Queen"));
         let assets = activity.assets.as_ref().expect("assets should exist");
         assert_eq!(assets.large_image.as_deref(), Some(DEFAULT_LARGE_IMAGE));
-        assert_eq!(assets.small_image.as_deref(), Some("play"));
+        assert_eq!(assets.large_text.as_deref(), Some("A Night at the Opera"));
+        assert_eq!(assets.small_image.as_deref(), Some(DEFAULT_SMALL_IMAGE));
+        assert_eq!(assets.small_text.as_deref(), Some(DEFAULT_SMALL_TEXT));
 
         let timestamps = activity
             .timestamps
@@ -189,6 +264,21 @@ mod tests {
     }
 
     #[test]
+    fn test_build_activity_with_hosted_artwork() {
+        let info = PlaybackInfo::new("Night Falls", "Booka Shade")
+            .with_album("Movements")
+            .with_large_image("https://files.catbox.moe/abc123.jpg");
+
+        let activity = build_activity(&info);
+        assert!(activity.validate().is_ok());
+        let assets = activity.assets.as_ref().expect("assets should exist");
+        assert_eq!(assets.large_image.as_deref(), Some("https://files.catbox.moe/abc123.jpg"));
+        assert_eq!(assets.large_text.as_deref(), Some("Movements"));
+        assert_eq!(assets.small_image.as_deref(), Some(DEFAULT_SMALL_IMAGE));
+        assert_eq!(assets.small_text.as_deref(), Some(DEFAULT_SMALL_TEXT));
+    }
+
+    #[test]
     fn test_build_activity_paused() {
         let info = PlaybackInfo::new("Song", "Artist")
             .with_position(Duration::from_secs(45))
@@ -200,8 +290,8 @@ mod tests {
         assert_eq!(activity.r#type, Some(ActivityType::Listening));
 
         let assets = activity.assets.as_ref().expect("assets should exist");
-        assert_eq!(assets.small_image.as_deref(), Some("pause"));
-        assert_eq!(assets.small_text.as_deref(), Some("Paused"));
+        assert_eq!(assets.small_image.as_deref(), Some(DEFAULT_SMALL_IMAGE));
+        assert_eq!(assets.small_text.as_deref(), Some(DEFAULT_SMALL_TEXT));
 
         // When paused, neither start nor end timestamps should be advertised
         if let Some(ts) = activity.timestamps.as_ref() {
@@ -253,10 +343,12 @@ mod tests {
             .with_duration(Duration::from_secs(200));
 
         let activity = build_activity(&info);
-        if let Some(ts) = activity.timestamps {
+        assert!(activity.validate().is_ok());
+
+        if let Some(ts) = activity.timestamps.as_ref() {
             assert!(
                 ts.end.is_none(),
-                "Finished track must not advertise end timestamp"
+                "Finished track should not emit an end timestamp"
             );
         }
     }
@@ -269,7 +361,13 @@ mod tests {
 
         let activity = build_activity(&info);
         assert!(activity.validate().is_ok());
-        assert_eq!(activity.r#type, Some(ActivityType::Listening));
+
+        if let Some(ts) = activity.timestamps.as_ref() {
+            assert!(
+                ts.end.is_none(),
+                "Overflowing end duration should not emit end timestamp"
+            );
+        }
     }
 
     #[test]

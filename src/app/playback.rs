@@ -436,9 +436,16 @@ pub fn start_playback(
             }
 
             if let Some(worker) = &app.discord_worker {
-                let mut info = crate::discord::PlaybackInfo::new(&track.title, &track.artist);
+                let mut info = crate::discord::PlaybackInfo::new(&track.title, &track.artist)
+                    .with_provider(&track.provider);
+                if let Some(id) = &track.track_id {
+                    info = info.with_track_id(id);
+                }
                 if let Some(album) = &track.album {
                     info = info.with_album(album);
+                }
+                if let Some(art) = &track.art_url {
+                    info = info.with_art_url(art);
                 }
                 if let Some(dur_ms) = track.duration_ms {
                     info = info.with_duration(Duration::from_millis(dur_ms));

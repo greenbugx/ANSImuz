@@ -196,7 +196,9 @@ impl ArtworkManager {
                     }
                     Err(e) => {
                         self.record_catbox_failure();
-                        eprintln!("Warning: Catbox upload failed ({e}), falling back to Litterbox (72h)");
+                        crate::discord::log_discord(&format!(
+                            "Warning: Catbox upload failed ({e}), falling back to Litterbox (72h)"
+                        ));
                         let up = self
                             .litterbox
                             .upload(downloaded.bytes.clone(), "art.jpg")
