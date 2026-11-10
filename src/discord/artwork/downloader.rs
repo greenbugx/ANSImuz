@@ -1,0 +1,200 @@
+use super::cache::sha256_hex;
+use image::{DynamicImage, GenericImageView, imageops};
+use std::fs;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+pub const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024; // 8 MB limit
+pub const MAX_DIMENSION: u32 = 4096;
+pub const MIN_DIMENSION: u32 = 10;
+pub const TARGET_MAX_SIDE: u32 = 1024;
+
+/// Result of downloading, normalizing, and storing artwork locally.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadedArtwork {
+    pub local_path: PathBuf,
+    pub relative_path: String,
+    pub content_hash: String,
+    pub bytes: Vec<u8>,
+}
+
+/// Normalizes image according to specifications:
+///
+/// - Rejects malformed / out-of-bound dimensions
+/// - Resizes to fit within 1024x1024 preserving original aspect ratio
+/// - Converts to RGB
+/// - Encodes as JPEG
+/// - Computes SHA-256 hash of normalized bytes
+pub fn normalize_image(img: DynamicImage) -> Result<(Vec<u8>, String), String> {
+    let (w, h) = img.dimensions();
+    if w < MIN_DIMENSION || h < MIN_DIMENSION {
+        return Err(format!("Image dimensions ({w}x{h}) are too small"));
+    }
+    if w > MAX_DIMENSION || h > MAX_DIMENSION {
+        return Err(format!("Image dimensions ({w}x{h}) exceed maximum allowed ({MAX_DIMENSION})"));
+    }
+
+    // Resize to fit within 1024x1024 while preserving aspect ratio (do not stretch)
+    let resized = if w > TARGET_MAX_SIDE || h > TARGET_MAX_SIDE {
+        img.resize(TARGET_MAX_SIDE, TARGET_MAX_SIDE, imageops::FilterType::Triangle)
+    } else {
+        img
+    };
+
+    // Convert to RGB
+    let rgb = resized.to_rgb8();
+
+    // Encode to standard JPEG
+    let mut encoded = Vec::new();
+    image::DynamicImage::ImageRgb8(rgb)
+        .write_to(&mut std::io::Cursor::new(&mut encoded), image::ImageFormat::Jpeg)
+        .map_err(|e| format!("Failed to encode artwork to JPEG: {e}"))?;
+
+    let hash = sha256_hex(&encoded);
+    Ok((encoded, hash))
+}
+
+/// Download artwork from an HTTPS URL and normalize it to the cache `images/` directory.
+pub fn download_and_normalize(url: &str, images_dir: &Path) -> Result<DownloadedArtwork, String> {
+    // Accept HTTPS artwork URLs only
+    if !url.starts_with("https://") {
+        return Err("Artwork URL must use the HTTPS scheme".to_string());
+    }
+
+    // Build HTTP client with redirect policy and connection/request timeouts
+    let client = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .connect_timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("Failed to initialize HTTP client: {e}"))?;
+
+    // Send GET request
+    let response = client
+        .get(url)
+        .send()
+        .map_err(|e| format!("HTTP request failed: {e}"))?;
+
+    // Check HTTP status code
+    if !response.status().is_success() {
+        return Err(format!("HTTP request failed with status: {}", response.status()));
+    }
+
+    // Check Content-Type header if present
+    if let Some(content_type) = response.headers().get(reqwest::header::CONTENT_TYPE) {
+        let ct = content_type.to_str().unwrap_or_default().to_lowercase();
+        if !ct.starts_with("image/") && !ct.starts_with("application/octet-stream") && !ct.is_empty() {
+            return Err(format!("Response is not an image (Content-Type: {ct})"));
+        }
+    }
+
+    // Stream chunks with size limit (max 8 MB)
+    let initial_cap = response
+        .content_length()
+        .map(|len| (len as usize).min(MAX_IMAGE_BYTES))
+        .unwrap_or(0);
+    let mut raw_bytes = Vec::with_capacity(initial_cap);
+    let mut buffer = [0u8; 8192];
+    let mut reader = response;
+
+    loop {
+        let n = reader
+            .read(&mut buffer)
+            .map_err(|e| format!("Failed reading response stream: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        if raw_bytes.len() + n > MAX_IMAGE_BYTES {
+            return Err("Artwork download exceeded maximum allowed size (8 MB)".to_string());
+        }
+        raw_bytes.extend_from_slice(&buffer[..n]);
+    }
+
+    // Decode using image crate
+    let img_reader = image::ImageReader::new(std::io::Cursor::new(&raw_bytes))
+        .with_guessed_format()
+        .map_err(|e| format!("Failed to guess artwork format: {e}"))?;
+
+    let decoded = img_reader
+        .decode()
+        .map_err(|e| format!("Failed to decode artwork image: {e}"))?;
+
+    // Normalize (RGB, resize <= 1024x1024 maintaining aspect ratio, JPEG encode, SHA-256)
+    let (normalized_bytes, content_hash) = normalize_image(decoded)?;
+
+    // Write to unique temporary file, then rename to hash-based filename
+    fs::create_dir_all(images_dir)
+        .map_err(|e| format!("Failed creating images directory: {e}"))?;
+
+    let file_name = format!("{content_hash}.jpg");
+    let final_path = images_dir.join(&file_name);
+    let relative_path = format!("images/{file_name}");
+
+    if !final_path.exists() {
+        let temp_filename = format!(
+            "{content_hash}.tmp-{}-{}.part",
+            std::process::id(),
+            crate::discord::artwork::cache::current_unix_timestamp()
+        );
+        let temp_path = images_dir.join(temp_filename);
+
+        fs::write(&temp_path, &normalized_bytes)
+            .map_err(|e| format!("Failed writing temp image file: {e}"))?;
+
+        if let Err(e) = fs::rename(&temp_path, &final_path) {
+            if e.kind() == std::io::ErrorKind::AlreadyExists
+                || e.kind() == std::io::ErrorKind::PermissionDenied
+            {
+                let _ = fs::remove_file(&final_path);
+                if let Err(retry_err) = fs::rename(&temp_path, &final_path) {
+                    let _ = fs::remove_file(&temp_path);
+                    return Err(format!("Failed renaming temp image file: {retry_err}"));
+                }
+            } else {
+                let _ = fs::remove_file(&temp_path);
+                return Err(format!("Failed renaming temp image file: {e}"));
+            }
+        }
+    }
+
+    Ok(DownloadedArtwork {
+        local_path: final_path,
+        relative_path,
+        content_hash,
+        bytes: normalized_bytes,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_image_preserves_aspect_ratio_and_resizes() {
+        // Create 2000x1000 image 
+        // 2:1 aspect ratio
+        let img = image::RgbaImage::new(2000, 1000);
+        let dyn_img = DynamicImage::ImageRgba8(img);
+
+        let (bytes, hash) = normalize_image(dyn_img).expect("normalization should succeed");
+        assert!(!bytes.is_empty());
+        assert_eq!(hash.len(), 64); // SHA-256 hex string length
+
+        // Decode back and check dimensions
+        let decoded = image::load_from_memory(&bytes).expect("should decode back");
+        let (w, h) = decoded.dimensions();
+        assert!(w <= 1024 && h <= 1024);
+        assert_eq!(w, 1024);
+        assert_eq!(h, 512); // Exactly 2:1 aspect ratio preserved!
+    }
+
+    #[test]
+    fn non_https_url_rejected() {
+        let temp_dir = std::env::temp_dir();
+        let res = download_and_normalize("http://example.com/art.jpg", &temp_dir);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("HTTPS"));
+    }
+}
+

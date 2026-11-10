@@ -1,4 +1,5 @@
 pub mod activity;
+pub mod artwork;
 pub mod client;
 pub mod worker;
 

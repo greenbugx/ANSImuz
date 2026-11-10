@@ -426,6 +426,40 @@ pub struct ActivityButton {
     pub url: String,
 }
 
+/// Request to resolve and host album artwork for Discord Rich Presence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtworkRequest {
+    pub provider: String,
+    pub track_id: Option<String>,
+    pub source_url: String,
+}
+
+/// Result of resolving and hosting album artwork.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtworkResult {
+    pub source_url: String,
+    pub hosted_url: String,
+    pub local_path: std::path::PathBuf,
+    pub content_hash: String,
+}
+
+/// Hosting provider used for Discord Rich Presence artwork.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HostingProvider {
+    Catbox,
+    Litterbox,
+}
+
+impl fmt::Display for HostingProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Catbox => write!(f, "catbox"),
+            Self::Litterbox => write!(f, "litterbox"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -601,5 +635,30 @@ mod tests {
             serde_json::from_str(r#"{"type": 2}"#).unwrap();
 
         assert_eq!(activity.r#type, Some(ActivityType::Listening));
+    }
+
+    #[test]
+    fn artwork_types_serde_roundtrip() {
+        let req = ArtworkRequest {
+            provider: "ytmusic".to_string(),
+            track_id: Some("123".to_string()),
+            source_url: "https://example.com/art.jpg".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let decoded: ArtworkRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, req);
+
+        let res = ArtworkResult {
+            source_url: "https://example.com/art.jpg".to_string(),
+            hosted_url: "https://files.catbox.moe/art.webp".to_string(),
+            local_path: std::path::PathBuf::from("images/art.webp"),
+            content_hash: "0a4f".to_string(),
+        };
+        let json_res = serde_json::to_string(&res).unwrap();
+        let decoded_res: ArtworkResult = serde_json::from_str(&json_res).unwrap();
+        assert_eq!(decoded_res, res);
+
+        assert_eq!(serde_json::to_string(&HostingProvider::Catbox).unwrap(), "\"catbox\"");
+        assert_eq!(serde_json::to_string(&HostingProvider::Litterbox).unwrap(), "\"litterbox\"");
     }
 }
