@@ -120,13 +120,19 @@ pub fn build_activity(info: &PlaybackInfo) -> Activity {
         };
         builder = builder.start_timestamp(start_ts);
 
-        if let Some(dur) = info.duration
+        let is_finished = match (info.position, info.duration) {
+            (Some(pos), Some(dur)) => pos >= dur,
+            _ => false,
+        };
+
+        if !is_finished
+            && let Some(dur) = info.duration
             && dur > Duration::ZERO
+            && let Some(end_ts) = start_ts.checked_add(dur.as_secs())
+            && end_ts > now
+            && let Ok(end_i64) = i64::try_from(end_ts)
         {
-            let end_ts = start_ts + dur.as_secs();
-            if end_ts > now {
-                builder = builder.end_timestamp(end_ts as i64);
-            }
+            builder = builder.end_timestamp(end_i64);
         }
     }
 
@@ -206,6 +212,31 @@ mod tests {
 
         assert!(activity.details.as_ref().unwrap().len() <= 128);
         assert!(activity.state.as_ref().unwrap().len() <= 128);
+        assert!(activity.validate().is_ok());
+    }
+
+    #[test]
+    fn test_build_activity_finished_track() {
+        let info = PlaybackInfo::new("Song", "Artist")
+            .with_position(Duration::from_secs(200))
+            .with_duration(Duration::from_secs(200));
+
+        let activity = build_activity(&info);
+        if let Some(ts) = activity.timestamps {
+            assert!(
+                ts.end.is_none(),
+                "Finished track must not advertise end timestamp"
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_activity_overflow_protection() {
+        let info = PlaybackInfo::new("Song", "Artist")
+            .with_position(Duration::from_secs(0))
+            .with_duration(Duration::from_secs(u64::MAX));
+
+        let activity = build_activity(&info);
         assert!(activity.validate().is_ok());
     }
 }
