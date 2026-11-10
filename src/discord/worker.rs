@@ -29,7 +29,10 @@ pub(crate) fn log_discord(msg: &str) {
 #[derive(Debug)]
 pub enum DiscordCommand {
     TrackChanged(PlaybackInfo),
-    PositionChanged(Duration),
+    PositionChanged {
+        position: Duration,
+        duration: Option<Duration>,
+    },
     Paused,
     Resumed(Duration),
     Clear,
@@ -81,7 +84,17 @@ impl DiscordWorker {
     }
 
     pub fn position_changed(&self, pos: Duration) {
-        let _ = self.sender.send(DiscordCommand::PositionChanged(pos));
+        let _ = self.sender.send(DiscordCommand::PositionChanged {
+            position: pos,
+            duration: None,
+        });
+    }
+
+    pub fn playback_progress(&self, pos: Duration, duration: Option<Duration>) {
+        let _ = self.sender.send(DiscordCommand::PositionChanged {
+            position: pos,
+            duration,
+        });
     }
 
     pub fn paused(&self) {
@@ -246,14 +259,23 @@ fn run_worker_loop(
                         }
                     }
                 }
-                DiscordCommand::PositionChanged(pos) => {
+                DiscordCommand::PositionChanged {
+                    position: pos,
+                    duration: maybe_dur,
+                } => {
                     if let Some(info) = &mut current_playback {
                         let old_pos = info.position.unwrap_or(Duration::ZERO);
                         info.position = Some(pos);
+                        let duration_updated = if info.duration.is_none() && maybe_dur.is_some() {
+                            info.duration = maybe_dur;
+                            true
+                        } else {
+                            false
+                        };
                         // Discord automatically client-side interpolates start/end timestamps.
-                        // Only refresh activity if a seek caused a significant jump, i.e. greater than 2s
+                        // Refresh activity if duration was newly discovered or if a seek caused a jump > 2s
                         let seeked = pos.abs_diff(old_pos) > Duration::from_secs(2);
-                        if seeked && !info.is_paused {
+                        if (duration_updated || seeked) && !info.is_paused {
                             apply_playback(
                                 &mut client,
                                 &mut connected,
@@ -475,6 +497,21 @@ mod tests {
 
         // Resume at position
         worker.resumed(Duration::from_secs(20));
+
+        worker.clear();
+        worker.shutdown();
+    }
+
+    #[test]
+    fn test_worker_discovers_duration_dynamically() {
+        let mut worker = DiscordWorker::spawn("dummy_id").expect("spawn worker");
+        // Start track with unknown duration
+        let track = PlaybackInfo::new("Stream Title", "Stream Artist");
+        assert!(track.duration.is_none());
+        worker.track_changed(track);
+
+        // First position update delivers newly discovered duration from MPV
+        worker.playback_progress(Duration::from_secs(1), Some(Duration::from_secs(210)));
 
         worker.clear();
         worker.shutdown();

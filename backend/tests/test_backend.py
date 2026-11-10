@@ -256,6 +256,8 @@ class TestStandardizedTrackMetadata(unittest.TestCase):
                 "title": "Night Falls",
                 "artists": [{"name": "Jody Wisternoff"}, {"name": "Booka Shade"}],
                 "album": {"name": "Night Falls Album"},
+                "duration": "4:20",
+                "duration_seconds": 260,
                 "thumbnails": [
                     {"url": "https://img.example.com/small.jpg", "width": 100, "height": 100},
                     {"url": "https://img.example.com/large.jpg", "width": 500, "height": 500},
@@ -266,6 +268,7 @@ class TestStandardizedTrackMetadata(unittest.TestCase):
                 "title": "No Art Track",
                 "artists": [{"name": "Solo Artist"}],
                 "album": "Single Album",
+                "duration": "3:15",
                 "thumbnails": [],
             },
             {
@@ -289,6 +292,7 @@ class TestStandardizedTrackMetadata(unittest.TestCase):
         self.assertEqual(t1["album"], "Night Falls Album")
         self.assertEqual(t1["art_url"], "https://img.youtube.com/vi/vid_full/maxresdefault.jpg")
         self.assertEqual(t1["stream_url"], "https://youtube.com/watch?v=vid_full")
+        self.assertEqual(t1["duration_ms"], 260000)
 
         # Track with no artwork from search (falls back to maxresdefault or None)
         t2 = tracks[1]
@@ -296,6 +300,7 @@ class TestStandardizedTrackMetadata(unittest.TestCase):
         self.assertEqual(t2["track_id"], "vid_no_art")
         self.assertEqual(t2["album"], "Single Album")
         self.assertEqual(t2["art_url"], "https://img.youtube.com/vi/vid_no_art/maxresdefault.jpg")
+        self.assertEqual(t2["duration_ms"], 195000)
 
         # Track with no video_id and no artwork
         t3 = tracks[2]
@@ -304,6 +309,7 @@ class TestStandardizedTrackMetadata(unittest.TestCase):
         self.assertIsNone(t3["album"])
         self.assertIsNone(t3["art_url"])
         self.assertIsNone(t3["stream_url"])
+        self.assertIsNone(t3["duration_ms"])
 
     @patch("providers.spotify.spotify.SpotifyClient")
     def test_spotify_standardized_metadata_with_and_without_art(self, mock_client_cls):

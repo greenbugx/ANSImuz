@@ -205,10 +205,18 @@ pub fn handle_player_event(
                 return false;
             }
             let pos_dur = Duration::from_secs_f64(elapsed);
+            let dur_opt = duration.filter(|&d| d > 0.0).map(Duration::from_secs_f64);
+            if let Some(track) = app.current_track_mut()
+                && track.duration_ms.is_none()
+                && let Some(dur_sec) = duration
+                && dur_sec > 0.0
+            {
+                track.duration_ms = Some((dur_sec * 1000.0) as u64);
+            }
             app.current_position = Some(pos_dur);
             *playback = Some((elapsed, duration));
             if let Some(worker) = &app.discord_worker {
-                worker.position_changed(pos_dur);
+                worker.playback_progress(pos_dur, dur_opt);
             }
             true
         }

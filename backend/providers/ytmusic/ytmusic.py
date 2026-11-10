@@ -4,6 +4,25 @@ from artwork.thumbnails import prewarm_artwork_cache
 from exceptions import classify_error
 
 
+def _parse_duration(item):
+    seconds = item.get("duration_seconds")
+    if isinstance(seconds, (int, float)) and seconds > 0:
+        return int(seconds * 1000)
+
+    duration_str = item.get("duration")
+    if isinstance(duration_str, str) and duration_str:
+        try:
+            total = 0
+            for part in duration_str.strip().split(":"):
+                total = total * 60 + int(part)
+            if total > 0:
+                return total * 1000
+        except ValueError:
+            pass
+
+    return None
+
+
 def search(query):
     try:
         yt = YTMusic()
@@ -37,6 +56,7 @@ def search(query):
         )
 
         stream_url = f"https://youtube.com/watch?v={video_id}" if video_id else None
+        duration_ms = _parse_duration(item)
 
         tracks.append({
             "provider": "ytmusic",
@@ -46,6 +66,7 @@ def search(query):
             "album": album,
             "art_url": art_url,
             "stream_url": stream_url,
+            "duration_ms": duration_ms,
             "artists": artists,
             "source": "youtube",
         })

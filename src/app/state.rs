@@ -54,6 +54,16 @@ impl PlaybackState {
         }
     }
 
+    pub fn current_track_mut(&mut self) -> Option<&mut Track> {
+        match self {
+            PlaybackState::Playing { track } | PlaybackState::Paused { track } => Some(track),
+            PlaybackState::Resolving { active, .. } => {
+                active.as_mut().and_then(|a| a.current_track_mut())
+            }
+            PlaybackState::Stopped => None,
+        }
+    }
+
     pub fn pending_track(&self) -> Option<&Track> {
         match self {
             PlaybackState::Resolving { track, .. } => Some(track),
@@ -261,6 +271,10 @@ impl App {
 
     pub fn current_track(&self) -> Option<&Track> {
         self.playback_state.current_track()
+    }
+
+    pub fn current_track_mut(&mut self) -> Option<&mut Track> {
+        self.playback_state.current_track_mut()
     }
 
     pub fn now_playing(&self) -> Option<&Track> {
