@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2025-2026 Sreehari Anil and project contributors
 
-use presenceforge::{Activity, ActivityAssets, ActivityBuilder, ActivityParty};
+use presenceforge::{Activity, ActivityAssets, ActivityBuilder, ActivityParty, ActivityType};
 use serde_json::Value;
 
 fn activity_to_value(activity: &Activity) -> Value {
@@ -76,4 +76,43 @@ fn manual_activity_validation_matches_serialization() {
     let value = activity_to_value(&activity);
     assert_eq!(value["state"], "Multiplayer");
     assert!(value.get("assets").is_some());
+}
+
+#[test]
+fn activity_type_serializes_correctly() {
+    let activity = ActivityBuilder::new()
+        .activity_type(ActivityType::Listening)
+        .build();
+
+    let json = serde_json::to_value(&activity).unwrap();
+
+    assert_eq!(json["type"], 2);
+}
+
+#[test]
+fn all_activity_types_serialize_correctly() {
+    let cases = [
+        (ActivityType::Playing, 0),
+        (ActivityType::Listening, 2),
+        (ActivityType::Watching, 3),
+        (ActivityType::Competing, 5),
+    ];
+
+    for (activity_type, expected) in cases {
+        let activity = ActivityBuilder::new()
+            .activity_type(activity_type)
+            .build();
+
+        let json = serde_json::to_value(activity).unwrap();
+
+        assert_eq!(json["type"], expected);
+    }
+}
+
+#[test]
+fn default_activity_omits_type() {
+    let activity = Activity::default();
+    let json = serde_json::to_value(activity).unwrap();
+
+    assert!(json.get("type").is_none());
 }

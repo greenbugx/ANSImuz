@@ -186,7 +186,7 @@ pub mod retry;
 pub use activity::ActivitySecrets;
 pub use activity::{
     Activity, ActivityAssets, ActivityBuilder, ActivityButton, ActivityParty, ActivityTimestamps,
-    ActivityValidationError,
+    ActivityType, ActivityValidationError,
 };
 pub use error::{
     DiscordIpcError, HandshakeFailureKind, InvalidResponseKind, ProtocolContext,

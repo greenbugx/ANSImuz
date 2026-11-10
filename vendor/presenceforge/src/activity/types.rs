@@ -123,9 +123,71 @@ impl fmt::Display for ActivityValidationError {
 
 impl std::error::Error for ActivityValidationError {}
 
+/// Discord Rich Presence activity types.
+///
+/// Supported by Discord's SET_ACTIVITY RPC command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(into = "u8", try_from = "u8")]
+#[repr(u8)]
+pub enum ActivityType {
+    #[default]
+    Playing = 0,
+    Listening = 2,
+    Watching = 3,
+    Competing = 5,
+}
+
+impl ActivityType {
+    /// Returns the integer representation expected by Discord IPC.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Try to construct an `ActivityType` from a raw u8 integer.
+    #[must_use]
+    pub const fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Playing),
+            2 => Some(Self::Listening),
+            3 => Some(Self::Watching),
+            5 => Some(Self::Competing),
+            _ => None,
+        }
+    }
+}
+
+impl From<ActivityType> for u8 {
+    fn from(activity_type: ActivityType) -> Self {
+        activity_type as u8
+    }
+}
+
+impl TryFrom<u8> for ActivityType {
+    type Error = &'static str;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Self::from_u8(value).ok_or("invalid Discord activity type")
+    }
+}
+
+impl fmt::Display for ActivityType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Playing => write!(f, "Playing"),
+            Self::Listening => write!(f, "Listening"),
+            Self::Watching => write!(f, "Watching"),
+            Self::Competing => write!(f, "Competing"),
+        }
+    }
+}
+
 /// Rich Presence Activity
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Activity {
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<ActivityType>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
 
@@ -466,5 +528,38 @@ mod tests {
             activity.validate().unwrap_err(),
             ActivityValidationError::ButtonsAndSecretsConflict
         ));
+    }
+
+    #[test]
+    fn activity_type_conversions_and_display() {
+        assert_eq!(ActivityType::default(), ActivityType::Playing);
+        assert_eq!(ActivityType::Playing.as_u8(), 0);
+        assert_eq!(ActivityType::Listening.as_u8(), 2);
+        assert_eq!(ActivityType::Watching.as_u8(), 3);
+        assert_eq!(ActivityType::Competing.as_u8(), 5);
+
+        assert_eq!(ActivityType::from_u8(0), Some(ActivityType::Playing));
+        assert_eq!(ActivityType::from_u8(2), Some(ActivityType::Listening));
+        assert_eq!(ActivityType::from_u8(3), Some(ActivityType::Watching));
+        assert_eq!(ActivityType::from_u8(5), Some(ActivityType::Competing));
+        assert_eq!(ActivityType::from_u8(1), None);
+        assert_eq!(ActivityType::from_u8(99), None);
+
+        assert_eq!(u8::from(ActivityType::Listening), 2);
+        assert_eq!(ActivityType::try_from(2u8), Ok(ActivityType::Listening));
+        assert!(ActivityType::try_from(4u8).is_err());
+
+        assert_eq!(ActivityType::Playing.to_string(), "Playing");
+        assert_eq!(ActivityType::Listening.to_string(), "Listening");
+        assert_eq!(ActivityType::Watching.to_string(), "Watching");
+        assert_eq!(ActivityType::Competing.to_string(), "Competing");
+    }
+
+    #[test]
+    fn activity_type_serde_roundtrip() {
+        let serialized = serde_json::to_string(&ActivityType::Listening).unwrap();
+        assert_eq!(serialized, "2");
+        let deserialized: ActivityType = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, ActivityType::Listening);
     }
 }

@@ -46,6 +46,7 @@ fn main() -> Result {
 
     // Create activity manually for full control
     let custom_activity = Activity {
+        r#type: None,
         state: Some("Custom State".to_string()),
         details: Some("Manually crafted activity".to_string()),
         timestamps: Some(ActivityTimestamps {

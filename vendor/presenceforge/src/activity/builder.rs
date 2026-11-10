@@ -4,7 +4,7 @@
 #[cfg(feature = "secrets")]
 use crate::activity::types::ActivitySecrets;
 use crate::activity::types::{
-    Activity, ActivityAssets, ActivityButton, ActivityParty, ActivityTimestamps,
+    Activity, ActivityAssets, ActivityButton, ActivityParty, ActivityTimestamps, ActivityType,
 };
 use crate::error::{DiscordIpcError, Result};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -19,6 +19,32 @@ impl ActivityBuilder {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Set the Discord activity type.
+    pub fn activity_type(mut self, activity_type: ActivityType) -> Self {
+        self.activity.r#type = Some(activity_type);
+        self
+    }
+
+    /// Set the Discord activity type to Listening.
+    pub fn listening(self) -> Self {
+        self.activity_type(ActivityType::Listening)
+    }
+
+    /// Set the Discord activity type to Playing.
+    pub fn playing(self) -> Self {
+        self.activity_type(ActivityType::Playing)
+    }
+
+    /// Set the Discord activity type to Watching.
+    pub fn watching(self) -> Self {
+        self.activity_type(ActivityType::Watching)
+    }
+
+    /// Set the Discord activity type to Competing.
+    pub fn competing(self) -> Self {
+        self.activity_type(ActivityType::Competing)
     }
 
     /// Set the activity state (what the player is currently doing)
@@ -182,6 +208,7 @@ mod tests {
     #[test]
     fn builder_sets_basic_fields() {
         let activity = ActivityBuilder::new()
+            .activity_type(ActivityType::Listening)
             .state("Playing")
             .details("Level 1")
             .large_image("cover")
@@ -192,6 +219,7 @@ mod tests {
             .button("Join", "https://example.com/join")
             .build();
 
+        assert_eq!(activity.r#type, Some(ActivityType::Listening));
         let state = activity.state.as_deref();
         let details = activity.details.as_deref();
         let assets = activity.assets.unwrap();

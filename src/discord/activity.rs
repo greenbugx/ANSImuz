@@ -1,4 +1,4 @@
-use presenceforge::ActivityBuilder;
+use presenceforge::{ActivityBuilder, ActivityType};
 use presenceforge::activity::Activity;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -77,7 +77,7 @@ fn truncate_activity_text(s: &str, max_chars: usize, max_bytes: usize) -> String
 }
 
 pub fn build_activity(info: &PlaybackInfo) -> Activity {
-    let mut builder = ActivityBuilder::new();
+    let mut builder = ActivityBuilder::new().activity_type(ActivityType::Listening);
 
     // Discord max length: 128 characters
     // Details: track title
@@ -165,6 +165,7 @@ mod tests {
 
         let activity = build_activity(&info);
         assert!(activity.validate().is_ok());
+        assert_eq!(activity.r#type, Some(ActivityType::Listening));
 
         assert_eq!(activity.details.as_deref(), Some("Bohemian Rhapsody"));
         assert_eq!(
@@ -196,6 +197,7 @@ mod tests {
 
         let activity = build_activity(&info);
         assert!(activity.validate().is_ok());
+        assert_eq!(activity.r#type, Some(ActivityType::Listening));
 
         let assets = activity.assets.as_ref().expect("assets should exist");
         assert_eq!(assets.small_image.as_deref(), Some("pause"));
@@ -267,5 +269,45 @@ mod tests {
 
         let activity = build_activity(&info);
         assert!(activity.validate().is_ok());
+        assert_eq!(activity.r#type, Some(ActivityType::Listening));
+    }
+
+    #[test]
+    fn activity_type_serializes_correctly() {
+        let activity = ActivityBuilder::new()
+            .activity_type(ActivityType::Listening)
+            .build();
+
+        let json = serde_json::to_value(&activity).unwrap();
+
+        assert_eq!(json["type"], 2);
+    }
+
+    #[test]
+    fn all_activity_types_serialize_correctly() {
+        let cases = [
+            (ActivityType::Playing, 0),
+            (ActivityType::Listening, 2),
+            (ActivityType::Watching, 3),
+            (ActivityType::Competing, 5),
+        ];
+
+        for (activity_type, expected) in cases {
+            let activity = ActivityBuilder::new()
+                .activity_type(activity_type)
+                .build();
+
+            let json = serde_json::to_value(activity).unwrap();
+
+            assert_eq!(json["type"], expected);
+        }
+    }
+
+    #[test]
+    fn default_activity_omits_type() {
+        let activity = Activity::default();
+        let json = serde_json::to_value(activity).unwrap();
+
+        assert!(json.get("type").is_none());
     }
 }
