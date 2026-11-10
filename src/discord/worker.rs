@@ -1,13 +1,28 @@
 use crate::discord::activity::{PlaybackInfo, build_activity};
 use crate::discord::client::DiscordClient;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const INITIAL_RECONNECT_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_RECONNECT_INTERVAL: Duration = Duration::from_secs(60);
+
+fn log_discord(msg: &str) {
+    let log_dir = crate::config::cache_base_dir();
+    let _ = std::fs::create_dir_all(&log_dir);
+    let log_path = log_dir.join("discord_rpc.log");
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
+        let secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let _ = writeln!(file, "[{secs}] {msg}");
+    }
+}
 
 #[derive(Debug)]
 pub enum DiscordCommand {
@@ -93,7 +108,16 @@ fn run_worker_loop(
     connected_flag: Arc<AtomicBool>,
 ) {
     let mut client = DiscordClient::new(client_id);
-    let mut connected = client.connect().is_ok();
+    let mut connected = match client.connect() {
+        Ok(()) => {
+            log_discord("[Discord RPC] Connected");
+            true
+        }
+        Err(err) => {
+            log_discord(&format!("[Discord RPC] Initial connection failed: {err}"));
+            false
+        }
+    };
     connected_flag.store(connected, Ordering::Relaxed);
     let mut current_playback: Option<PlaybackInfo> = None;
 
@@ -123,6 +147,10 @@ fn run_worker_loop(
         match receiver.recv_timeout(timeout) {
             Ok(cmd) => match cmd {
                 DiscordCommand::TrackChanged(info) => {
+                    log_discord(&format!(
+                        "[Discord RPC] Track changed: {} — {}",
+                        info.title, info.artist
+                    ));
                     apply_playback(
                         &mut client,
                         &mut connected,
@@ -254,14 +282,20 @@ fn apply_playback(
 
     if *connected {
         let activity = build_activity(playback);
-        if client.set_activity(&activity).is_err() {
-            mark_disconnected(
-                client,
-                connected,
-                connected_flag,
-                next_reconnect_at,
-                current_backoff,
-            );
+        match client.set_activity(&activity) {
+            Ok(()) => {
+                log_discord("[Discord RPC] Activity published successfully");
+            }
+            Err(err) => {
+                log_discord(&format!("[Discord RPC] Failed to publish activity: {err}"));
+                mark_disconnected(
+                    client,
+                    connected,
+                    connected_flag,
+                    next_reconnect_at,
+                    current_backoff,
+                );
+            }
         }
     }
 }
@@ -275,32 +309,45 @@ fn try_reconnect(
     playback: Option<&PlaybackInfo>,
 ) {
     client.disconnect();
-    if client.connect().is_ok() {
-        *connected = true;
-        connected_flag.store(true, Ordering::Relaxed);
-        *current_backoff = INITIAL_RECONNECT_INTERVAL;
-        *next_reconnect_at = None;
+    match client.connect() {
+        Ok(()) => {
+            log_discord("[Discord RPC] Connected (reconnected)");
+            *connected = true;
+            connected_flag.store(true, Ordering::Relaxed);
+            *current_backoff = INITIAL_RECONNECT_INTERVAL;
+            *next_reconnect_at = None;
 
-        if let Some(info) = playback {
-            let activity = build_activity(info);
-            if client.set_activity(&activity).is_err() {
-                mark_disconnected(
-                    client,
-                    connected,
-                    connected_flag,
-                    next_reconnect_at,
-                    current_backoff,
-                );
+            if let Some(info) = playback {
+                let activity = build_activity(info);
+                match client.set_activity(&activity) {
+                    Ok(()) => {
+                        log_discord("[Discord RPC] Activity published after reconnect");
+                    }
+                    Err(err) => {
+                        log_discord(&format!(
+                            "[Discord RPC] Failed to publish activity after reconnect: {err}"
+                        ));
+                        mark_disconnected(
+                            client,
+                            connected,
+                            connected_flag,
+                            next_reconnect_at,
+                            current_backoff,
+                        );
+                    }
+                }
             }
         }
-    } else {
-        mark_disconnected(
-            client,
-            connected,
-            connected_flag,
-            next_reconnect_at,
-            current_backoff,
-        );
+        Err(err) => {
+            log_discord(&format!("[Discord RPC] Reconnection failed: {err}"));
+            mark_disconnected(
+                client,
+                connected,
+                connected_flag,
+                next_reconnect_at,
+                current_backoff,
+            );
+        }
     }
 }
 

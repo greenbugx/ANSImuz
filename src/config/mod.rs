@@ -403,6 +403,7 @@ mod tests {
 
     #[test]
     fn test_clear_caches_result() {
+        let _guard = crate::artwork::ARTWORK_TEST_LOCK.lock().unwrap();
         let result = clear_caches();
         assert!(result.is_ok(), "clear_caches must return Ok");
     }
