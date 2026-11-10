@@ -116,3 +116,11 @@ fn default_activity_omits_type() {
 
     assert!(json.get("type").is_none());
 }
+
+#[test]
+fn activity_type_deserializes_from_json() {
+    let activity: Activity =
+        serde_json::from_str(r#"{"type": 2}"#).unwrap();
+
+    assert_eq!(activity.r#type, Some(ActivityType::Listening));
+}

@@ -127,8 +127,8 @@ impl std::error::Error for ActivityValidationError {}
 ///
 /// Supported by Discord's SET_ACTIVITY RPC command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(into = "u8", try_from = "u8")]
-#[repr(u8)]
+#[serde(into = "u32", try_from = "u32")]
+#[repr(u32)]
 pub enum ActivityType {
     #[default]
     Playing = 0,
@@ -140,13 +140,13 @@ pub enum ActivityType {
 impl ActivityType {
     /// Returns the integer representation expected by Discord IPC.
     #[must_use]
-    pub const fn as_u8(self) -> u8 {
-        self as u8
+    pub const fn as_u32(self) -> u32 {
+        self as u32
     }
 
-    /// Try to construct an `ActivityType` from a raw u8 integer.
+    /// Try to construct an `ActivityType` from a raw u32 integer.
     #[must_use]
-    pub const fn from_u8(value: u8) -> Option<Self> {
+    pub const fn from_u32(value: u32) -> Option<Self> {
         match value {
             0 => Some(Self::Playing),
             2 => Some(Self::Listening),
@@ -154,6 +154,32 @@ impl ActivityType {
             5 => Some(Self::Competing),
             _ => None,
         }
+    }
+
+    /// Returns the integer representation as a u8.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Try to construct an `ActivityType` from a raw u8 integer.
+    #[must_use]
+    pub const fn from_u8(value: u8) -> Option<Self> {
+        Self::from_u32(value as u32)
+    }
+}
+
+impl From<ActivityType> for u32 {
+    fn from(activity_type: ActivityType) -> Self {
+        activity_type as u32
+    }
+}
+
+impl TryFrom<u32> for ActivityType {
+    type Error = &'static str;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        Self::from_u32(value).ok_or("invalid Discord activity type")
     }
 }
 
@@ -533,21 +559,27 @@ mod tests {
     #[test]
     fn activity_type_conversions_and_display() {
         assert_eq!(ActivityType::default(), ActivityType::Playing);
-        assert_eq!(ActivityType::Playing.as_u8(), 0);
+        assert_eq!(ActivityType::Playing.as_u32(), 0);
+        assert_eq!(ActivityType::Listening.as_u32(), 2);
+        assert_eq!(ActivityType::Watching.as_u32(), 3);
+        assert_eq!(ActivityType::Competing.as_u32(), 5);
+
+        assert_eq!(ActivityType::from_u32(0), Some(ActivityType::Playing));
+        assert_eq!(ActivityType::from_u32(2), Some(ActivityType::Listening));
+        assert_eq!(ActivityType::from_u32(3), Some(ActivityType::Watching));
+        assert_eq!(ActivityType::from_u32(5), Some(ActivityType::Competing));
+        assert_eq!(ActivityType::from_u32(1), None);
+        assert_eq!(ActivityType::from_u32(99), None);
+
+        assert_eq!(u32::from(ActivityType::Listening), 2);
+        assert_eq!(ActivityType::try_from(2u32), Ok(ActivityType::Listening));
+        assert!(ActivityType::try_from(4u32).is_err());
+
+        // u8 conversions backward compatibility
         assert_eq!(ActivityType::Listening.as_u8(), 2);
-        assert_eq!(ActivityType::Watching.as_u8(), 3);
-        assert_eq!(ActivityType::Competing.as_u8(), 5);
-
-        assert_eq!(ActivityType::from_u8(0), Some(ActivityType::Playing));
         assert_eq!(ActivityType::from_u8(2), Some(ActivityType::Listening));
-        assert_eq!(ActivityType::from_u8(3), Some(ActivityType::Watching));
-        assert_eq!(ActivityType::from_u8(5), Some(ActivityType::Competing));
-        assert_eq!(ActivityType::from_u8(1), None);
-        assert_eq!(ActivityType::from_u8(99), None);
-
         assert_eq!(u8::from(ActivityType::Listening), 2);
         assert_eq!(ActivityType::try_from(2u8), Ok(ActivityType::Listening));
-        assert!(ActivityType::try_from(4u8).is_err());
 
         assert_eq!(ActivityType::Playing.to_string(), "Playing");
         assert_eq!(ActivityType::Listening.to_string(), "Listening");
@@ -561,5 +593,13 @@ mod tests {
         assert_eq!(serialized, "2");
         let deserialized: ActivityType = serde_json::from_str(&serialized).unwrap();
         assert_eq!(deserialized, ActivityType::Listening);
+    }
+
+    #[test]
+    fn activity_type_deserializes_from_json() {
+        let activity: Activity =
+            serde_json::from_str(r#"{"type": 2}"#).unwrap();
+
+        assert_eq!(activity.r#type, Some(ActivityType::Listening));
     }
 }
