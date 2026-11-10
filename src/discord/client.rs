@@ -73,10 +73,10 @@ impl DiscordClient {
     }
 
     pub fn disconnect(&mut self) {
-        if let Some(mut client) = self.inner.take()
-            && client.is_connected()
-        {
-            let _ = client.clear_activity();
+        if let Some(mut client) = self.inner.take() {
+            if client.is_connected() {
+                let _ = client.clear_activity();
+            }
             client.close();
         }
     }
