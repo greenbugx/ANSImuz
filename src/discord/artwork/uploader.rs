@@ -28,8 +28,10 @@ impl CatboxUploader {
     /// Builds Catbox uploader client with connection and request timeouts.
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let client = reqwest::blocking::Client::builder()
-            .connect_timeout(Duration::from_secs(8))
-            .timeout(Duration::from_secs(15))
+            .http1_only()
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(30))
             .build()?;
         Ok(Self { client })
     }
@@ -107,8 +109,10 @@ impl LitterboxUploader {
     /// Builds Litterbox uploader client configured for 72h retention fallback.
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let client = reqwest::blocking::Client::builder()
-            .connect_timeout(Duration::from_secs(8))
-            .timeout(Duration::from_secs(15))
+            .http1_only()
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(30))
             .build()?;
         Ok(Self {
             client,
@@ -275,6 +279,18 @@ mod tests {
     #[test]
     fn litterbox_uploader_init_succeeds() {
         assert!(LitterboxUploader::new().is_ok());
+    }
+
+    #[test]
+    #[ignore]
+    fn test_live_catbox_upload() {
+        let uploader = CatboxUploader::new().unwrap();
+        let img = image::DynamicImage::new_rgb8(10, 10);
+        let mut jpeg = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg).unwrap();
+        let res = uploader.upload(jpeg, "test.jpg");
+        println!("Result: {:?}", res);
+        assert!(res.is_ok());
     }
 
     #[test]
