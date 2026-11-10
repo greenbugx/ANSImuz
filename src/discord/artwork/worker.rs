@@ -1,5 +1,6 @@
 use super::manager::ArtworkManager;
 use super::types::{ArtworkError, ArtworkRequest, ArtworkResult};
+use crate::config::DiscordArtworkConfig;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::{self, JoinHandle};
 
@@ -29,14 +30,22 @@ pub struct ArtworkWorker {
 }
 
 impl ArtworkWorker {
-    /// Spawns the dedicated artwork worker background thread.
+    /// Spawns the dedicated artwork worker background thread with default settings.
     pub fn spawn(event_sender: Sender<ArtworkEvent>) -> std::io::Result<Self> {
+        Self::spawn_with_config(event_sender, DiscordArtworkConfig::default())
+    }
+
+    /// Spawns the dedicated artwork worker background thread with custom configuration.
+    pub fn spawn_with_config(
+        event_sender: Sender<ArtworkEvent>,
+        config: DiscordArtworkConfig,
+    ) -> std::io::Result<Self> {
         let (cmd_tx, cmd_rx) = channel();
 
         let thread_handle = thread::Builder::new()
             .name("discord-artwork-worker".to_string())
             .spawn(move || {
-                run_artwork_worker(cmd_rx, event_sender);
+                run_artwork_worker(cmd_rx, event_sender, config);
             })?;
 
         Ok(Self {
@@ -68,8 +77,12 @@ impl Drop for ArtworkWorker {
     }
 }
 
-fn run_artwork_worker(receiver: Receiver<ArtworkCommand>, sender: Sender<ArtworkEvent>) {
-    let mut manager = ArtworkManager::new(None);
+fn run_artwork_worker(
+    receiver: Receiver<ArtworkCommand>,
+    sender: Sender<ArtworkEvent>,
+    config: DiscordArtworkConfig,
+) {
+    let mut manager = ArtworkManager::with_config(None, config);
 
     while let Ok(cmd) = receiver.recv() {
         match cmd {

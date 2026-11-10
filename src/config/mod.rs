@@ -37,7 +37,121 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+fn default_cache_max_size_mb() -> u64 {
+    250
+}
+
+fn default_max_download_size_mb() -> u64 {
+    8
+}
+
+fn default_image_size() -> u32 {
+    1024
+}
+
+fn default_primary_host() -> String {
+    "catbox".to_string()
+}
+
+fn default_fallback_host() -> String {
+    "litterbox".to_string()
+}
+
+fn default_litterbox_expiry() -> String {
+    "72h".to_string()
+}
+
+/// Artwork-specific configuration for Discord Rich Presence.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscordArtworkConfig {
+    #[serde(default = "default_cache_max_size_mb")]
+    pub cache_max_size_mb: u64,
+    #[serde(default = "default_max_download_size_mb")]
+    pub max_download_size_mb: u64,
+    #[serde(default = "default_image_size")]
+    pub image_size: u32,
+    #[serde(default = "default_primary_host")]
+    pub primary_host: String,
+    #[serde(default = "default_fallback_host")]
+    pub fallback_host: String,
+    #[serde(default = "default_litterbox_expiry")]
+    pub litterbox_expiry: String,
+}
+
+impl Default for DiscordArtworkConfig {
+    fn default() -> Self {
+        Self {
+            cache_max_size_mb: default_cache_max_size_mb(),
+            max_download_size_mb: default_max_download_size_mb(),
+            image_size: default_image_size(),
+            primary_host: default_primary_host(),
+            fallback_host: default_fallback_host(),
+            litterbox_expiry: default_litterbox_expiry(),
+        }
+    }
+}
+
+impl DiscordArtworkConfig {
+    #[must_use]
+    pub fn cache_max_bytes(&self) -> u64 {
+        self.cache_max_size_mb.saturating_mul(1024 * 1024)
+    }
+
+    #[must_use]
+    pub fn max_download_bytes(&self) -> usize {
+        (self.max_download_size_mb.saturating_mul(1024 * 1024)) as usize
+    }
+
+    #[must_use]
+    pub fn litterbox_duration_seconds(&self) -> u64 {
+        match self.litterbox_expiry.trim() {
+            "1h" => 3600,
+            "12h" => 12 * 3600,
+            "24h" => 24 * 3600,
+            "72h" => 72 * 3600,
+            other => {
+                if let Some(h) = other.strip_suffix('h').and_then(|s| s.parse::<u64>().ok()) {
+                    h.saturating_mul(3600)
+                } else {
+                    72 * 3600
+                }
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn litterbox_time_str(&self) -> &str {
+        match self.litterbox_expiry.trim() {
+            "1h" => "1h",
+            "12h" => "12h",
+            "24h" => "24h",
+            _ => "72h",
+        }
+    }
+}
+
+/// Discord Rich Presence subsystem configuration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscordConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub artwork_enabled: bool,
+    #[serde(default)]
+    pub artwork: DiscordArtworkConfig,
+}
+
+impl Default for DiscordConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            artwork_enabled: true,
+            artwork: DiscordArtworkConfig::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default)]
     pub audio_cache: bool,
@@ -49,6 +163,8 @@ pub struct Settings {
     pub provider: Provider,
     #[serde(default)]
     pub discord_rpc: bool,
+    #[serde(default)]
+    pub discord: DiscordConfig,
 }
 
 impl Default for Settings {
@@ -59,6 +175,7 @@ impl Default for Settings {
             art_palette: false,
             provider: Provider::YtMusic,
             discord_rpc: false,
+            discord: DiscordConfig::default(),
         }
     }
 }
@@ -72,7 +189,13 @@ impl Settings {
         };
 
         // 1. Try parsing as TOML with Serde
-        if let Ok(settings) = toml::from_str::<Settings>(&content) {
+        if let Ok(mut settings) = toml::from_str::<Settings>(&content) {
+            // Keep legacy discord_rpc and discord.enabled synchronized
+            if settings.discord.enabled {
+                settings.discord_rpc = true;
+            } else if settings.discord_rpc {
+                settings.discord.enabled = true;
+            }
             return settings;
         }
 
@@ -94,7 +217,11 @@ impl Settings {
                         _ => Provider::YtMusic,
                     };
                 }
-                "discord_rpc" => settings.discord_rpc = value.trim() == "true",
+                "discord_rpc" => {
+                    let val = value.trim() == "true";
+                    settings.discord_rpc = val;
+                    settings.discord.enabled = val;
+                }
                 _ => {}
             }
         }
@@ -108,7 +235,10 @@ impl Settings {
             fs::create_dir_all(parent)?;
         }
 
-        let toml_content = toml::to_string_pretty(self)
+        let mut to_save = self.clone();
+        to_save.discord_rpc = to_save.discord.enabled;
+
+        let toml_content = toml::to_string_pretty(&to_save)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
         fs::write(path, toml_content)
@@ -344,6 +474,11 @@ mod tests {
             art_palette: true,
             provider: Provider::Spotify,
             discord_rpc: true,
+            discord: DiscordConfig {
+                enabled: true,
+                artwork_enabled: true,
+                artwork: DiscordArtworkConfig::default(),
+            },
         };
 
         let toml_str = toml::to_string_pretty(&settings).expect("serialize toml");
@@ -352,9 +487,66 @@ mod tests {
         assert!(toml_str.contains("art_palette = true"));
         assert!(toml_str.contains("provider = \"spotify\""));
         assert!(toml_str.contains("discord_rpc = true"));
+        assert!(toml_str.contains("[discord]"));
+        assert!(toml_str.contains("enabled = true"));
+        assert!(toml_str.contains("[discord.artwork]"));
 
         let loaded: Settings = toml::from_str(&toml_str).expect("deserialize toml");
         assert_eq!(loaded, settings);
+    }
+
+    #[test]
+    fn test_phase7_discord_artwork_toml_spec() {
+        let toml_spec = r#"
+[discord]
+enabled = true
+artwork_enabled = true
+
+[discord.artwork]
+cache_max_size_mb = 250
+max_download_size_mb = 8
+image_size = 1024
+
+primary_host = "catbox"
+fallback_host = "litterbox"
+litterbox_expiry = "72h"
+"#;
+        let loaded: Settings = toml::from_str(toml_spec).expect("deserialize phase 7 toml");
+        assert!(loaded.discord.enabled);
+        assert!(loaded.discord.artwork_enabled);
+        assert_eq!(loaded.discord.artwork.cache_max_size_mb, 250);
+        assert_eq!(loaded.discord.artwork.max_download_size_mb, 8);
+        assert_eq!(loaded.discord.artwork.image_size, 1024);
+        assert_eq!(loaded.discord.artwork.primary_host, "catbox");
+        assert_eq!(loaded.discord.artwork.fallback_host, "litterbox");
+        assert_eq!(loaded.discord.artwork.litterbox_expiry, "72h");
+
+        assert_eq!(loaded.discord.artwork.cache_max_bytes(), 250 * 1024 * 1024);
+        assert_eq!(loaded.discord.artwork.max_download_bytes(), 8 * 1024 * 1024);
+        assert_eq!(loaded.discord.artwork.litterbox_duration_seconds(), 72 * 3600);
+        assert_eq!(loaded.discord.artwork.litterbox_time_str(), "72h");
+    }
+
+    #[test]
+    fn test_discord_artwork_expiry_variations() {
+        let mut art_cfg = DiscordArtworkConfig {
+            litterbox_expiry: "1h".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(art_cfg.litterbox_duration_seconds(), 3600);
+        assert_eq!(art_cfg.litterbox_time_str(), "1h");
+
+        art_cfg.litterbox_expiry = "12h".to_string();
+        assert_eq!(art_cfg.litterbox_duration_seconds(), 12 * 3600);
+        assert_eq!(art_cfg.litterbox_time_str(), "12h");
+
+        art_cfg.litterbox_expiry = "24h".to_string();
+        assert_eq!(art_cfg.litterbox_duration_seconds(), 24 * 3600);
+        assert_eq!(art_cfg.litterbox_time_str(), "24h");
+
+        art_cfg.litterbox_expiry = "48h".to_string();
+        assert_eq!(art_cfg.litterbox_duration_seconds(), 48 * 3600);
+        assert_eq!(art_cfg.litterbox_time_str(), "72h"); // fallback to standard 72h string for API
     }
 
     #[test]

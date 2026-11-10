@@ -33,8 +33,9 @@ pub fn render_settings(
     } else {
         dim
     };
-    let discord_state = if settings.discord_rpc { "ON" } else { "OFF" };
-    let discord_style = if settings.discord_rpc {
+    let discord_on = settings.discord.enabled || settings.discord_rpc;
+    let discord_state = if discord_on { "ON" } else { "OFF" };
+    let discord_style = if discord_on {
         bold_primary
     } else {
         dim

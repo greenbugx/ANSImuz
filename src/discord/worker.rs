@@ -1,3 +1,4 @@
+use crate::config::DiscordConfig;
 use crate::discord::activity::{PlaybackInfo, build_activity};
 use crate::discord::artwork::worker::{ArtworkEvent, ArtworkWorker};
 use crate::discord::artwork::types::{ArtworkError, ArtworkRequest, ArtworkResult};
@@ -52,6 +53,13 @@ pub struct DiscordWorker {
 
 impl DiscordWorker {
     pub fn spawn(client_id: impl Into<String>) -> std::io::Result<Self> {
+        Self::spawn_with_config(client_id, DiscordConfig::default())
+    }
+
+    pub fn spawn_with_config(
+        client_id: impl Into<String>,
+        config: DiscordConfig,
+    ) -> std::io::Result<Self> {
         let (sender, receiver) = channel();
         let client_id = client_id.into();
         let connected = Arc::new(AtomicBool::new(false));
@@ -61,7 +69,7 @@ impl DiscordWorker {
         let thread_handle = thread::Builder::new()
             .name("discord-rpc-worker".to_string())
             .spawn(move || {
-                run_worker_loop(&client_id, receiver, connected_flag, internal_sender);
+                run_worker_loop(&client_id, receiver, connected_flag, internal_sender, config);
             })?;
 
         Ok(Self {
@@ -128,6 +136,7 @@ fn run_worker_loop(
     receiver: Receiver<DiscordCommand>,
     connected_flag: Arc<AtomicBool>,
     internal_sender: Sender<DiscordCommand>,
+    config: DiscordConfig,
 ) {
     let mut client = DiscordClient::new(client_id);
     let mut connected = match client.connect() {
@@ -145,23 +154,28 @@ fn run_worker_loop(
     let mut current_generation: u64 = 0;
 
     // Dedicated artwork worker keeping network operations off the playback path
-    let (art_tx, art_rx) = channel::<ArtworkEvent>();
-    let artwork_worker = match ArtworkWorker::spawn(art_tx) {
-        Ok(w) => {
-            let tx_clone = internal_sender;
-            let _ = thread::Builder::new()
-                .name("discord-artwork-forwarder".to_string())
-                .spawn(move || {
-                    while let Ok(ArtworkEvent::Resolved { generation, result }) = art_rx.recv() {
-                        let _ = tx_clone.send(DiscordCommand::ArtworkResolved { generation, result });
-                    }
-                });
-            Some(w)
+    let artwork_worker = if config.artwork_enabled {
+        let (art_tx, art_rx) = channel::<ArtworkEvent>();
+        match ArtworkWorker::spawn_with_config(art_tx, config.artwork.clone()) {
+            Ok(w) => {
+                let tx_clone = internal_sender;
+                let _ = thread::Builder::new()
+                    .name("discord-artwork-forwarder".to_string())
+                    .spawn(move || {
+                        while let Ok(ArtworkEvent::Resolved { generation, result }) = art_rx.recv() {
+                            let _ = tx_clone.send(DiscordCommand::ArtworkResolved { generation, result });
+                        }
+                    });
+                Some(w)
+            }
+            Err(e) => {
+                log_discord(&format!("[Discord RPC] Failed to spawn artwork worker: {e}"));
+                None
+            }
         }
-        Err(e) => {
-            log_discord(&format!("[Discord RPC] Failed to spawn artwork worker: {e}"));
-            None
-        }
+    } else {
+        log_discord("[Discord RPC] Artwork resolution disabled by configuration");
+        None
     };
 
     let mut current_backoff = INITIAL_RECONNECT_INTERVAL;
@@ -209,8 +223,9 @@ fn run_worker_loop(
                         &info,
                     );
 
-                    // Request artwork resolution in parallel without blocking
-                    if let Some(ref art_url) = info.art_url
+                    // Request artwork resolution in parallel without blocking if enabled
+                    if config.artwork_enabled
+                        && let Some(ref art_url) = info.art_url
                         && !art_url.trim().is_empty()
                         && let Some(ref aw) = artwork_worker
                     {

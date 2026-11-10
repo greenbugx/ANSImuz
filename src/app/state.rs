@@ -188,8 +188,11 @@ impl App {
     }
 
     pub fn init_discord(&mut self) {
-        if self.settings.discord_rpc && self.discord_worker.is_none() {
-            match crate::discord::DiscordWorker::spawn(crate::discord::DEFAULT_CLIENT_ID) {
+        if (self.settings.discord.enabled || self.settings.discord_rpc) && self.discord_worker.is_none() {
+            match crate::discord::DiscordWorker::spawn_with_config(
+                crate::discord::DEFAULT_CLIENT_ID,
+                self.settings.discord.clone(),
+            ) {
                 Ok(worker) => self.discord_worker = Some(worker),
                 Err(err) => self.set_status(format!("DISCORD RPC ERROR: {err}")),
             }
@@ -197,7 +200,7 @@ impl App {
     }
 
     pub fn is_discord_connected(&self) -> bool {
-        self.settings.discord_rpc
+        (self.settings.discord.enabled || self.settings.discord_rpc)
             && self
                 .discord_worker
                 .as_ref()
@@ -205,14 +208,18 @@ impl App {
     }
 
     pub fn toggle_discord_rpc(&mut self) {
-        self.settings.discord_rpc = !self.settings.discord_rpc;
+        self.settings.discord.enabled = !self.settings.discord.enabled;
+        self.settings.discord_rpc = self.settings.discord.enabled;
         if let Err(error) = self.settings.save() {
             self.set_status(format!("SETTINGS ERROR: {error}"));
         }
 
-        if self.settings.discord_rpc {
+        if self.settings.discord.enabled {
             if self.discord_worker.is_none() {
-                match crate::discord::DiscordWorker::spawn(crate::discord::DEFAULT_CLIENT_ID) {
+                match crate::discord::DiscordWorker::spawn_with_config(
+                    crate::discord::DEFAULT_CLIENT_ID,
+                    self.settings.discord.clone(),
+                ) {
                     Ok(worker) => {
                         if let Some(track) = self.current_track() {
                             let mut info =

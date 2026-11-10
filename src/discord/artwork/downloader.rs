@@ -27,6 +27,11 @@ pub struct DownloadedArtwork {
 /// - Encodes as JPEG
 /// - Computes SHA-256 hash of normalized bytes
 pub fn normalize_image(img: DynamicImage) -> Result<(Vec<u8>, String), String> {
+    normalize_image_with_side(img, TARGET_MAX_SIDE)
+}
+
+/// Normalizes image with a configurable target side constraint.
+pub fn normalize_image_with_side(img: DynamicImage, target_side: u32) -> Result<(Vec<u8>, String), String> {
     let (w, h) = img.dimensions();
     if w < MIN_DIMENSION || h < MIN_DIMENSION {
         return Err(format!("Image dimensions ({w}x{h}) are too small"));
@@ -35,9 +40,9 @@ pub fn normalize_image(img: DynamicImage) -> Result<(Vec<u8>, String), String> {
         return Err(format!("Image dimensions ({w}x{h}) exceed maximum allowed ({MAX_DIMENSION})"));
     }
 
-    // Resize to fit within 1024x1024 while preserving aspect ratio (do not stretch)
-    let resized = if w > TARGET_MAX_SIDE || h > TARGET_MAX_SIDE {
-        img.resize(TARGET_MAX_SIDE, TARGET_MAX_SIDE, imageops::FilterType::Triangle)
+    // Resize to fit within target_side x target_side while preserving aspect ratio (do not stretch)
+    let resized = if w > target_side || h > target_side {
+        img.resize(target_side, target_side, imageops::FilterType::Triangle)
     } else {
         img
     };
@@ -57,6 +62,16 @@ pub fn normalize_image(img: DynamicImage) -> Result<(Vec<u8>, String), String> {
 
 /// Download artwork from an HTTPS URL and normalize it to the cache `images/` directory.
 pub fn download_and_normalize(url: &str, images_dir: &Path) -> Result<DownloadedArtwork, String> {
+    download_and_normalize_with_limits(url, images_dir, MAX_IMAGE_BYTES, TARGET_MAX_SIDE)
+}
+
+/// Download artwork with configurable download size ceiling and image size.
+pub fn download_and_normalize_with_limits(
+    url: &str,
+    images_dir: &Path,
+    max_download_bytes: usize,
+    target_side: u32,
+) -> Result<DownloadedArtwork, String> {
     // Accept HTTPS artwork URLs only
     if !url.starts_with("https://") {
         return Err("Artwork URL must use the HTTPS scheme".to_string());
@@ -91,10 +106,10 @@ pub fn download_and_normalize(url: &str, images_dir: &Path) -> Result<Downloaded
         }
     }
 
-    // Stream chunks with size limit (max 8 MB)
+    // Stream chunks with size limit
     let initial_cap = response
         .content_length()
-        .map(|len| (len as usize).min(MAX_IMAGE_BYTES))
+        .map(|len| (len as usize).min(max_download_bytes))
         .unwrap_or(0);
     let mut raw_bytes = Vec::with_capacity(initial_cap);
     let mut buffer = [0u8; 8192];
@@ -107,8 +122,10 @@ pub fn download_and_normalize(url: &str, images_dir: &Path) -> Result<Downloaded
         if n == 0 {
             break;
         }
-        if raw_bytes.len() + n > MAX_IMAGE_BYTES {
-            return Err("Artwork download exceeded maximum allowed size (8 MB)".to_string());
+        if raw_bytes.len() + n > max_download_bytes {
+            return Err(format!(
+                "Artwork download exceeded maximum allowed size ({max_download_bytes} bytes)"
+            ));
         }
         raw_bytes.extend_from_slice(&buffer[..n]);
     }
@@ -122,8 +139,8 @@ pub fn download_and_normalize(url: &str, images_dir: &Path) -> Result<Downloaded
         .decode()
         .map_err(|e| format!("Failed to decode artwork image: {e}"))?;
 
-    // Normalize (RGB, resize <= 1024x1024 maintaining aspect ratio, JPEG encode, SHA-256)
-    let (normalized_bytes, content_hash) = normalize_image(decoded)?;
+    // Normalize (RGB, resize <= target_side maintaining aspect ratio, JPEG encode, SHA-256)
+    let (normalized_bytes, content_hash) = normalize_image_with_side(decoded, target_side)?;
 
     // Write to unique temporary file, then rename to hash-based filename
     fs::create_dir_all(images_dir)
@@ -189,6 +206,18 @@ mod tests {
         assert!(w <= 1024 && h <= 1024);
         assert_eq!(w, 1024);
         assert_eq!(h, 512); // Exactly 2:1 aspect ratio preserved!
+    }
+
+    #[test]
+    fn test_normalize_image_with_custom_side() {
+        let img = image::RgbaImage::new(2000, 1000);
+        let dyn_img = DynamicImage::ImageRgba8(img);
+
+        let (bytes, _hash) = normalize_image_with_side(dyn_img, 512).expect("normalization");
+        let decoded = image::load_from_memory(&bytes).expect("decode");
+        let (w, h) = decoded.dimensions();
+        assert_eq!(w, 512);
+        assert_eq!(h, 256);
     }
 
     #[test]

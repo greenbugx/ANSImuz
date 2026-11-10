@@ -1,7 +1,8 @@
 use super::cache::{ArtworkCache, current_unix_timestamp, sha256_hex};
-use super::downloader::download_and_normalize;
+use super::downloader::download_and_normalize_with_limits;
 use super::types::{ArtworkError, ArtworkRequest, ArtworkResult, CacheRecord, HostingProvider};
 use super::uploader::{CatboxUploader, LitterboxUploader};
+use crate::config::DiscordArtworkConfig;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
@@ -27,6 +28,7 @@ pub struct ArtworkManager {
     cache: ArtworkCache,
     catbox: CatboxUploader,
     litterbox: LitterboxUploader,
+    config: DiscordArtworkConfig,
     in_flight: Arc<(Mutex<HashMap<String, InFlightState>>, Condvar)>,
     failure_cooldowns: HashMap<String, Instant>,
     failure_cooldown_duration: Duration,
@@ -35,20 +37,39 @@ pub struct ArtworkManager {
 }
 
 impl ArtworkManager {
-    /// Creates a new artwork manager with default or custom cache directory.
+    /// Creates a new artwork manager with default settings.
     #[must_use]
     pub fn new(custom_cache_dir: Option<PathBuf>) -> Self {
-        let cache = ArtworkCache::load(custom_cache_dir);
+        Self::with_config(custom_cache_dir, DiscordArtworkConfig::default())
+    }
+
+    /// Creates a new artwork manager with custom configuration.
+    #[must_use]
+    pub fn with_config(
+        custom_cache_dir: Option<PathBuf>,
+        config: DiscordArtworkConfig,
+    ) -> Self {
+        let max_cache_bytes = config.cache_max_bytes();
+        let cache = ArtworkCache::load_with_capacity(custom_cache_dir, max_cache_bytes);
+        let litterbox = LitterboxUploader::with_expiry(&config.litterbox_expiry)
+            .unwrap_or_default();
         Self {
             cache,
             catbox: CatboxUploader::default(),
-            litterbox: LitterboxUploader::default(),
+            litterbox,
+            config,
             in_flight: Arc::new((Mutex::new(HashMap::new()), Condvar::new())),
             failure_cooldowns: HashMap::new(),
             failure_cooldown_duration: DEFAULT_FAILURE_COOLDOWN,
             catbox_failure: None,
             catbox_cooldown_duration: DEFAULT_CATBOX_COOLDOWN,
         }
+    }
+
+    /// Access configuration.
+    #[must_use]
+    pub fn config(&self) -> &DiscordArtworkConfig {
+        &self.config
     }
 
     /// Access inner cache.
@@ -171,14 +192,52 @@ impl ArtworkManager {
         outcome
     }
 
+    fn upload_to_host(
+        &mut self,
+        host: &str,
+        bytes: &[u8],
+    ) -> Result<(String, HostingProvider, Option<u64>), ArtworkError> {
+        match host {
+            "catbox" => {
+                if self.is_catbox_cooling_down() {
+                    return Err(ArtworkError::CooldownActive);
+                }
+                match self.catbox.upload(bytes.to_vec(), "art.jpg") {
+                    Ok(url) => {
+                        self.clear_catbox_failure();
+                        Ok((url, HostingProvider::Catbox, None))
+                    }
+                    Err(e) => {
+                        self.record_catbox_failure();
+                        Err(ArtworkError::UploadFailed(format!("Catbox: {e}")))
+                    }
+                }
+            }
+            "litterbox" => {
+                match self.litterbox.upload(bytes.to_vec(), "art.jpg") {
+                    Ok(up) => Ok((up.url, up.provider, up.expires_at)),
+                    Err(e) => Err(ArtworkError::UploadFailed(format!("Litterbox: {e}"))),
+                }
+            }
+            other => Err(ArtworkError::UploadFailed(format!("Unsupported host: {other}"))),
+        }
+    }
+
     fn execute_resolve(
         &mut self,
         request: &ArtworkRequest,
         now: u64,
     ) -> Result<ArtworkResult, ArtworkError> {
-        // Download original artwork, normalize image, and calculate content hash
-        let downloaded = download_and_normalize(&request.source_url, self.cache.images_dir())
-            .map_err(ArtworkError::DownloadFailed)?;
+        // Download original artwork, normalize image, and calculate content hash with config limits
+        let max_download_bytes = self.config.max_download_bytes();
+        let target_side = self.config.image_size;
+        let downloaded = download_and_normalize_with_limits(
+            &request.source_url,
+            self.cache.images_dir(),
+            max_download_bytes,
+            target_side,
+        )
+        .map_err(ArtworkError::DownloadFailed)?;
 
         // Check for duplicate content using in-memory content hash index
         // Tracks sharing the same cover don't cause duplicate uploads!
@@ -187,41 +246,28 @@ impl ArtworkManager {
         {
             (existing.hosted_url.clone(), existing.host, existing.expires_at)
         } else {
-            // Upload to Catbox with fallback to Litterbox (72h)
-            let (url, provider, exp) = if !self.is_catbox_cooling_down() {
-                match self.catbox.upload(downloaded.bytes.clone(), "art.jpg") {
-                    Ok(url) => {
-                        self.clear_catbox_failure();
-                        (url, HostingProvider::Catbox, None)
-                    }
-                    Err(e) => {
-                        self.record_catbox_failure();
+            let primary = self.config.primary_host.trim().to_lowercase();
+            let fallback = self.config.fallback_host.trim().to_lowercase();
+
+            let upload_res = match self.upload_to_host(&primary, &downloaded.bytes) {
+                Ok(res) => Ok(res),
+                Err(primary_err) => {
+                    if !fallback.is_empty() && fallback != primary && fallback != "none" {
                         crate::discord::log_discord(&format!(
-                            "Warning: Catbox upload failed ({e}), falling back to Litterbox (72h)"
+                            "Warning: {primary} upload failed ({primary_err}), falling back to {fallback}"
                         ));
-                        let up = self
-                            .litterbox
-                            .upload(downloaded.bytes.clone(), "art.jpg")
-                            .map_err(|lit_err| {
+                        self.upload_to_host(&fallback, &downloaded.bytes)
+                            .map_err(|fb_err| {
                                 ArtworkError::UploadFailed(format!(
-                                    "Both Catbox ({e}) and Litterbox ({lit_err}) uploads failed"
+                                    "Both {primary} ({primary_err}) and {fallback} ({fb_err}) uploads failed"
                                 ))
-                            })?;
-                        (up.url, up.provider, up.expires_at)
+                            })
+                    } else {
+                        Err(primary_err)
                     }
                 }
-            } else {
-                let up = self
-                    .litterbox
-                    .upload(downloaded.bytes.clone(), "art.jpg")
-                    .map_err(|lit_err| {
-                        ArtworkError::UploadFailed(format!(
-                            "Litterbox upload failed (Catbox in cooldown): {lit_err}"
-                        ))
-                    })?;
-                (up.url, up.provider, up.expires_at)
             };
-            (url, provider, exp)
+            upload_res?
         };
 
         // Persist cache entry atomically
