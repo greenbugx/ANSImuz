@@ -189,7 +189,10 @@ mod tests {
 
     #[test]
     fn test_build_activity_paused() {
-        let info = PlaybackInfo::new("Song", "Artist").with_paused(true);
+        let info = PlaybackInfo::new("Song", "Artist")
+            .with_position(Duration::from_secs(45))
+            .with_duration(Duration::from_secs(200))
+            .with_paused(true);
 
         let activity = build_activity(&info);
         assert!(activity.validate().is_ok());
@@ -198,10 +201,10 @@ mod tests {
         assert_eq!(assets.small_image.as_deref(), Some("pause"));
         assert_eq!(assets.small_text.as_deref(), Some("Paused"));
 
-        // When paused, neither start nor end timestamps should be set
+        // When paused, neither start nor end timestamps should be advertised
         if let Some(ts) = activity.timestamps.as_ref() {
-            assert!(ts.start.is_none());
-            assert!(ts.end.is_none());
+            assert!(ts.start.is_none(), "Paused track must not advertise start timestamp");
+            assert!(ts.end.is_none(), "Paused track must not advertise end timestamp");
         }
     }
 
