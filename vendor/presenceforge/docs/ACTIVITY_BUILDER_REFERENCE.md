@@ -25,6 +25,31 @@ S = Small Image (overlays large image in bottom-right corner)
 
 ## All Available Fields
 
+### 0. **Activity Type** (`activity_type()`, `listening()`, `playing()`, `watching()`, `competing()`)
+
+```rust
+use presenceforge::{ActivityBuilder, ActivityType};
+
+// Direct type setter:
+.activity_type(ActivityType::Listening)
+
+// Or convenience helpers:
+.listening()
+.playing()
+.watching()
+.competing()
+```
+
+- **Appears as:** Changes Discord status prefix header (`Playing`, `Listening to`, `Watching`, or `Competing in`).
+- **Supported types:**
+  - `ActivityType::Playing` (`0`): "Playing <App>" (Discord default)
+  - `ActivityType::Listening` (`2`): "Listening to <Details>" (ideal for music players)
+  - `ActivityType::Watching` (`3`): "Watching <Details>"
+  - `ActivityType::Competing` (`5`): "Competing in <Details>"
+- **Omitted by default:** If unset, no type field is sent, preserving Discord's standard default behavior.
+
+---
+
 ### 1. **State** (`state()`)
 
 ```rust
