@@ -5,6 +5,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub const DEFAULT_MAX_CACHE_BYTES: u64 = 250 * 1024 * 1024; // 250 MB ceiling
+
 /// Returns the default base directory for Discord artwork cache.
 #[must_use]
 pub fn default_cache_dir() -> PathBuf {
@@ -70,11 +72,13 @@ pub struct ArtworkCache {
     images_dir: PathBuf,
     index_path: PathBuf,
     index: CacheIndex,
+    content_hash_index: HashMap<String, String>,
+    max_cache_bytes: u64,
 }
 
 impl ArtworkCache {
-    /// Initialize or load the artwork cache from the given directory (or default).
-    pub fn load(custom_base_dir: Option<PathBuf>) -> Self {
+    /// Initialize or load the artwork cache with a specific storage ceiling (default 250 MB).
+    pub fn load_with_capacity(custom_base_dir: Option<PathBuf>, max_cache_bytes: u64) -> Self {
         let base_dir = custom_base_dir.unwrap_or_else(default_cache_dir);
         let images_dir = base_dir.join("images");
         let index_path = base_dir.join("index.json");
@@ -90,12 +94,26 @@ impl ArtworkCache {
             CacheIndex::default()
         };
 
-        Self {
+        let mut cache = Self {
             base_dir,
             images_dir,
             index_path,
             index,
-        }
+            content_hash_index: HashMap::new(),
+            max_cache_bytes,
+        };
+
+        // Validate persistent cache and rebuild lookup maps on startup
+        let now = current_unix_timestamp();
+        cache.validate_and_rebuild_indexes(now);
+        let _ = cache.prune_lru();
+
+        cache
+    }
+
+    /// Initialize or load the artwork cache from the given directory (or default).
+    pub fn load(custom_base_dir: Option<PathBuf>) -> Self {
+        Self::load_with_capacity(custom_base_dir, DEFAULT_MAX_CACHE_BYTES)
     }
 
     #[must_use]
@@ -116,6 +134,114 @@ impl ArtworkCache {
     #[must_use]
     pub fn entries(&self) -> &HashMap<String, CacheRecord> {
         &self.index.entries
+    }
+
+    #[must_use]
+    pub fn content_hash_index(&self) -> &HashMap<String, String> {
+        &self.content_hash_index
+    }
+
+    /// On-startup validation:
+    /// 1. Read index.json (already deserialized in `load`).
+    /// 2. Check that referenced local files exist.
+    /// 3. Remove invalid local entries.
+    /// 4. Check expiry timestamps for Litterbox (purge expired).
+    /// 5. Retain valid Catbox mappings.
+    /// 6. Rebuild in-memory lookup maps (content_hash index).
+    pub fn validate_and_rebuild_indexes(&mut self, now_secs: u64) -> usize {
+        let mut removed = 0;
+        let mut valid_entries = HashMap::new();
+        self.content_hash_index.clear();
+
+        for (key, record) in self.index.entries.drain() {
+            let local_path = self.base_dir.join(&record.local_file);
+
+            // 2 & 3. Check that referenced local file exists
+            if !local_path.is_file() {
+                removed += 1;
+                continue;
+            }
+
+            // 4 & 5. Check expiry timestamps for Litterbox; retain valid Catbox mappings
+            if !is_record_valid(&record, now_secs) {
+                let _ = fs::remove_file(&local_path);
+                removed += 1;
+                continue;
+            }
+
+            // 6. Rebuild in-memory content hash index
+            self.content_hash_index
+                .insert(record.content_hash.clone(), key.clone());
+            valid_entries.insert(key, record);
+        }
+
+        self.index.entries = valid_entries;
+
+        if removed > 0 {
+            let _ = self.save_index();
+        }
+
+        removed
+    }
+
+    /// Storage management: LRU cleanup policy with a configurable cache-size ceiling (e.g. 250 MB).
+    pub fn prune_lru(&mut self) -> std::io::Result<u64> {
+        if !self.images_dir.exists() {
+            return Ok(0);
+        }
+
+        let mut files = Vec::new();
+        let mut total_size = 0u64;
+
+        for entry in fs::read_dir(&self.images_dir)?.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.is_file()
+                && let Ok(meta) = entry.metadata()
+            {
+                let size = meta.len();
+                total_size += size;
+                let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                files.push((path, size, mtime));
+            }
+        }
+
+        if total_size <= self.max_cache_bytes {
+            return Ok(0);
+        }
+
+        // Sort oldest modified first
+        files.sort_by_key(|(_, _, mtime)| *mtime);
+
+        let mut bytes_pruned = 0u64;
+        let mut pruned_rel_paths = Vec::new();
+
+        for (path, size, _) in files {
+            if total_size <= self.max_cache_bytes {
+                break;
+            }
+            if let Ok(rel) = path.strip_prefix(&self.base_dir) {
+                let rel_str = rel.to_string_lossy().replace('\\', "/");
+                pruned_rel_paths.push(rel_str);
+            }
+            if fs::remove_file(&path).is_ok() {
+                total_size = total_size.saturating_sub(size);
+                bytes_pruned += size;
+            }
+        }
+
+        // Clean up corresponding index entries
+        if !pruned_rel_paths.is_empty() {
+            self.index.entries.retain(|_, record| {
+                let keep = !pruned_rel_paths.iter().any(|p| p == &record.local_file);
+                if !keep {
+                    self.content_hash_index.remove(&record.content_hash);
+                }
+                keep
+            });
+            let _ = self.save_index();
+        }
+
+        Ok(bytes_pruned)
     }
 
     /// Cache lookup implementing the exact lookup order:
@@ -171,6 +297,16 @@ impl ArtworkCache {
     /// Check if another cached track with identical image content hash already has a valid hosted URL.
     /// Reuses that hosted URL to avoid duplicate third-party uploads.
     pub fn find_reusable_upload(&self, content_hash: &str, now_secs: u64) -> Option<&CacheRecord> {
+        // Fast O(1) in-memory index check
+        if let Some(key) = self.content_hash_index.get(content_hash)
+            && let Some(record) = self.index.entries.get(key)
+            && is_record_valid(record, now_secs)
+            && self.base_dir.join(&record.local_file).is_file()
+        {
+            return Some(record);
+        }
+
+        // Fallback scan
         self.index.entries.values().find(|record| {
             record.content_hash == content_hash
                 && is_record_valid(record, now_secs)
@@ -180,14 +316,20 @@ impl ArtworkCache {
 
     /// Insert a record for a request and atomically persist `index.json`.
     pub fn insert_and_save(&mut self, req: &ArtworkRequest, record: CacheRecord) -> std::io::Result<()> {
+        let content_hash = record.content_hash.clone();
+
         if let Some(key) = make_primary_key(&req.provider, req.track_id.as_deref()) {
+            self.content_hash_index.insert(content_hash.clone(), key.clone());
             self.index.entries.insert(key, record.clone());
         }
 
         let url_key = make_url_key(&req.source_url);
+        self.content_hash_index.insert(content_hash, url_key.clone());
         self.index.entries.insert(url_key, record);
 
-        self.save_index()
+        self.save_index()?;
+        let _ = self.prune_lru();
+        Ok(())
     }
 
     /// Write index updates atomically:
@@ -286,18 +428,120 @@ mod tests {
     }
 
     #[test]
-    fn catbox_record_validity() {
-        let record = CacheRecord {
-            source_url: "https://example.com/art.jpg".into(),
-            local_file: "images/cat.jpg".into(),
-            hosted_url: "https://files.catbox.moe/abc.jpg".into(),
-            host: HostingProvider::Catbox,
-            content_hash: "chash".into(),
-            uploaded_at: 1000,
-            expires_at: None,
-        };
+    fn startup_validation_purges_missing_local_files_and_expired_litterbox() {
+        let temp_dir = std::env::temp_dir().join("ansimuz_test_validation");
+        let _ = fs::remove_dir_all(&temp_dir);
 
-        assert!(is_record_valid(&record, 999_999));
+        let now = 200_000u64;
+
+        // Setup manually an index with 3 entries:
+        //
+        // 1. Valid Catbox with local file
+        // 2. Catbox with missing local file
+        // 3. Expired Litterbox with local file
+        let images_dir = temp_dir.join("images");
+        fs::create_dir_all(&images_dir).unwrap();
+
+        let valid_cat_file = images_dir.join("cat.jpg");
+        fs::write(&valid_cat_file, b"cat-bytes").unwrap();
+
+        let expired_lit_file = images_dir.join("lit.jpg");
+        fs::write(&expired_lit_file, b"lit-bytes").unwrap();
+
+        let mut index = CacheIndex::default();
+        index.entries.insert("ytmusic:valid_cat".into(), CacheRecord {
+            source_url: "https://example.com/cat.jpg".into(),
+            local_file: "images/cat.jpg".into(),
+            hosted_url: "https://files.catbox.moe/cat.jpg".into(),
+            host: HostingProvider::Catbox,
+            content_hash: "cat_hash".into(),
+            uploaded_at: now - 1000,
+            expires_at: None,
+        });
+
+        index.entries.insert("ytmusic:missing_file".into(), CacheRecord {
+            source_url: "https://example.com/missing.jpg".into(),
+            local_file: "images/missing.jpg".into(),
+            hosted_url: "https://files.catbox.moe/missing.jpg".into(),
+            host: HostingProvider::Catbox,
+            content_hash: "missing_hash".into(),
+            uploaded_at: now - 1000,
+            expires_at: None,
+        });
+
+        index.entries.insert("ytmusic:expired_lit".into(), CacheRecord {
+            source_url: "https://example.com/lit.jpg".into(),
+            local_file: "images/lit.jpg".into(),
+            hosted_url: "https://litterbox.catbox.moe/lit.jpg".into(),
+            host: HostingProvider::Litterbox,
+            content_hash: "lit_hash".into(),
+            uploaded_at: now - 10_000,
+            expires_at: Some(now - 100), // Expired!
+        });
+
+        fs::write(temp_dir.join("index.json"), serde_json::to_string_pretty(&index).unwrap()).unwrap();
+
+        // Load cache which triggers startup validation
+        let cache = ArtworkCache::load(Some(temp_dir.clone()));
+
+        // Valid Catbox retained
+        assert!(cache.entries().contains_key("ytmusic:valid_cat"));
+        assert!(cache.content_hash_index().contains_key("cat_hash"));
+
+        // Missing file entry purged
+        assert!(!cache.entries().contains_key("ytmusic:missing_file"));
+
+        // Expired Litterbox entry purged
+        assert!(!cache.entries().contains_key("ytmusic:expired_lit"));
+        assert!(!expired_lit_file.exists()); // Expired file removed from disk
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn lru_cache_prune_enforces_ceiling() {
+        let temp_dir = std::env::temp_dir().join("ansimuz_test_lru");
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        // Ceiling 100 bytes
+        let mut cache = ArtworkCache::load_with_capacity(Some(temp_dir.clone()), 100);
+
+        let file1 = cache.images_dir().join("file1.jpg");
+        let file2 = cache.images_dir().join("file2.jpg");
+
+        fs::write(&file1, vec![0u8; 80]).unwrap();
+        // Ensure distinct mtime
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(&file2, vec![0u8; 80]).unwrap();
+
+        let req1 = ArtworkRequest::new("ytmusic", Some("1".into()), "https://example.com/1.jpg");
+        cache.insert_and_save(&req1, CacheRecord {
+            source_url: "https://example.com/1.jpg".into(),
+            local_file: "images/file1.jpg".into(),
+            hosted_url: "https://files.catbox.moe/1.jpg".into(),
+            host: HostingProvider::Catbox,
+            content_hash: "hash1".into(),
+            uploaded_at: 100,
+            expires_at: None,
+        }).unwrap();
+
+        let req2 = ArtworkRequest::new("ytmusic", Some("2".into()), "https://example.com/2.jpg");
+        cache.insert_and_save(&req2, CacheRecord {
+            source_url: "https://example.com/2.jpg".into(),
+            local_file: "images/file2.jpg".into(),
+            hosted_url: "https://files.catbox.moe/2.jpg".into(),
+            host: HostingProvider::Catbox,
+            content_hash: "hash2".into(),
+            uploaded_at: 200,
+            expires_at: None,
+        }).unwrap();
+
+        // Total was 160 bytes > 100 bytes ceiling -> oldest file1 should be pruned
+        assert!(!file1.exists());
+        assert!(file2.exists());
+        assert!(!cache.entries().contains_key("ytmusic:1"));
+        assert!(cache.entries().contains_key("ytmusic:2"));
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }
-
