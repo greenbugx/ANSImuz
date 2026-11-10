@@ -66,3 +66,40 @@ pub struct CacheIndex {
     pub entries: std::collections::HashMap<String, CacheRecord>,
 }
 
+/// Result of an upload operation from an artwork uploader.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UploadedArtwork {
+    pub url: String,
+    pub provider: HostingProvider,
+    pub expires_at: Option<u64>,
+}
+
+/// Errors occurring during artwork fetching, normalization, caching, or uploading.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArtworkError {
+    InvalidUrl(String),
+    DownloadFailed(String),
+    NormalizationFailed(String),
+    UploadFailed(String),
+    InvalidResponse(String),
+    CooldownActive,
+    Io(String),
+}
+
+impl fmt::Display for ArtworkError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidUrl(msg) => write!(f, "Invalid artwork URL: {msg}"),
+            Self::DownloadFailed(msg) => write!(f, "Artwork download failed: {msg}"),
+            Self::NormalizationFailed(msg) => write!(f, "Artwork normalization failed: {msg}"),
+            Self::UploadFailed(msg) => write!(f, "Artwork upload failed: {msg}"),
+            Self::InvalidResponse(msg) => write!(f, "Invalid artwork response: {msg}"),
+            Self::CooldownActive => write!(f, "Artwork retry cooldown is active"),
+            Self::Io(msg) => write!(f, "I/O error: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for ArtworkError {}
+
+

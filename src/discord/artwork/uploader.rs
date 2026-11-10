@@ -1,167 +1,263 @@
-use super::types::HostingProvider;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use super::cache::current_unix_timestamp;
+use super::types::{ArtworkError, HostingProvider, UploadedArtwork};
+use reqwest::blocking::multipart::{Form, Part};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
-pub const LITTERBOX_API_URL: &str = "https://litterbox.catbox.moe/resources/internals/api.php";
 pub const CATBOX_API_URL: &str = "https://catbox.moe/user/api.php";
-pub const LITTERBOX_EXPIRY_SECS: u64 = 24 * 3600; // 24 hours
+pub const LITTERBOX_API_URL: &str = "https://litterbox.catbox.moe/resources/internals/api.php";
+pub const LITTERBOX_RETENTION_HOURS: u64 = 72;
+pub const LITTERBOX_RETENTION_SECS: u64 = LITTERBOX_RETENTION_HOURS * 3600;
+pub const DEFAULT_RETRY_COOLDOWN: Duration = Duration::from_secs(60);
 
-static BOUNDARY_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// Generates a unique multipart boundary string without external dependencies.
-#[must_use]
-pub fn generate_boundary() -> String {
-    let count = BOUNDARY_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let now = crate::discord::artwork::cache::current_unix_timestamp();
-    format!("----ANSImuzBoundary{}_{}_{}", std::process::id(), now, count)
+/// Common interface for artwork hosting services.
+pub trait ArtworkUploader: Send + Sync {
+    fn upload(
+        &self,
+        image_bytes: Vec<u8>,
+        filename: &str,
+    ) -> Result<UploadedArtwork, ArtworkError>;
 }
 
-/// Result of uploading artwork to a hosting provider.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UploadResult {
-    pub hosted_url: String,
-    pub host: HostingProvider,
-    pub expires_at: Option<u64>,
+/// Catbox image uploader implementing anonymous file uploads.
+pub struct CatboxUploader {
+    client: reqwest::blocking::Client,
 }
 
-/// Constructs a standard `multipart/form-data` payload in memory.
-#[must_use]
-pub fn build_multipart_payload(
-    boundary: &str,
-    fields: &[(&str, &str)],
-    file_field: &str,
-    filename: &str,
-    mime_type: &str,
-    file_bytes: &[u8],
-) -> Vec<u8> {
-    let mut body = Vec::new();
-
-    for (key, val) in fields {
-        body.extend_from_slice(
-            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n{val}\r\n")
-                .as_bytes(),
-        );
+impl CatboxUploader {
+    /// Builds Catbox uploader client with connection and request timeouts.
+    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        let client = reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_secs(8))
+            .timeout(Duration::from_secs(15))
+            .build()?;
+        Ok(Self { client })
     }
 
-    body.extend_from_slice(
-        format!(
-            "--{boundary}\r\nContent-Disposition: form-data; name=\"{file_field}\"; filename=\"{filename}\"\r\nContent-Type: {mime_type}\r\n\r\n"
-        )
-        .as_bytes(),
-    );
-    body.extend_from_slice(file_bytes);
-    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    /// Uploads normalized image bytes to Catbox, returning the hosted HTTPS URL.
+    pub fn upload(
+        &self,
+        image_bytes: Vec<u8>,
+        filename: &str,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        // Build multipart part with filename and MIME type
+        let part = Part::bytes(image_bytes)
+            .file_name(filename.to_string())
+            .mime_str("image/jpeg")?;
 
-    body
-}
+        // Build multipart form (anonymous upload: omit userhash)
+        let form = Form::new()
+            .text("reqtype", "fileupload")
+            .part("fileToUpload", part);
 
-/// Attempts to upload artwork bytes to Litterbox.
-pub fn upload_to_litterbox(bytes: &[u8], filename: &str) -> Result<UploadResult, String> {
-    let boundary = generate_boundary();
-    let body = build_multipart_payload(
-        &boundary,
-        &[("reqtype", "fileupload"), ("time", "24h")],
-        "fileToUpload",
-        filename,
-        "image/jpeg",
-        bytes,
-    );
+        // Send POST request
+        let response = self
+            .client
+            .post(CATBOX_API_URL)
+            .multipart(form)
+            .send()?;
 
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(12))
-        .build()
-        .map_err(|e| format!("Litterbox HTTP client initialization failed: {e}"))?;
-
-    let response = client
-        .post(LITTERBOX_API_URL)
-        .header(
-            reqwest::header::CONTENT_TYPE,
-            format!("multipart/form-data; boundary={boundary}"),
-        )
-        .body(body)
-        .send()
-        .map_err(|e| format!("Litterbox upload request failed: {e}"))?;
-
-    if !response.status().is_success() {
-        return Err(format!("Litterbox returned status {}", response.status()));
-    }
-
-    let hosted_url = response
-        .text()
-        .map_err(|e| format!("Failed reading Litterbox response: {e}"))?
-        .trim()
-        .to_string();
-
-    if !hosted_url.starts_with("https://") {
-        return Err(format!("Litterbox returned invalid URL: {hosted_url}"));
-    }
-
-    let now = crate::discord::artwork::cache::current_unix_timestamp();
-    Ok(UploadResult {
-        hosted_url,
-        host: HostingProvider::Litterbox,
-        expires_at: Some(now + LITTERBOX_EXPIRY_SECS),
-    })
-}
-
-/// Attempts to upload artwork bytes to Catbox.
-pub fn upload_to_catbox(bytes: &[u8], filename: &str) -> Result<UploadResult, String> {
-    let boundary = generate_boundary();
-    let body = build_multipart_payload(
-        &boundary,
-        &[("reqtype", "fileupload")],
-        "fileToUpload",
-        filename,
-        "image/jpeg",
-        bytes,
-    );
-
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|e| format!("Catbox HTTP client initialization failed: {e}"))?;
-
-    let response = client
-        .post(CATBOX_API_URL)
-        .header(
-            reqwest::header::CONTENT_TYPE,
-            format!("multipart/form-data; boundary={boundary}"),
-        )
-        .body(body)
-        .send()
-        .map_err(|e| format!("Catbox upload request failed: {e}"))?;
-
-    if !response.status().is_success() {
-        return Err(format!("Catbox returned status {}", response.status()));
-    }
-
-    let hosted_url = response
-        .text()
-        .map_err(|e| format!("Failed reading Catbox response: {e}"))?
-        .trim()
-        .to_string();
-
-    if !hosted_url.starts_with("https://") {
-        return Err(format!("Catbox returned invalid URL: {hosted_url}"));
-    }
-
-    Ok(UploadResult {
-        hosted_url,
-        host: HostingProvider::Catbox,
-        expires_at: None,
-    })
-}
-
-/// Uploads artwork bytes with Litterbox-first fallback to Catbox strategy.
-pub fn upload_artwork(bytes: &[u8], filename: &str) -> Result<UploadResult, String> {
-    // Try Litterbox
-    match upload_to_litterbox(bytes, filename) {
-        Ok(res) => Ok(res),
-        Err(litterbox_err) => {
-            // Fallback to Catbox
-            upload_to_catbox(bytes, filename)
-                .map_err(|catbox_err| format!("Upload failed on all providers: Litterbox ({litterbox_err}); Catbox ({catbox_err})"))
+        // Check HTTP status code
+        if !response.status().is_success() {
+            return Err(format!("Catbox returned HTTP status {}", response.status()).into());
         }
+
+        // Trim response body and validate that it's a valid HTTPS URL
+        let body = response.text()?.trim().to_string();
+        if !body.starts_with("https://") {
+            return Err(format!("Catbox returned invalid URL: {body}").into());
+        }
+
+        Ok(body)
+    }
+}
+
+impl Default for CatboxUploader {
+    fn default() -> Self {
+        Self::new().expect("failed to initialize Catbox HTTP client")
+    }
+}
+
+impl ArtworkUploader for CatboxUploader {
+    fn upload(
+        &self,
+        image_bytes: Vec<u8>,
+        filename: &str,
+    ) -> Result<UploadedArtwork, ArtworkError> {
+        let url = self
+            .upload(image_bytes, filename)
+            .map_err(|e| ArtworkError::UploadFailed(format!("Catbox: {e}")))?;
+
+        Ok(UploadedArtwork {
+            url,
+            provider: HostingProvider::Catbox,
+            expires_at: None,
+        })
+    }
+}
+
+/// Litterbox image uploader for temporary hosting fallback (72h retention).
+pub struct LitterboxUploader {
+    client: reqwest::blocking::Client,
+    time: &'static str,
+    duration_secs: u64,
+}
+
+impl LitterboxUploader {
+    /// Builds Litterbox uploader client configured for 72h retention fallback.
+    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        let client = reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_secs(8))
+            .timeout(Duration::from_secs(15))
+            .build()?;
+        Ok(Self {
+            client,
+            time: "72h",
+            duration_secs: LITTERBOX_RETENTION_SECS,
+        })
+    }
+
+    /// Uploads normalized image bytes to Litterbox with 72h retention.
+    pub fn upload(
+        &self,
+        image_bytes: Vec<u8>,
+        filename: &str,
+    ) -> Result<UploadedArtwork, Box<dyn std::error::Error>> {
+        let part = Part::bytes(image_bytes)
+            .file_name(filename.to_string())
+            .mime_str("image/jpeg")?;
+
+        let form = Form::new()
+            .text("reqtype", "fileupload")
+            .text("time", self.time)
+            .part("fileToUpload", part);
+
+        let response = self
+            .client
+            .post(LITTERBOX_API_URL)
+            .multipart(form)
+            .send()?;
+
+        if !response.status().is_success() {
+            return Err(format!("Litterbox returned HTTP status {}", response.status()).into());
+        }
+
+        let body = response.text()?.trim().to_string();
+        if !body.starts_with("https://") {
+            return Err(format!("Litterbox returned invalid URL: {body}").into());
+        }
+
+        let now = current_unix_timestamp();
+        Ok(UploadedArtwork {
+            url: body,
+            provider: HostingProvider::Litterbox,
+            expires_at: Some(now + self.duration_secs),
+        })
+    }
+}
+
+impl Default for LitterboxUploader {
+    fn default() -> Self {
+        Self::new().expect("failed to initialize Litterbox HTTP client")
+    }
+}
+
+impl ArtworkUploader for LitterboxUploader {
+    fn upload(
+        &self,
+        image_bytes: Vec<u8>,
+        filename: &str,
+    ) -> Result<UploadedArtwork, ArtworkError> {
+        self.upload(image_bytes, filename)
+            .map_err(|e| ArtworkError::UploadFailed(format!("Litterbox: {e}")))
+    }
+}
+
+/// Fallback uploader executing the policy: Catbox -> Litterbox (72h) with retry cooldown.
+pub struct FallbackUploader {
+    catbox: CatboxUploader,
+    litterbox: LitterboxUploader,
+    catbox_failure: Mutex<Option<Instant>>,
+    retry_cooldown: Duration,
+}
+
+impl FallbackUploader {
+    pub fn new() -> Self {
+        Self {
+            catbox: CatboxUploader::default(),
+            litterbox: LitterboxUploader::default(),
+            catbox_failure: Mutex::new(None),
+            retry_cooldown: DEFAULT_RETRY_COOLDOWN,
+        }
+    }
+
+    pub fn with_cooldown(retry_cooldown: Duration) -> Self {
+        Self {
+            catbox: CatboxUploader::default(),
+            litterbox: LitterboxUploader::default(),
+            catbox_failure: Mutex::new(None),
+            retry_cooldown,
+        }
+    }
+
+    /// Check whether Catbox is currently cooling down from a previous failure.
+    pub fn is_catbox_cooling_down(&self) -> bool {
+        if let Ok(guard) = self.catbox_failure.lock()
+            && let Some(last_fail) = *guard
+        {
+            last_fail.elapsed() < self.retry_cooldown
+        } else {
+            false
+        }
+    }
+
+    fn record_catbox_failure(&self) {
+        if let Ok(mut guard) = self.catbox_failure.lock() {
+            *guard = Some(Instant::now());
+        }
+    }
+
+    fn clear_catbox_failure(&self) {
+        if let Ok(mut guard) = self.catbox_failure.lock() {
+            *guard = None;
+        }
+    }
+}
+
+impl Default for FallbackUploader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ArtworkUploader for FallbackUploader {
+    fn upload(
+        &self,
+        image_bytes: Vec<u8>,
+        filename: &str,
+    ) -> Result<UploadedArtwork, ArtworkError> {
+        // 1. Try Catbox if not cooling down
+        if !self.is_catbox_cooling_down() {
+            match self.catbox.upload(image_bytes.clone(), filename) {
+                Ok(url) => {
+                    self.clear_catbox_failure();
+                    return Ok(UploadedArtwork {
+                        url,
+                        provider: HostingProvider::Catbox,
+                        expires_at: None,
+                    });
+                }
+                Err(e) => {
+                    self.record_catbox_failure();
+                    eprintln!("Warning: Catbox upload failed ({e}), falling back to Litterbox (72h)");
+                }
+            }
+        }
+
+        // 2. Fallback to Litterbox (72h)
+        self.litterbox
+            .upload(image_bytes, filename)
+            .map_err(|e| ArtworkError::UploadFailed(format!("Litterbox: {e}")))
     }
 }
 
@@ -170,21 +266,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn multipart_body_construction() {
-        let boundary = "test_boundary";
-        let body = build_multipart_payload(
-            boundary,
-            &[("reqtype", "fileupload"), ("time", "24h")],
-            "fileToUpload",
-            "art.jpg",
-            "image/jpeg",
-            b"test-bytes",
-        );
+    fn catbox_uploader_init_succeeds() {
+        assert!(CatboxUploader::new().is_ok());
+    }
 
-        let body_str = String::from_utf8_lossy(&body);
-        assert!(body_str.contains("--test_boundary\r\n"));
-        assert!(body_str.contains("name=\"reqtype\"\r\n\r\nfileupload\r\n"));
-        assert!(body_str.contains("filename=\"art.jpg\"\r\nContent-Type: image/jpeg\r\n\r\ntest-bytes\r\n"));
-        assert!(body_str.ends_with("--test_boundary--\r\n"));
+    #[test]
+    fn litterbox_uploader_init_succeeds() {
+        assert!(LitterboxUploader::new().is_ok());
+    }
+
+    #[test]
+    fn fallback_uploader_cooldown_tracking() {
+        let uploader = FallbackUploader::with_cooldown(Duration::from_millis(50));
+        assert!(!uploader.is_catbox_cooling_down());
+
+        uploader.record_catbox_failure();
+        assert!(uploader.is_catbox_cooling_down());
+
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(!uploader.is_catbox_cooling_down());
+
+        uploader.record_catbox_failure();
+        uploader.clear_catbox_failure();
+        assert!(!uploader.is_catbox_cooling_down());
     }
 }
