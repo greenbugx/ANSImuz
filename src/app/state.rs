@@ -129,6 +129,7 @@ pub struct App {
     pub pending_queue_entry_id: Option<u64>,
     pub history: VecDeque<Track>,
     pub playback_state: PlaybackState,
+    pub discord_worker: Option<crate::discord::DiscordWorker>,
 }
 
 impl App {
@@ -170,6 +171,52 @@ impl App {
             history: VecDeque::new(),
             pending_queue_entry_id: None,
             playback_state: PlaybackState::Stopped,
+            discord_worker: None,
+        }
+    }
+
+    pub fn init_discord(&mut self) {
+        if self.settings.discord_rpc && self.discord_worker.is_none() {
+            let worker = crate::discord::DiscordWorker::spawn(crate::discord::DEFAULT_CLIENT_ID);
+            self.discord_worker = Some(worker);
+        }
+    }
+
+    pub fn is_discord_connected(&self) -> bool {
+        self.settings.discord_rpc
+            && self
+                .discord_worker
+                .as_ref()
+                .is_some_and(|w| w.is_connected())
+    }
+
+    pub fn toggle_discord_rpc(&mut self) {
+        self.settings.discord_rpc = !self.settings.discord_rpc;
+        if self.settings.discord_rpc {
+            if self.discord_worker.is_none() {
+                let worker =
+                    crate::discord::DiscordWorker::spawn(crate::discord::DEFAULT_CLIENT_ID);
+                if let Some(track) = self.current_track() {
+                    let mut info = crate::discord::PlaybackInfo::new(&track.title, &track.artist);
+                    if let Some(album) = &track.album {
+                        info = info.with_album(album);
+                    }
+                    if let Some(dur_ms) = track.duration_ms {
+                        info = info.with_duration(std::time::Duration::from_millis(dur_ms));
+                    }
+                    if self.is_paused() {
+                        info = info.with_paused(true);
+                    }
+                    if track.has_stream_url() {
+                        info = info.with_stream_url(&track.stream_url);
+                    }
+                    worker.track_changed(info);
+                }
+                self.discord_worker = Some(worker);
+            }
+        } else if let Some(mut worker) = self.discord_worker.take() {
+            worker.clear();
+            worker.shutdown();
         }
     }
 
@@ -308,6 +355,7 @@ impl App {
             1 => self.settings.audio_cache = !self.settings.audio_cache,
             2 => self.settings.art_hq = !self.settings.art_hq,
             3 => self.settings.art_palette = !self.settings.art_palette,
+            4 => self.toggle_discord_rpc(),
             _ => {
                 match crate::config::clear_caches() {
                     Ok(()) => self.set_status("CACHES CLEARED"),

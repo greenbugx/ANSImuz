@@ -47,6 +47,8 @@ pub struct Settings {
     pub art_palette: bool,
     #[serde(default)]
     pub provider: Provider,
+    #[serde(default)]
+    pub discord_rpc: bool,
 }
 
 impl Default for Settings {
@@ -56,6 +58,7 @@ impl Default for Settings {
             art_hq: true,
             art_palette: false,
             provider: Provider::YtMusic,
+            discord_rpc: false,
         }
     }
 }
@@ -91,6 +94,7 @@ impl Settings {
                         _ => Provider::YtMusic,
                     };
                 }
+                "discord_rpc" => settings.discord_rpc = value.trim() == "true",
                 _ => {}
             }
         }
@@ -339,6 +343,7 @@ mod tests {
             art_hq: false,
             art_palette: true,
             provider: Provider::Spotify,
+            discord_rpc: true,
         };
 
         let toml_str = toml::to_string_pretty(&settings).expect("serialize toml");
@@ -346,14 +351,26 @@ mod tests {
         assert!(toml_str.contains("art_hq = false"));
         assert!(toml_str.contains("art_palette = true"));
         assert!(toml_str.contains("provider = \"spotify\""));
+        assert!(toml_str.contains("discord_rpc = true"));
 
         let loaded: Settings = toml::from_str(&toml_str).expect("deserialize toml");
         assert_eq!(loaded, settings);
     }
 
     #[test]
+    fn test_settings_missing_discord_rpc_defaults_to_false() {
+        let existing_toml =
+            "audio_cache = true\nart_hq = true\nart_palette = false\nprovider = \"ytmusic\"\n";
+        let loaded: Settings = toml::from_str(existing_toml).expect("deserialize existing toml");
+        assert!(
+            !loaded.discord_rpc,
+            "Existing config without discord_rpc must default to false"
+        );
+    }
+
+    #[test]
     fn test_settings_legacy_key_value_fallback() {
-        let legacy = "audio_cache=true\nart_hq=false\nart_palette=true\nprovider=spotify\n";
+        let legacy = "audio_cache=true\nart_hq=false\nart_palette=true\nprovider=spotify\ndiscord_rpc=true\n";
         let parsed = toml::from_str::<Settings>(legacy);
         assert!(parsed.is_err(), "Legacy unquoted format is not valid TOML");
 
@@ -371,6 +388,7 @@ mod tests {
                                 _ => Provider::YtMusic,
                             };
                     }
+                    "discord_rpc" => settings.discord_rpc = value.trim() == "true",
                     _ => {}
                 }
             }
@@ -380,6 +398,7 @@ mod tests {
         assert!(!settings.art_hq);
         assert!(settings.art_palette);
         assert_eq!(settings.provider, Provider::Spotify);
+        assert!(settings.discord_rpc);
     }
 
     #[test]

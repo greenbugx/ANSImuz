@@ -381,6 +381,24 @@ pub fn render_player(
         theme.dim,
     );
 
+    if layout.search_box_area.width >= 30 {
+        let indicator_w: u16 = 2;
+        let indicator_h: u16 = 1;
+        let indicator_x =
+            layout.search_box_area.x + layout.search_box_area.width.saturating_sub(indicator_w + 1);
+        let indicator_y = layout.search_box_area.y + 1;
+        let indicator_area = Rect {
+            x: indicator_x,
+            y: indicator_y,
+            width: indicator_w,
+            height: indicator_h,
+        };
+        crate::ui::components::discord_indicator::render_discord_indicator(
+            frame,
+            indicator_area,
+            app.is_discord_connected(),
+        );
+    }
     frame.render_widget(
         Paragraph::new(app.visible_status())
             .style(theme.dim)

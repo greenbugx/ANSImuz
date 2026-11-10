@@ -22,6 +22,7 @@ pub fn run(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::new();
+    app.init_discord();
     let mut player = AudioPlayer::new();
 
     let (search_tx, search_rx): (Sender<SearchResponse>, Receiver<SearchResponse>) =

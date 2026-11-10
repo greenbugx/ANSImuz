@@ -33,6 +33,12 @@ pub fn render_settings(
     } else {
         dim
     };
+    let discord_state = if settings.discord_rpc { "ON" } else { "OFF" };
+    let discord_style = if settings.discord_rpc {
+        bold_primary
+    } else {
+        dim
+    };
 
     let mode = if settings.art_hq { "HQ" } else { "PIXEL" };
     let mode_style = if settings.art_hq { bold_primary } else { dim };
@@ -74,6 +80,12 @@ pub fn render_settings(
             palette_state.to_string(),
             palette_style,
             "Tint the selected track with the artwork colors".to_string(),
+        ),
+        (
+            "Discord RPC:".to_string(),
+            discord_state.to_string(),
+            discord_style,
+            "Share listening activity to Discord Rich Presence".to_string(),
         ),
         (
             "Clear Caches:".to_string(),

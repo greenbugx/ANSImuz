@@ -1,5 +1,7 @@
 use crate::discord::activity::{PlaybackInfo, build_activity};
 use crate::discord::client::DiscordClient;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -19,6 +21,7 @@ pub enum DiscordCommand {
 
 pub struct DiscordWorker {
     sender: Sender<DiscordCommand>,
+    connected: Arc<AtomicBool>,
     thread_handle: Option<JoinHandle<()>>,
 }
 
@@ -26,18 +29,25 @@ impl DiscordWorker {
     pub fn spawn(client_id: impl Into<String>) -> Self {
         let (sender, receiver) = channel();
         let client_id = client_id.into();
+        let connected = Arc::new(AtomicBool::new(false));
+        let connected_flag = Arc::clone(&connected);
 
         let thread_handle = thread::Builder::new()
             .name("discord-rpc-worker".to_string())
             .spawn(move || {
-                run_worker_loop(&client_id, receiver);
+                run_worker_loop(&client_id, receiver, connected_flag);
             })
             .expect("Failed to spawn Discord RPC worker thread");
 
         Self {
             sender,
+            connected,
             thread_handle: Some(thread_handle),
         }
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::Relaxed)
     }
 
     pub fn sender(&self) -> &Sender<DiscordCommand> {
@@ -78,9 +88,14 @@ impl Drop for DiscordWorker {
     }
 }
 
-fn run_worker_loop(client_id: &str, receiver: Receiver<DiscordCommand>) {
+fn run_worker_loop(
+    client_id: &str,
+    receiver: Receiver<DiscordCommand>,
+    connected_flag: Arc<AtomicBool>,
+) {
     let mut client = DiscordClient::new(client_id);
     let mut connected = client.connect().is_ok();
+    connected_flag.store(connected, Ordering::Relaxed);
     let mut current_playback: Option<PlaybackInfo> = None;
 
     let mut current_backoff = INITIAL_RECONNECT_INTERVAL;
@@ -112,6 +127,7 @@ fn run_worker_loop(client_id: &str, receiver: Receiver<DiscordCommand>) {
                     apply_playback(
                         &mut client,
                         &mut connected,
+                        &connected_flag,
                         &mut next_reconnect_at,
                         &mut current_backoff,
                         &info,
@@ -129,6 +145,7 @@ fn run_worker_loop(client_id: &str, receiver: Receiver<DiscordCommand>) {
                             apply_playback(
                                 &mut client,
                                 &mut connected,
+                                &connected_flag,
                                 &mut next_reconnect_at,
                                 &mut current_backoff,
                                 info,
@@ -144,6 +161,7 @@ fn run_worker_loop(client_id: &str, receiver: Receiver<DiscordCommand>) {
                         apply_playback(
                             &mut client,
                             &mut connected,
+                            &connected_flag,
                             &mut next_reconnect_at,
                             &mut current_backoff,
                             info,
@@ -153,10 +171,13 @@ fn run_worker_loop(client_id: &str, receiver: Receiver<DiscordCommand>) {
                 DiscordCommand::Resumed(pos) => {
                     if let Some(info) = &mut current_playback {
                         info.is_paused = false;
-                        info.position = Some(pos);
+                        if pos > Duration::ZERO {
+                            info.position = Some(pos);
+                        }
                         apply_playback(
                             &mut client,
                             &mut connected,
+                            &connected_flag,
                             &mut next_reconnect_at,
                             &mut current_backoff,
                             info,
@@ -169,6 +190,7 @@ fn run_worker_loop(client_id: &str, receiver: Receiver<DiscordCommand>) {
                         mark_disconnected(
                             &mut client,
                             &mut connected,
+                            &connected_flag,
                             &mut next_reconnect_at,
                             &mut current_backoff,
                         );
@@ -179,6 +201,7 @@ fn run_worker_loop(client_id: &str, receiver: Receiver<DiscordCommand>) {
                         let _ = client.clear_activity();
                     }
                     client.disconnect();
+                    connected_flag.store(false, Ordering::Relaxed);
                     break;
                 }
             },
@@ -187,6 +210,7 @@ fn run_worker_loop(client_id: &str, receiver: Receiver<DiscordCommand>) {
                     try_reconnect(
                         &mut client,
                         &mut connected,
+                        &connected_flag,
                         &mut next_reconnect_at,
                         &mut current_backoff,
                         current_playback.as_ref(),
@@ -198,6 +222,7 @@ fn run_worker_loop(client_id: &str, receiver: Receiver<DiscordCommand>) {
                     let _ = client.clear_activity();
                 }
                 client.disconnect();
+                connected_flag.store(false, Ordering::Relaxed);
                 break;
             }
         }
@@ -207,6 +232,7 @@ fn run_worker_loop(client_id: &str, receiver: Receiver<DiscordCommand>) {
 fn apply_playback(
     client: &mut DiscordClient,
     connected: &mut bool,
+    connected_flag: &Arc<AtomicBool>,
     next_reconnect_at: &mut Option<Instant>,
     current_backoff: &mut Duration,
     playback: &PlaybackInfo,
@@ -218,6 +244,7 @@ fn apply_playback(
             try_reconnect(
                 client,
                 connected,
+                connected_flag,
                 next_reconnect_at,
                 current_backoff,
                 Some(playback),
@@ -229,7 +256,13 @@ fn apply_playback(
     if *connected {
         let activity = build_activity(playback);
         if client.set_activity(&activity).is_err() {
-            mark_disconnected(client, connected, next_reconnect_at, current_backoff);
+            mark_disconnected(
+                client,
+                connected,
+                connected_flag,
+                next_reconnect_at,
+                current_backoff,
+            );
         }
     }
 }
@@ -237,6 +270,7 @@ fn apply_playback(
 fn try_reconnect(
     client: &mut DiscordClient,
     connected: &mut bool,
+    connected_flag: &Arc<AtomicBool>,
     next_reconnect_at: &mut Option<Instant>,
     current_backoff: &mut Duration,
     playback: Option<&PlaybackInfo>,
@@ -244,28 +278,43 @@ fn try_reconnect(
     client.disconnect();
     if client.connect().is_ok() {
         *connected = true;
+        connected_flag.store(true, Ordering::Relaxed);
         *current_backoff = INITIAL_RECONNECT_INTERVAL;
         *next_reconnect_at = None;
 
         if let Some(info) = playback {
             let activity = build_activity(info);
             if client.set_activity(&activity).is_err() {
-                mark_disconnected(client, connected, next_reconnect_at, current_backoff);
+                mark_disconnected(
+                    client,
+                    connected,
+                    connected_flag,
+                    next_reconnect_at,
+                    current_backoff,
+                );
             }
         }
     } else {
-        mark_disconnected(client, connected, next_reconnect_at, current_backoff);
+        mark_disconnected(
+            client,
+            connected,
+            connected_flag,
+            next_reconnect_at,
+            current_backoff,
+        );
     }
 }
 
 fn mark_disconnected(
     client: &mut DiscordClient,
     connected: &mut bool,
+    connected_flag: &Arc<AtomicBool>,
     next_reconnect_at: &mut Option<Instant>,
     current_backoff: &mut Duration,
 ) {
     client.disconnect();
     *connected = false;
+    connected_flag.store(false, Ordering::Relaxed);
     *next_reconnect_at = Some(Instant::now() + *current_backoff);
     *current_backoff = (*current_backoff * 2).min(MAX_RECONNECT_INTERVAL);
 }
@@ -277,6 +326,7 @@ mod tests {
     #[test]
     fn test_worker_lifecycle_and_channel_drain() {
         let mut worker = DiscordWorker::spawn("dummy_id");
+        assert!(!worker.is_connected());
         let track = PlaybackInfo::new("Title", "Artist");
         worker.track_changed(track);
         worker.position_changed(Duration::from_secs(10));

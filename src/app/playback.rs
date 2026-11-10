@@ -1,4 +1,5 @@
 use std::sync::mpsc::Sender;
+use std::time::Duration;
 
 use super::state::App;
 use crate::music::{PlaybackSource, ResolveResponse, Track};
@@ -204,6 +205,9 @@ pub fn handle_player_event(
                 return false;
             }
             *playback = Some((elapsed, duration));
+            if let Some(worker) = &app.discord_worker {
+                worker.position_changed(Duration::from_secs_f64(elapsed));
+            }
             true
         }
         PlayerEvent::Ended { generation } => {
@@ -419,6 +423,20 @@ pub fn start_playback(
             if app.settings.audio_cache {
                 player.prefetch_later(&track.stream_url, 15);
             }
+
+            if let Some(worker) = &app.discord_worker {
+                let mut info = crate::discord::PlaybackInfo::new(&track.title, &track.artist);
+                if let Some(album) = &track.album {
+                    info = info.with_album(album);
+                }
+                if let Some(dur_ms) = track.duration_ms {
+                    info = info.with_duration(Duration::from_millis(dur_ms));
+                }
+                if track.has_stream_url() {
+                    info = info.with_stream_url(&track.stream_url);
+                }
+                worker.track_changed(info);
+            }
             Ok(())
         }
         Err(error) => {
@@ -429,6 +447,9 @@ pub fn start_playback(
             }
             app.set_stopped();
             app.set_status(format!("PLAYER ERROR: {}", error));
+            if let Some(worker) = &app.discord_worker {
+                worker.clear();
+            }
             Err(error)
         }
     }
