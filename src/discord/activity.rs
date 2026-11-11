@@ -2,7 +2,8 @@ use presenceforge::activity::Activity;
 use presenceforge::{ActivityBuilder, ActivityType, StatusDisplayType};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-pub const ANSIMUZ_GITHUB_URL: &str = "https://github.com/greenbugx/ANSImuz";
+pub const ANSIMUZ_SOURCEFORGE_URL: &str =
+    "https://sourceforge.net/projects/ansimuz/files/latest/download";
 
 pub const DEFAULT_LARGE_IMAGE: &str = "logo";
 pub const DEFAULT_LARGE_TEXT: &str = "ANSImuz";
@@ -320,7 +321,7 @@ pub fn build_activity(info: &PlaybackInfo) -> Activity {
     }
 
     // Secondary repository button
-    builder = builder.button("Get ANSImuz", ANSIMUZ_GITHUB_URL);
+    builder = builder.button("Get ANSImuz", ANSIMUZ_SOURCEFORGE_URL);
 
     builder.build()
 }
@@ -371,7 +372,7 @@ mod tests {
         assert_eq!(buttons[0].label, "Listen on YouTube Music");
         assert_eq!(buttons[0].url, "https://music.youtube.com/watch?v=mock");
         assert_eq!(buttons[1].label, "Get ANSImuz");
-        assert_eq!(buttons[1].url, ANSIMUZ_GITHUB_URL);
+        assert_eq!(buttons[1].url, ANSIMUZ_SOURCEFORGE_URL);
         activity.validate().expect("activity should validate");
     }
 
@@ -645,7 +646,7 @@ mod tests {
         assert_eq!(buttons[0].label, "Listen on YouTube Music");
         assert_eq!(buttons[0].url, "https://music.youtube.com/watch?v=vid_full");
         assert_eq!(buttons[1].label, "Get ANSImuz");
-        assert_eq!(buttons[1].url, ANSIMUZ_GITHUB_URL);
+        assert_eq!(buttons[1].url, ANSIMUZ_SOURCEFORGE_URL);
 
         let mut from_watch_url =
             crate::music::Track::new("Track", "Artist").with_provider("ytmusic");
@@ -693,7 +694,7 @@ mod tests {
             "https://open.spotify.com/track/6rqhFgbbKwnb9MLmUQDhG6"
         );
         assert_eq!(buttons[1].label, "Get ANSImuz");
-        assert_eq!(buttons[1].url, ANSIMUZ_GITHUB_URL);
+        assert_eq!(buttons[1].url, ANSIMUZ_SOURCEFORGE_URL);
 
         let mut missing_id = crate::music::Track::new("Track", "Artist").with_provider("spotify");
         missing_id.spotify_id = Some("   ".into());
@@ -718,7 +719,7 @@ mod tests {
         assert_eq!(custom_buttons[0].label, "Open Track");
         assert_eq!(custom_buttons[0].url, "https://example.com/tracks/1");
         assert_eq!(custom_buttons[1].label, "Get ANSImuz");
-        assert_eq!(custom_buttons[1].url, ANSIMUZ_GITHUB_URL);
+        assert_eq!(custom_buttons[1].url, ANSIMUZ_SOURCEFORGE_URL);
 
         let mut unknown = crate::music::Track::new("Local Song", "Artist")
             .with_provider("local")
@@ -736,7 +737,7 @@ mod tests {
             .expect("Get ANSImuz button should still be present");
         assert_eq!(unknown_buttons.len(), 1);
         assert_eq!(unknown_buttons[0].label, "Get ANSImuz");
-        assert_eq!(unknown_buttons[0].url, ANSIMUZ_GITHUB_URL);
+        assert_eq!(unknown_buttons[0].url, ANSIMUZ_SOURCEFORGE_URL);
 
         let too_long_url = format!("https://example.com/{}", "a".repeat(500));
         for bad_url in [

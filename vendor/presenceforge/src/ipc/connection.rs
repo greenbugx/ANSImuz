@@ -15,6 +15,9 @@ use std::fs::OpenOptions;
 use std::io::{BufReader, BufWriter};
 
 use crate::error::{DiscordIpcError, ProtocolContext, ProtocolViolationKind, Result};
+
+#[cfg(unix)]
+use crate::ipc::protocol::constants;
 use crate::ipc::protocol::{IpcConfig, Opcode};
 
 /// Configuration for selecting which Discord IPC pipe to connect to
