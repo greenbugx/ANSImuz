@@ -224,35 +224,24 @@ fn detect_image_mime_and_filename(
     image_bytes: &[u8],
     filename: &str,
 ) -> Result<(&'static str, String), ArtworkError> {
-    let detected = match image::guess_format(image_bytes) {
-        Ok(image::ImageFormat::Jpeg) => Some(("image/jpeg", "jpg")),
-        Ok(image::ImageFormat::Png) => Some(("image/png", "png")),
-        Ok(image::ImageFormat::WebP) => Some(("image/webp", "webp")),
-        Ok(image::ImageFormat::Gif) => Some(("image/gif", "gif")),
-        Ok(image::ImageFormat::Avif) => Some(("image/avif", "avif")),
+    // Determine format strictly from image byte signatures; never trust the caller's filename extension.
+    let (mime, ext) = match image::guess_format(image_bytes) {
+        Ok(image::ImageFormat::Jpeg) => ("image/jpeg", "jpg"),
+        Ok(image::ImageFormat::Png) => ("image/png", "png"),
+        Ok(image::ImageFormat::WebP) => ("image/webp", "webp"),
+        Ok(image::ImageFormat::Gif) => ("image/gif", "gif"),
+        Ok(image::ImageFormat::Avif) => ("image/avif", "avif"),
         Ok(other) => {
             return Err(ArtworkError::UnsupportedInput(format!(
                 "Imgdb: unsupported normalized image format ({other:?})"
             )));
         }
-        Err(_) => match Path::new(filename)
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(str::to_ascii_lowercase)
-            .as_deref()
-        {
-            Some("jpg" | "jpeg") => Some(("image/jpeg", "jpg")),
-            Some("png") => Some(("image/png", "png")),
-            Some("webp") => Some(("image/webp", "webp")),
-            Some("gif") => Some(("image/gif", "gif")),
-            Some("avif") => Some(("image/avif", "avif")),
-            _ => None,
-        },
+        Err(err) => {
+            return Err(ArtworkError::UnsupportedInput(format!(
+                "Imgdb: unrecognized image format: {err}"
+            )));
+        }
     };
-
-    let (mime, ext) = detected.ok_or_else(|| {
-        ArtworkError::UnsupportedInput("Imgdb: unrecognized image format".to_string())
-    })?;
 
     let stem = Path::new(filename)
         .file_stem()
