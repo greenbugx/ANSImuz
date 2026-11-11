@@ -11,6 +11,10 @@ pub enum ArtworkCommand {
         generation: u64,
         request: ArtworkRequest,
     },
+    Refresh {
+        generation: u64,
+        request: ArtworkRequest,
+    },
     Shutdown,
 }
 
@@ -27,6 +31,7 @@ pub enum ArtworkEvent {
 pub struct ArtworkWorker {
     sender: Sender<ArtworkCommand>,
     thread_handle: Option<JoinHandle<()>>,
+    forwarder_handle: Option<JoinHandle<()>>,
 }
 
 impl ArtworkWorker {
@@ -51,6 +56,48 @@ impl ArtworkWorker {
         Ok(Self {
             sender: cmd_tx,
             thread_handle: Some(thread_handle),
+            forwarder_handle: None,
+        })
+    }
+
+    /// Spawns the artwork worker together with a managed event-forwarding thread.
+    ///
+    /// Both thread handles are retained and explicitly joined in order during [`Self::shutdown`].
+    pub fn spawn_with_forwarder<F>(
+        config: DiscordArtworkConfig,
+        mut forward: F,
+    ) -> std::io::Result<Self>
+    where
+        F: FnMut(ArtworkEvent) + Send + 'static,
+    {
+        let (cmd_tx, cmd_rx) = channel();
+        let (event_tx, event_rx) = channel();
+
+        let thread_handle = thread::Builder::new()
+            .name("discord-artwork-worker".to_string())
+            .spawn(move || {
+                run_artwork_worker(cmd_rx, event_tx, config);
+            })?;
+
+        let forwarder_handle = match thread::Builder::new()
+            .name("discord-artwork-forwarder".to_string())
+            .spawn(move || {
+                while let Ok(event) = event_rx.recv() {
+                    forward(event);
+                }
+            }) {
+            Ok(handle) => Some(handle),
+            Err(err) => {
+                let _ = cmd_tx.send(ArtworkCommand::Shutdown);
+                let _ = thread_handle.join();
+                return Err(err);
+            }
+        };
+
+        Ok(Self {
+            sender: cmd_tx,
+            thread_handle: Some(thread_handle),
+            forwarder_handle,
         })
     }
 
@@ -62,11 +109,23 @@ impl ArtworkWorker {
         });
     }
 
-    /// Shuts down the worker thread and joins its handle.
+    /// Invalidates any existing cache mapping and freshly resolves artwork.
+    pub fn refresh(&self, generation: u64, request: ArtworkRequest) {
+        let _ = self.sender.send(ArtworkCommand::Refresh {
+            generation,
+            request,
+        });
+    }
+
+    /// Shuts down the worker thread (and managed forwarder thread, if any) and joins all handles.
     pub fn shutdown(&mut self) {
         let _ = self.sender.send(ArtworkCommand::Shutdown);
         if let Some(handle) = self.thread_handle.take() {
             let _ = handle.join();
+        }
+        // Once run_artwork_worker exits, event_tx is dropped, closing event_rx cleanly.
+        if let Some(forwarder) = self.forwarder_handle.take() {
+            let _ = forwarder.join();
         }
     }
 }
@@ -90,8 +149,52 @@ fn run_artwork_worker(
                 let result = manager.resolve(request);
                 let _ = sender.send(ArtworkEvent::Resolved { generation, result });
             }
+            ArtworkCommand::Refresh { generation, request } => {
+                let result = manager.refresh(request);
+                let _ = sender.send(ArtworkEvent::Resolved { generation, result });
+            }
             ArtworkCommand::Shutdown => break,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc::channel;
+
+    #[test]
+    fn worker_with_forwarder_joins_cleanly_on_shutdown() {
+        let (tx, rx) = channel();
+        let mut worker = ArtworkWorker::spawn_with_forwarder(
+            DiscordArtworkConfig::default(),
+            move |event| {
+                match event {
+                    ArtworkEvent::Resolved { generation, result } => {
+                        let _ = tx.send((generation, result));
+                    }
+                }
+            },
+        )
+        .expect("spawn artwork worker with forwarder");
+
+        // Trigger an immediate local error (non-HTTPS scheme) to exercise full roundtrip
+        worker.resolve(
+            42,
+            ArtworkRequest::new("ytmusic", Some("t1".into()), "http://invalid.local/art.jpg"),
+        );
+
+        let (gen_id, result) = rx.recv().expect("forwarded event must arrive");
+        assert_eq!(gen_id, 42);
+        assert!(result.is_err());
+
+        assert!(worker.thread_handle.is_some());
+        assert!(worker.forwarder_handle.is_some());
+
+        worker.shutdown();
+
+        assert!(worker.thread_handle.is_none());
+        assert!(worker.forwarder_handle.is_none());
     }
 }
 

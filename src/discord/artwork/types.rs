@@ -57,6 +57,18 @@ pub struct CacheRecord {
     pub content_hash: String,
     pub uploaded_at: u64,
     pub expires_at: Option<u64>,
+    #[serde(default)]
+    pub last_accessed: u64,
+}
+
+impl CacheRecord {
+    /// Returns true if this record has no known expiration timestamp (e.g., anonymous Catbox upload).
+    ///
+    /// Note that having no known expiry does not guarantee permanent remote retention.
+    #[must_use]
+    pub fn has_no_known_expiry(&self) -> bool {
+        self.expires_at.is_none() && self.host == HostingProvider::Catbox
+    }
 }
 
 /// Root index of cached Discord Rich Presence artwork mappings.

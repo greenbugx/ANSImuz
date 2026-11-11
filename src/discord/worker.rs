@@ -154,20 +154,14 @@ fn run_worker_loop(
     let mut current_generation: u64 = 0;
 
     // Dedicated artwork worker keeping network operations off the playback path
-    let artwork_worker = if config.artwork_enabled {
-        let (art_tx, art_rx) = channel::<ArtworkEvent>();
-        match ArtworkWorker::spawn_with_config(art_tx, config.artwork.clone()) {
-            Ok(w) => {
-                let tx_clone = internal_sender;
-                let _ = thread::Builder::new()
-                    .name("discord-artwork-forwarder".to_string())
-                    .spawn(move || {
-                        while let Ok(ArtworkEvent::Resolved { generation, result }) = art_rx.recv() {
-                            let _ = tx_clone.send(DiscordCommand::ArtworkResolved { generation, result });
-                        }
-                    });
-                Some(w)
+    let mut artwork_worker = if config.artwork_enabled {
+        let tx_clone = internal_sender;
+        match ArtworkWorker::spawn_with_forwarder(config.artwork.clone(), move |event| match event {
+            ArtworkEvent::Resolved { generation, result } => {
+                let _ = tx_clone.send(DiscordCommand::ArtworkResolved { generation, result });
             }
+        }) {
+            Ok(w) => Some(w),
             Err(e) => {
                 log_discord(&format!("[Discord RPC] Failed to spawn artwork worker: {e}"));
                 None
@@ -347,7 +341,7 @@ fn run_worker_loop(
                     }
                 }
                 DiscordCommand::Shutdown => {
-                    if let Some(mut aw) = artwork_worker {
+                    if let Some(mut aw) = artwork_worker.take() {
                         aw.shutdown();
                     }
                     if connected {
@@ -371,6 +365,9 @@ fn run_worker_loop(
                 }
             }
             Err(RecvTimeoutError::Disconnected) => {
+                if let Some(mut aw) = artwork_worker.take() {
+                    aw.shutdown();
+                }
                 if connected {
                     let _ = client.clear_activity();
                 }

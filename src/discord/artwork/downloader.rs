@@ -60,6 +60,152 @@ pub fn normalize_image_with_side(img: DynamicImage, target_side: u32) -> Result<
     Ok((encoded, hash))
 }
 
+/// Persistent HTTP downloader with connection pooling for artwork fetching and normalization.
+pub struct ArtworkDownloader {
+    client: reqwest::blocking::Client,
+}
+
+impl ArtworkDownloader {
+    /// Initializes an artwork downloader with a pooled HTTP/1.1 client, redirect limit, and timeouts.
+    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        let client = reqwest::blocking::Client::builder()
+            .http1_only()
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+            .redirect(reqwest::redirect::Policy::limited(5))
+            .connect_timeout(Duration::from_secs(8))
+            .timeout(Duration::from_secs(15))
+            .build()?;
+        Ok(Self { client })
+    }
+
+    /// Download artwork from an HTTPS URL and normalize it to the cache `images/` directory.
+    pub fn download_and_normalize(
+        &self,
+        url: &str,
+        images_dir: &Path,
+    ) -> Result<DownloadedArtwork, String> {
+        self.download_and_normalize_with_limits(url, images_dir, MAX_IMAGE_BYTES, TARGET_MAX_SIDE)
+    }
+
+    /// Download artwork with configurable download size ceiling and image size.
+    pub fn download_and_normalize_with_limits(
+        &self,
+        url: &str,
+        images_dir: &Path,
+        max_download_bytes: usize,
+        target_side: u32,
+    ) -> Result<DownloadedArtwork, String> {
+        // Accept HTTPS artwork URLs only
+        if !url.starts_with("https://") {
+            return Err("Artwork URL must use the HTTPS scheme".to_string());
+        }
+
+        // Send GET request using pooled client
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .map_err(|e| format!("HTTP request failed: {e}"))?;
+
+        // Check HTTP status code
+        if !response.status().is_success() {
+            return Err(format!("HTTP request failed with status: {}", response.status()));
+        }
+
+        // Check Content-Type header if present
+        if let Some(content_type) = response.headers().get(reqwest::header::CONTENT_TYPE) {
+            let ct = content_type.to_str().unwrap_or_default().to_lowercase();
+            if !ct.starts_with("image/") && !ct.starts_with("application/octet-stream") && !ct.is_empty() {
+                return Err(format!("Response is not an image (Content-Type: {ct})"));
+            }
+        }
+
+        // Stream chunks with size limit
+        let initial_cap = response
+            .content_length()
+            .map(|len| (len as usize).min(max_download_bytes))
+            .unwrap_or(0);
+        let mut raw_bytes = Vec::with_capacity(initial_cap);
+        let mut buffer = [0u8; 8192];
+        let mut reader = response;
+
+        loop {
+            let n = reader
+                .read(&mut buffer)
+                .map_err(|e| format!("Failed reading response stream: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            if raw_bytes.len() + n > max_download_bytes {
+                return Err(format!(
+                    "Artwork download exceeded maximum allowed size ({max_download_bytes} bytes)"
+                ));
+            }
+            raw_bytes.extend_from_slice(&buffer[..n]);
+        }
+
+        // Decode using image crate
+        let img_reader = image::ImageReader::new(std::io::Cursor::new(&raw_bytes))
+            .with_guessed_format()
+            .map_err(|e| format!("Failed to guess artwork format: {e}"))?;
+
+        let decoded = img_reader
+            .decode()
+            .map_err(|e| format!("Failed to decode artwork image: {e}"))?;
+
+        // Normalize (RGB, resize <= target_side maintaining aspect ratio, JPEG encode, SHA-256)
+        let (normalized_bytes, content_hash) = normalize_image_with_side(decoded, target_side)?;
+
+        // Write to unique temporary file, then rename to hash-based filename
+        fs::create_dir_all(images_dir)
+            .map_err(|e| format!("Failed creating images directory: {e}"))?;
+
+        let file_name = format!("{content_hash}.jpg");
+        let final_path = images_dir.join(&file_name);
+        let relative_path = format!("images/{file_name}");
+
+        if !final_path.exists() {
+            let temp_filename = format!(
+                "{content_hash}.tmp-{}-{}.part",
+                std::process::id(),
+                crate::discord::artwork::cache::current_unix_timestamp()
+            );
+            let temp_path = images_dir.join(temp_filename);
+
+            fs::write(&temp_path, &normalized_bytes)
+                .map_err(|e| format!("Failed writing temp image file: {e}"))?;
+
+            if let Err(e) = fs::rename(&temp_path, &final_path) {
+                if e.kind() == std::io::ErrorKind::AlreadyExists
+                    || e.kind() == std::io::ErrorKind::PermissionDenied
+                {
+                    let _ = fs::remove_file(&final_path);
+                    if let Err(retry_err) = fs::rename(&temp_path, &final_path) {
+                        let _ = fs::remove_file(&temp_path);
+                        return Err(format!("Failed renaming temp image file: {retry_err}"));
+                    }
+                } else {
+                    let _ = fs::remove_file(&temp_path);
+                    return Err(format!("Failed renaming temp image file: {e}"));
+                }
+            }
+        }
+
+        Ok(DownloadedArtwork {
+            local_path: final_path,
+            relative_path,
+            content_hash,
+            bytes: normalized_bytes,
+        })
+    }
+}
+
+impl Default for ArtworkDownloader {
+    fn default() -> Self {
+        Self::new().expect("failed to initialize artwork downloader HTTP client")
+    }
+}
+
 /// Download artwork from an HTTPS URL and normalize it to the cache `images/` directory.
 pub fn download_and_normalize(url: &str, images_dir: &Path) -> Result<DownloadedArtwork, String> {
     download_and_normalize_with_limits(url, images_dir, MAX_IMAGE_BYTES, TARGET_MAX_SIDE)
@@ -72,117 +218,9 @@ pub fn download_and_normalize_with_limits(
     max_download_bytes: usize,
     target_side: u32,
 ) -> Result<DownloadedArtwork, String> {
-    // Accept HTTPS artwork URLs only
-    if !url.starts_with("https://") {
-        return Err("Artwork URL must use the HTTPS scheme".to_string());
-    }
-
-    // Build HTTP client with redirect policy and connection/request timeouts
-    let client = reqwest::blocking::Client::builder()
-        .http1_only()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-        .redirect(reqwest::redirect::Policy::limited(5))
-        .connect_timeout(Duration::from_secs(8))
-        .timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|e| format!("Failed to initialize HTTP client: {e}"))?;
-
-    // Send GET request
-    let response = client
-        .get(url)
-        .send()
-        .map_err(|e| format!("HTTP request failed: {e}"))?;
-
-    // Check HTTP status code
-    if !response.status().is_success() {
-        return Err(format!("HTTP request failed with status: {}", response.status()));
-    }
-
-    // Check Content-Type header if present
-    if let Some(content_type) = response.headers().get(reqwest::header::CONTENT_TYPE) {
-        let ct = content_type.to_str().unwrap_or_default().to_lowercase();
-        if !ct.starts_with("image/") && !ct.starts_with("application/octet-stream") && !ct.is_empty() {
-            return Err(format!("Response is not an image (Content-Type: {ct})"));
-        }
-    }
-
-    // Stream chunks with size limit
-    let initial_cap = response
-        .content_length()
-        .map(|len| (len as usize).min(max_download_bytes))
-        .unwrap_or(0);
-    let mut raw_bytes = Vec::with_capacity(initial_cap);
-    let mut buffer = [0u8; 8192];
-    let mut reader = response;
-
-    loop {
-        let n = reader
-            .read(&mut buffer)
-            .map_err(|e| format!("Failed reading response stream: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        if raw_bytes.len() + n > max_download_bytes {
-            return Err(format!(
-                "Artwork download exceeded maximum allowed size ({max_download_bytes} bytes)"
-            ));
-        }
-        raw_bytes.extend_from_slice(&buffer[..n]);
-    }
-
-    // Decode using image crate
-    let img_reader = image::ImageReader::new(std::io::Cursor::new(&raw_bytes))
-        .with_guessed_format()
-        .map_err(|e| format!("Failed to guess artwork format: {e}"))?;
-
-    let decoded = img_reader
-        .decode()
-        .map_err(|e| format!("Failed to decode artwork image: {e}"))?;
-
-    // Normalize (RGB, resize <= target_side maintaining aspect ratio, JPEG encode, SHA-256)
-    let (normalized_bytes, content_hash) = normalize_image_with_side(decoded, target_side)?;
-
-    // Write to unique temporary file, then rename to hash-based filename
-    fs::create_dir_all(images_dir)
-        .map_err(|e| format!("Failed creating images directory: {e}"))?;
-
-    let file_name = format!("{content_hash}.jpg");
-    let final_path = images_dir.join(&file_name);
-    let relative_path = format!("images/{file_name}");
-
-    if !final_path.exists() {
-        let temp_filename = format!(
-            "{content_hash}.tmp-{}-{}.part",
-            std::process::id(),
-            crate::discord::artwork::cache::current_unix_timestamp()
-        );
-        let temp_path = images_dir.join(temp_filename);
-
-        fs::write(&temp_path, &normalized_bytes)
-            .map_err(|e| format!("Failed writing temp image file: {e}"))?;
-
-        if let Err(e) = fs::rename(&temp_path, &final_path) {
-            if e.kind() == std::io::ErrorKind::AlreadyExists
-                || e.kind() == std::io::ErrorKind::PermissionDenied
-            {
-                let _ = fs::remove_file(&final_path);
-                if let Err(retry_err) = fs::rename(&temp_path, &final_path) {
-                    let _ = fs::remove_file(&temp_path);
-                    return Err(format!("Failed renaming temp image file: {retry_err}"));
-                }
-            } else {
-                let _ = fs::remove_file(&temp_path);
-                return Err(format!("Failed renaming temp image file: {e}"));
-            }
-        }
-    }
-
-    Ok(DownloadedArtwork {
-        local_path: final_path,
-        relative_path,
-        content_hash,
-        bytes: normalized_bytes,
-    })
+    ArtworkDownloader::new()
+        .map_err(|e| format!("Failed to initialize HTTP client: {e}"))?
+        .download_and_normalize_with_limits(url, images_dir, max_download_bytes, target_side)
 }
 
 #[cfg(test)]
@@ -223,7 +261,8 @@ mod tests {
     #[test]
     fn non_https_url_rejected() {
         let temp_dir = std::env::temp_dir();
-        let res = download_and_normalize("http://example.com/art.jpg", &temp_dir);
+        let downloader = ArtworkDownloader::new().expect("downloader init");
+        let res = downloader.download_and_normalize("http://example.com/art.jpg", &temp_dir);
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("HTTPS"));
     }

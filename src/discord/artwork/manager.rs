@@ -1,17 +1,14 @@
 use super::cache::{ArtworkCache, current_unix_timestamp, sha256_hex};
-use super::downloader::download_and_normalize_with_limits;
+use super::downloader::ArtworkDownloader;
 use super::types::{ArtworkError, ArtworkRequest, ArtworkResult, CacheRecord, HostingProvider};
-use super::uploader::{CatboxUploader, LitterboxUploader};
+use super::uploader::{ArtworkUploader, CatboxUploader, LitterboxUploader};
 use crate::config::DiscordArtworkConfig;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 pub const DEFAULT_FAILURE_COOLDOWN: Duration = Duration::from_secs(60);
 pub const DEFAULT_CATBOX_COOLDOWN: Duration = Duration::from_secs(60);
-
-type InFlightState = Arc<(Mutex<Option<Result<ArtworkResult, ArtworkError>>>, Condvar)>;
 
 /// Derives a stable artwork identity key from an ArtworkRequest.
 #[must_use]
@@ -23,13 +20,13 @@ pub fn artwork_identity(req: &ArtworkRequest) -> String {
     }
 }
 
-/// The main entry point coordinating caching, in-flight deduplication, and hosting uploads.
+/// The main entry point coordinating caching, downloading, and hosting uploads.
 pub struct ArtworkManager {
     cache: ArtworkCache,
+    downloader: ArtworkDownloader,
     catbox: CatboxUploader,
     litterbox: LitterboxUploader,
     config: DiscordArtworkConfig,
-    in_flight: Arc<(Mutex<HashMap<String, InFlightState>>, Condvar)>,
     failure_cooldowns: HashMap<String, Instant>,
     failure_cooldown_duration: Duration,
     catbox_failure: Option<Instant>,
@@ -55,10 +52,10 @@ impl ArtworkManager {
             .unwrap_or_default();
         Self {
             cache,
+            downloader: ArtworkDownloader::default(),
             catbox: CatboxUploader::default(),
             litterbox,
             config,
-            in_flight: Arc::new((Mutex::new(HashMap::new()), Condvar::new())),
             failure_cooldowns: HashMap::new(),
             failure_cooldown_duration: DEFAULT_FAILURE_COOLDOWN,
             catbox_failure: None,
@@ -147,42 +144,8 @@ impl ArtworkManager {
             return Err(ArtworkError::CooldownActive);
         }
 
-        // In-flight request deduplication
-        let pending = {
-            let (map_lock, _) = &*self.in_flight;
-            let mut map = map_lock.lock().unwrap();
-
-            if let Some(existing) = map.get(&identity).cloned() {
-                drop(map);
-                // A request for this artwork identity is already in flight!
-                // Wait for the in-flight operation to complete.
-                let (res_lock, res_cvar) = &*existing;
-                let mut guard = res_lock.lock().unwrap();
-                while guard.is_none() {
-                    guard = res_cvar.wait(guard).unwrap();
-                }
-                return guard.clone().unwrap();
-            }
-
-            let new_pending = Arc::new((Mutex::new(None), Condvar::new()));
-            map.insert(identity.clone(), Arc::clone(&new_pending));
-            new_pending
-        };
-
         // Execute download, normalization, and upload workflow
         let outcome = self.execute_resolve(&request, now);
-
-        // Notify all waiters on this artwork identity and clean up in-flight map
-        {
-            let (res_lock, res_cvar) = &*pending;
-            let mut guard = res_lock.lock().unwrap();
-            *guard = Some(outcome.clone());
-            res_cvar.notify_all();
-
-            let (map_lock, _) = &*self.in_flight;
-            let mut map = map_lock.lock().unwrap();
-            map.remove(&identity);
-        }
 
         match &outcome {
             Ok(_) => self.clear_failure(&identity),
@@ -197,30 +160,22 @@ impl ArtworkManager {
         host: &str,
         bytes: &[u8],
     ) -> Result<(String, HostingProvider, Option<u64>), ArtworkError> {
-        match host {
+        let uploaded = match host {
             "catbox" => {
                 if self.is_catbox_cooling_down() {
                     return Err(ArtworkError::CooldownActive);
                 }
-                match self.catbox.upload(bytes.to_vec(), "art.jpg") {
-                    Ok(url) => {
-                        self.clear_catbox_failure();
-                        Ok((url, HostingProvider::Catbox, None))
-                    }
-                    Err(e) => {
-                        self.record_catbox_failure();
-                        Err(ArtworkError::UploadFailed(format!("Catbox: {e}")))
-                    }
+                let result = ArtworkUploader::upload(&self.catbox, bytes, "art.jpg");
+                match &result {
+                    Ok(_) => self.clear_catbox_failure(),
+                    Err(_) => self.record_catbox_failure(),
                 }
+                result?
             }
-            "litterbox" => {
-                match self.litterbox.upload(bytes.to_vec(), "art.jpg") {
-                    Ok(up) => Ok((up.url, up.provider, up.expires_at)),
-                    Err(e) => Err(ArtworkError::UploadFailed(format!("Litterbox: {e}"))),
-                }
-            }
-            other => Err(ArtworkError::UploadFailed(format!("Unsupported host: {other}"))),
-        }
+            "litterbox" => ArtworkUploader::upload(&self.litterbox, bytes, "art.jpg")?,
+            other => return Err(ArtworkError::UploadFailed(format!("Unsupported host: {other}"))),
+        };
+        Ok((uploaded.url, uploaded.provider, uploaded.expires_at))
     }
 
     fn execute_resolve(
@@ -231,13 +186,15 @@ impl ArtworkManager {
         // Download original artwork, normalize image, and calculate content hash with config limits
         let max_download_bytes = self.config.max_download_bytes();
         let target_side = self.config.image_size;
-        let downloaded = download_and_normalize_with_limits(
-            &request.source_url,
-            self.cache.images_dir(),
-            max_download_bytes,
-            target_side,
-        )
-        .map_err(ArtworkError::DownloadFailed)?;
+        let downloaded = self
+            .downloader
+            .download_and_normalize_with_limits(
+                &request.source_url,
+                self.cache.images_dir(),
+                max_download_bytes,
+                target_side,
+            )
+            .map_err(ArtworkError::DownloadFailed)?;
 
         // Check for duplicate content using in-memory content hash index
         // Tracks sharing the same cover don't cause duplicate uploads!
@@ -270,7 +227,7 @@ impl ArtworkManager {
             upload_res?
         };
 
-        // Persist cache entry atomically
+        // Persist cache entry atomically without failing artwork publication if index save errors
         let record = CacheRecord {
             source_url: request.source_url.clone(),
             local_file: downloaded.relative_path,
@@ -279,8 +236,13 @@ impl ArtworkManager {
             content_hash: downloaded.content_hash.clone(),
             uploaded_at: now,
             expires_at,
+            last_accessed: now,
         };
-        let _ = self.cache.insert_and_save(request, record);
+        if let Err(err) = self.cache.insert_and_save(request, record) {
+            crate::discord::log_discord(&format!(
+                "[Artwork] Failed to persist cache entry: {err}"
+            ));
+        }
 
         // Return hosted artwork
         Ok(ArtworkResult {
@@ -289,6 +251,35 @@ impl ArtworkManager {
             local_path: downloaded.local_path,
             content_hash: downloaded.content_hash,
         })
+    }
+
+    /// Invalidates cached entries matching `request` so future lookups re-resolve remotely.
+    pub fn invalidate(&mut self, request: &ArtworkRequest) -> bool {
+        let identity = artwork_identity(request);
+        self.clear_failure(&identity);
+        self.cache.invalidate(request)
+    }
+
+    /// Invalidates all cached entries pointing to a specific remote hosted URL.
+    pub fn invalidate_hosted_url(&mut self, hosted_url: &str) -> usize {
+        self.cache.invalidate_hosted_url(hosted_url)
+    }
+
+    /// Invalidates any existing cache mapping (including its stale remote URL) and re-resolves freshly.
+    pub fn refresh(
+        &mut self,
+        request: ArtworkRequest,
+    ) -> Result<ArtworkResult, ArtworkError> {
+        let now = current_unix_timestamp();
+        let identity = artwork_identity(&request);
+        self.clear_failure(&identity);
+
+        if let Some(hit) = self.cache.lookup(&request, now) {
+            self.cache.invalidate_hosted_url(&hit.hosted_url);
+        }
+        self.cache.invalidate(&request);
+
+        self.resolve(request)
     }
 
     /// Resolves an asset key for Discord Rich Presence according to fallback policy:
@@ -335,5 +326,21 @@ mod tests {
         assert!(manager.is_cooling_down(&id));
         manager.clear_failure(&id);
         assert!(!manager.is_cooling_down(&id));
+    }
+
+    #[test]
+    fn manager_catbox_cooldown_tracking() {
+        let mut manager = ArtworkManager::new(None);
+        assert!(!manager.is_catbox_cooling_down());
+        manager.record_catbox_failure();
+        assert!(manager.is_catbox_cooling_down());
+        manager.clear_catbox_failure();
+        assert!(!manager.is_catbox_cooling_down());
+
+        manager.catbox_cooldown_duration = Duration::from_millis(10);
+        manager.record_catbox_failure();
+        assert!(manager.is_catbox_cooling_down());
+        std::thread::sleep(Duration::from_millis(25));
+        assert!(!manager.is_catbox_cooling_down());
     }
 }

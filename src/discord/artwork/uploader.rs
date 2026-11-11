@@ -1,20 +1,18 @@
 use super::cache::current_unix_timestamp;
 use super::types::{ArtworkError, HostingProvider, UploadedArtwork};
 use reqwest::blocking::multipart::{Form, Part};
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 pub const CATBOX_API_URL: &str = "https://catbox.moe/user/api.php";
 pub const LITTERBOX_API_URL: &str = "https://litterbox.catbox.moe/resources/internals/api.php";
 pub const LITTERBOX_RETENTION_HOURS: u64 = 72;
 pub const LITTERBOX_RETENTION_SECS: u64 = LITTERBOX_RETENTION_HOURS * 3600;
-pub const DEFAULT_RETRY_COOLDOWN: Duration = Duration::from_secs(60);
 
 /// Common interface for artwork hosting services.
 pub trait ArtworkUploader: Send + Sync {
     fn upload(
         &self,
-        image_bytes: Vec<u8>,
+        image_bytes: &[u8],
         filename: &str,
     ) -> Result<UploadedArtwork, ArtworkError>;
 }
@@ -39,11 +37,11 @@ impl CatboxUploader {
     /// Uploads normalized image bytes to Catbox, returning the hosted HTTPS URL.
     pub fn upload(
         &self,
-        image_bytes: Vec<u8>,
+        image_bytes: &[u8],
         filename: &str,
     ) -> Result<String, Box<dyn std::error::Error>> {
         // Build multipart part with filename and MIME type
-        let part = Part::bytes(image_bytes)
+        let part = Part::bytes(image_bytes.to_vec())
             .file_name(filename.to_string())
             .mime_str("image/jpeg")?;
 
@@ -83,7 +81,7 @@ impl Default for CatboxUploader {
 impl ArtworkUploader for CatboxUploader {
     fn upload(
         &self,
-        image_bytes: Vec<u8>,
+        image_bytes: &[u8],
         filename: &str,
     ) -> Result<UploadedArtwork, ArtworkError> {
         let url = self
@@ -98,7 +96,7 @@ impl ArtworkUploader for CatboxUploader {
     }
 }
 
-/// Litterbox image uploader for temporary hosting fallback (72h retention).
+/// Litterbox image uploader for temporary hosting (configurable retention up to 72h).
 pub struct LitterboxUploader {
     client: reqwest::blocking::Client,
     time: String,
@@ -149,10 +147,10 @@ impl LitterboxUploader {
     /// Uploads normalized image bytes to Litterbox with configured retention.
     pub fn upload(
         &self,
-        image_bytes: Vec<u8>,
+        image_bytes: &[u8],
         filename: &str,
     ) -> Result<UploadedArtwork, Box<dyn std::error::Error>> {
-        let part = Part::bytes(image_bytes)
+        let part = Part::bytes(image_bytes.to_vec())
             .file_name(filename.to_string())
             .mime_str("image/jpeg")?;
 
@@ -194,100 +192,10 @@ impl Default for LitterboxUploader {
 impl ArtworkUploader for LitterboxUploader {
     fn upload(
         &self,
-        image_bytes: Vec<u8>,
+        image_bytes: &[u8],
         filename: &str,
     ) -> Result<UploadedArtwork, ArtworkError> {
         self.upload(image_bytes, filename)
-            .map_err(|e| ArtworkError::UploadFailed(format!("Litterbox: {e}")))
-    }
-}
-
-/// Fallback uploader executing the policy: Catbox -> Litterbox (72h) with retry cooldown.
-pub struct FallbackUploader {
-    catbox: CatboxUploader,
-    litterbox: LitterboxUploader,
-    catbox_failure: Mutex<Option<Instant>>,
-    retry_cooldown: Duration,
-}
-
-impl FallbackUploader {
-    pub fn new() -> Self {
-        Self {
-            catbox: CatboxUploader::default(),
-            litterbox: LitterboxUploader::default(),
-            catbox_failure: Mutex::new(None),
-            retry_cooldown: DEFAULT_RETRY_COOLDOWN,
-        }
-    }
-
-    pub fn with_cooldown(retry_cooldown: Duration) -> Self {
-        Self {
-            catbox: CatboxUploader::default(),
-            litterbox: LitterboxUploader::default(),
-            catbox_failure: Mutex::new(None),
-            retry_cooldown,
-        }
-    }
-
-    /// Check whether Catbox is currently cooling down from a previous failure.
-    pub fn is_catbox_cooling_down(&self) -> bool {
-        if let Ok(guard) = self.catbox_failure.lock()
-            && let Some(last_fail) = *guard
-        {
-            last_fail.elapsed() < self.retry_cooldown
-        } else {
-            false
-        }
-    }
-
-    fn record_catbox_failure(&self) {
-        if let Ok(mut guard) = self.catbox_failure.lock() {
-            *guard = Some(Instant::now());
-        }
-    }
-
-    fn clear_catbox_failure(&self) {
-        if let Ok(mut guard) = self.catbox_failure.lock() {
-            *guard = None;
-        }
-    }
-}
-
-impl Default for FallbackUploader {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ArtworkUploader for FallbackUploader {
-    fn upload(
-        &self,
-        image_bytes: Vec<u8>,
-        filename: &str,
-    ) -> Result<UploadedArtwork, ArtworkError> {
-        // 1. Try Catbox if not cooling down
-        if !self.is_catbox_cooling_down() {
-            match self.catbox.upload(image_bytes.clone(), filename) {
-                Ok(url) => {
-                    self.clear_catbox_failure();
-                    return Ok(UploadedArtwork {
-                        url,
-                        provider: HostingProvider::Catbox,
-                        expires_at: None,
-                    });
-                }
-                Err(e) => {
-                    self.record_catbox_failure();
-                    crate::discord::log_discord(&format!(
-                        "Warning: Catbox upload failed ({e}), falling back to Litterbox (72h)"
-                    ));
-                }
-            }
-        }
-
-        // 2. Fallback to Litterbox (72h)
-        self.litterbox
-            .upload(image_bytes, filename)
             .map_err(|e| ArtworkError::UploadFailed(format!("Litterbox: {e}")))
     }
 }
@@ -328,24 +236,8 @@ mod tests {
         let img = image::DynamicImage::new_rgb8(10, 10);
         let mut jpeg = Vec::new();
         img.write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg).unwrap();
-        let res = uploader.upload(jpeg, "test.jpg");
+        let res = uploader.upload(&jpeg, "test.jpg");
         println!("Result: {:?}", res);
         assert!(res.is_ok());
-    }
-
-    #[test]
-    fn fallback_uploader_cooldown_tracking() {
-        let uploader = FallbackUploader::with_cooldown(Duration::from_millis(50));
-        assert!(!uploader.is_catbox_cooling_down());
-
-        uploader.record_catbox_failure();
-        assert!(uploader.is_catbox_cooling_down());
-
-        std::thread::sleep(Duration::from_millis(60));
-        assert!(!uploader.is_catbox_cooling_down());
-
-        uploader.record_catbox_failure();
-        uploader.clear_catbox_failure();
-        assert!(!uploader.is_catbox_cooling_down());
     }
 }
