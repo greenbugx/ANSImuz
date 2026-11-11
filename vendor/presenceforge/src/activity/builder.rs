@@ -5,6 +5,7 @@
 use crate::activity::types::ActivitySecrets;
 use crate::activity::types::{
     Activity, ActivityAssets, ActivityButton, ActivityParty, ActivityTimestamps, ActivityType,
+    StatusDisplayType,
 };
 use crate::error::{DiscordIpcError, Result};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,6 +25,12 @@ impl ActivityBuilder {
     /// Set the Discord activity type.
     pub fn activity_type(mut self, activity_type: ActivityType) -> Self {
         self.activity.r#type = Some(activity_type);
+        self
+    }
+
+    /// Set which field Discord displays in the user's status text.
+    pub fn status_display_type(mut self, display_type: StatusDisplayType) -> Self {
+        self.activity.status_display_type = Some(display_type);
         self
     }
 

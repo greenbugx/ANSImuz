@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2025-2026 Sreehari Anil and project contributors
 
-use presenceforge::{Activity, ActivityAssets, ActivityBuilder, ActivityParty, ActivityType};
+use presenceforge::{
+    Activity, ActivityAssets, ActivityBuilder, ActivityParty, ActivityType, StatusDisplayType,
+};
 use serde_json::Value;
 
 fn activity_to_value(activity: &Activity) -> Value {
@@ -123,4 +125,25 @@ fn activity_type_deserializes_from_json() {
         serde_json::from_str(r#"{"type": 2}"#).unwrap();
 
     assert_eq!(activity.r#type, Some(ActivityType::Listening));
+}
+
+#[test]
+fn status_display_type_serializes_and_deserializes_correctly() {
+    for (display_type, expected) in [
+        (StatusDisplayType::Name, 0),
+        (StatusDisplayType::State, 1),
+        (StatusDisplayType::Details, 2),
+    ] {
+        let activity = ActivityBuilder::new()
+            .status_display_type(display_type)
+            .build();
+        let json = serde_json::to_value(activity).unwrap();
+        assert_eq!(json["status_display_type"], expected);
+    }
+
+    let default_json = serde_json::to_value(Activity::default()).unwrap();
+    assert!(default_json.get("status_display_type").is_none());
+
+    let parsed: Activity = serde_json::from_str(r#"{"status_display_type": 2}"#).unwrap();
+    assert_eq!(parsed.status_display_type, Some(StatusDisplayType::Details));
 }

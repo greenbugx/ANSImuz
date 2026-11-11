@@ -208,11 +208,73 @@ impl fmt::Display for ActivityType {
     }
 }
 
+/// Controls which field Discord displays in the user's status text.
+///
+/// Supported by Discord's SET_ACTIVITY RPC command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(into = "u32", try_from = "u32")]
+#[repr(u32)]
+pub enum StatusDisplayType {
+    /// Displays the application/activity name (default).
+    #[default]
+    Name = 0,
+    /// Displays the activity's `state` field.
+    State = 1,
+    /// Displays the activity's `details` field.
+    Details = 2,
+}
+
+impl StatusDisplayType {
+    /// Returns the integer representation expected by Discord IPC.
+    #[must_use]
+    pub const fn as_u32(self) -> u32 {
+        self as u32
+    }
+
+    /// Try to construct a `StatusDisplayType` from a raw u32 integer.
+    #[must_use]
+    pub const fn from_u32(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Name),
+            1 => Some(Self::State),
+            2 => Some(Self::Details),
+            _ => None,
+        }
+    }
+}
+
+impl From<StatusDisplayType> for u32 {
+    fn from(display_type: StatusDisplayType) -> Self {
+        display_type as u32
+    }
+}
+
+impl TryFrom<u32> for StatusDisplayType {
+    type Error = &'static str;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        Self::from_u32(value).ok_or("invalid Discord status display type")
+    }
+}
+
+impl fmt::Display for StatusDisplayType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Name => write!(f, "Name"),
+            Self::State => write!(f, "State"),
+            Self::Details => write!(f, "Details"),
+        }
+    }
+}
+
 /// Rich Presence Activity
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Activity {
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     pub r#type: Option<ActivityType>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_display_type: Option<StatusDisplayType>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
@@ -635,6 +697,33 @@ mod tests {
             serde_json::from_str(r#"{"type": 2}"#).unwrap();
 
         assert_eq!(activity.r#type, Some(ActivityType::Listening));
+    }
+
+    #[test]
+    fn status_display_type_conversions_and_serde() {
+        assert_eq!(StatusDisplayType::default(), StatusDisplayType::Name);
+        assert_eq!(StatusDisplayType::Name.as_u32(), 0);
+        assert_eq!(StatusDisplayType::State.as_u32(), 1);
+        assert_eq!(StatusDisplayType::Details.as_u32(), 2);
+
+        assert_eq!(StatusDisplayType::from_u32(0), Some(StatusDisplayType::Name));
+        assert_eq!(StatusDisplayType::from_u32(1), Some(StatusDisplayType::State));
+        assert_eq!(
+            StatusDisplayType::from_u32(2),
+            Some(StatusDisplayType::Details)
+        );
+        assert_eq!(StatusDisplayType::from_u32(3), None);
+
+        assert_eq!(
+            StatusDisplayType::try_from(2u32),
+            Ok(StatusDisplayType::Details)
+        );
+        assert!(StatusDisplayType::try_from(9u32).is_err());
+
+        let json = serde_json::to_string(&StatusDisplayType::Details).unwrap();
+        assert_eq!(json, "2");
+        let parsed: StatusDisplayType = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, StatusDisplayType::Details);
     }
 
     #[test]

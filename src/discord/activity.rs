@@ -1,5 +1,5 @@
 use presenceforge::activity::Activity;
-use presenceforge::{ActivityBuilder, ActivityType};
+use presenceforge::{ActivityBuilder, ActivityType, StatusDisplayType};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_LARGE_IMAGE: &str = "logo";
@@ -120,7 +120,9 @@ fn truncate_activity_text(s: &str, max_chars: usize, max_bytes: usize) -> String
 }
 
 pub fn build_activity(info: &PlaybackInfo) -> Activity {
-    let mut builder = ActivityBuilder::new().activity_type(ActivityType::Listening);
+    let mut builder = ActivityBuilder::new()
+        .activity_type(ActivityType::Listening)
+        .status_display_type(StatusDisplayType::Details);
 
     // Discord max length: 128 characters
     // Details: track title
@@ -234,6 +236,15 @@ mod tests {
         let activity = build_activity(&info);
         assert!(activity.validate().is_ok());
         assert_eq!(activity.r#type, Some(ActivityType::Listening));
+        assert_eq!(
+            activity.status_display_type,
+            Some(StatusDisplayType::Details)
+        );
+
+        let serialized = serde_json::to_value(&activity).unwrap();
+        assert_eq!(serialized["type"], 2);
+        assert_eq!(serialized["status_display_type"], 2);
+        assert_eq!(serialized["details"], "Bohemian Rhapsody");
 
         assert_eq!(activity.details.as_deref(), Some("Bohemian Rhapsody"));
         assert_eq!(activity.state.as_deref(), Some("Queen"));
@@ -452,6 +463,24 @@ mod tests {
         let activity: Activity = serde_json::from_str(r#"{"type": 2}"#).unwrap();
 
         assert_eq!(activity.r#type, Some(ActivityType::Listening));
+    }
+
+    #[test]
+    fn status_display_type_serializes_correctly() {
+        for (display_type, expected) in [
+            (StatusDisplayType::Name, 0),
+            (StatusDisplayType::State, 1),
+            (StatusDisplayType::Details, 2),
+        ] {
+            let activity = ActivityBuilder::new()
+                .status_display_type(display_type)
+                .build();
+            let json = serde_json::to_value(activity).unwrap();
+            assert_eq!(json["status_display_type"], expected);
+        }
+
+        let default_json = serde_json::to_value(Activity::default()).unwrap();
+        assert!(default_json.get("status_display_type").is_none());
     }
 
     #[test]

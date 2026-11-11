@@ -187,6 +187,7 @@ pub use activity::ActivitySecrets;
 pub use activity::{
     Activity, ActivityAssets, ActivityBuilder, ActivityButton, ActivityParty, ActivityTimestamps,
     ActivityType, ActivityValidationError, ArtworkRequest, ArtworkResult, HostingProvider,
+    StatusDisplayType,
 };
 pub use error::{
     DiscordIpcError, HandshakeFailureKind, InvalidResponseKind, ProtocolContext,
