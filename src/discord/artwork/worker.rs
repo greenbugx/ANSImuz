@@ -108,10 +108,7 @@ impl ArtworkWorker {
         })
     }
 
-    fn spawn_with_handler_and_forwarder<H, F>(
-        handler: H,
-        mut forward: F,
-    ) -> std::io::Result<Self>
+    fn spawn_with_handler_and_forwarder<H, F>(handler: H, mut forward: F) -> std::io::Result<Self>
     where
         H: FnMut(ArtworkRequest, bool) -> Result<ArtworkResult, ArtworkError> + Send + 'static,
         F: FnMut(ArtworkEvent) + Send + 'static,
@@ -259,10 +256,15 @@ mod tests {
 
         worker.resolve(
             99,
-            ArtworkRequest::new("ytmusic", Some("t_skip".into()), "http://invalid.local/art.jpg"),
+            ArtworkRequest::new(
+                "ytmusic",
+                Some("t_skip".into()),
+                "http://invalid.local/art.jpg",
+            ),
         );
         assert!(
-            rx.recv_timeout(std::time::Duration::from_millis(50)).is_err(),
+            rx.recv_timeout(std::time::Duration::from_millis(50))
+                .is_err(),
             "requests queued after shutdown must not emit events"
         );
 
@@ -272,7 +274,8 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_during_inflight_upload_waits_for_active_skips_queued_and_joins_forwarder_in_order() {
+    fn shutdown_during_inflight_upload_waits_for_active_skips_queued_and_joins_forwarder_in_order()
+    {
         use std::path::PathBuf;
         use std::sync::atomic::AtomicUsize;
         use std::time::Duration;

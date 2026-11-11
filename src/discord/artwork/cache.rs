@@ -109,7 +109,9 @@ impl ArtworkCache {
                     (CacheIndex::default(), true)
                 }
             },
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => (CacheIndex::default(), false),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                (CacheIndex::default(), false)
+            }
             Err(err) => return Err(err),
         };
 
@@ -213,12 +215,10 @@ impl ArtworkCache {
         self.content_hash_index.clear();
         for (key, record) in &self.index.entries {
             let replace = match self.content_hash_index.get(&record.content_hash) {
-                Some(existing_key) => {
-                    self.index.entries.get(existing_key).is_none_or(|existing| {
-                        Self::hash_candidate_rank(key, record, now_secs)
-                            > Self::hash_candidate_rank(existing_key, existing, now_secs)
-                    })
-                }
+                Some(existing_key) => self.index.entries.get(existing_key).is_none_or(|existing| {
+                    Self::hash_candidate_rank(key, record, now_secs)
+                        > Self::hash_candidate_rank(existing_key, existing, now_secs)
+                }),
                 None => true,
             };
             if replace {
@@ -752,7 +752,8 @@ impl ArtworkCache {
 
 impl Drop for ArtworkCache {
     fn drop(&mut self) {
-        if self.index_dirty && self.base_dir.exists()
+        if self.index_dirty
+            && self.base_dir.exists()
             && let Err(err) = self.flush()
         {
             crate::discord::log_discord(&format!(
@@ -1363,7 +1364,11 @@ mod tests {
         let file_path = cache.images_dir().join("hit.jpg");
         fs::write(&file_path, b"img-bytes").unwrap();
 
-        let req = ArtworkRequest::new("spotify", Some("hit_1".into()), "https://example.com/hit.jpg");
+        let req = ArtworkRequest::new(
+            "spotify",
+            Some("hit_1".into()),
+            "https://example.com/hit.jpg",
+        );
         cache
             .insert_and_save(
                 &req,
@@ -1453,7 +1458,10 @@ mod tests {
         cache.rebuild_content_hash_index_at(now);
 
         assert_eq!(
-            cache.content_hash_index().get("dup_hash").map(String::as_str),
+            cache
+                .content_hash_index()
+                .get("dup_hash")
+                .map(String::as_str),
             Some("spotify:newest_cat")
         );
 

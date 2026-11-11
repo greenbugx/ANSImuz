@@ -2,6 +2,8 @@ use presenceforge::activity::Activity;
 use presenceforge::{ActivityBuilder, ActivityType, StatusDisplayType};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+pub const ANSIMUZ_GITHUB_URL: &str = "https://github.com/greenbugx/ANSImuz";
+
 pub const DEFAULT_LARGE_IMAGE: &str = "logo";
 pub const DEFAULT_LARGE_TEXT: &str = "ANSImuz";
 pub const DEFAULT_SMALL_IMAGE: &str = "logo";
@@ -15,7 +17,8 @@ pub struct PlaybackInfo {
     pub position: Option<Duration>,
     pub duration: Option<Duration>,
     pub is_paused: bool,
-    pub stream_url: Option<String>,
+    pub provider: Option<String>,
+    pub public_track_url: Option<String>,
     pub large_image: Option<String>,
     pub large_text: Option<String>,
     pub small_image: Option<String>,
@@ -31,7 +34,8 @@ impl PlaybackInfo {
             position: None,
             duration: None,
             is_paused: false,
-            stream_url: None,
+            provider: None,
+            public_track_url: None,
             large_image: None,
             large_text: None,
             small_image: None,
@@ -59,8 +63,13 @@ impl PlaybackInfo {
         self
     }
 
-    pub fn with_stream_url(mut self, url: impl Into<String>) -> Self {
-        self.stream_url = Some(url.into());
+    pub fn with_provider(mut self, provider: impl Into<String>) -> Self {
+        self.provider = Some(provider.into());
+        self
+    }
+
+    pub fn with_public_track_url(mut self, url: impl Into<String>) -> Self {
+        self.public_track_url = Some(url.into());
         self
     }
 
@@ -85,9 +94,103 @@ impl PlaybackInfo {
     }
 }
 
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|s| !s.is_empty())
+}
+
+fn is_clean_track_id(id: &str) -> bool {
+    !id.is_empty()
+        && !id
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, '/' | '\\' | '?' | '#' | '&' | '=' | ':'))
+}
+
+fn is_valid_button_url(url: &str) -> bool {
+    let trimmed = url.trim();
+    let Some(rest) = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    !rest.is_empty()
+        && !rest.starts_with('/')
+        && !trimmed.chars().any(char::is_whitespace)
+        && trimmed.chars().count() <= 512
+        && trimmed.len() <= 512
+}
+
+fn button_label_for_provider(provider: Option<&str>) -> &'static str {
+    match provider.map(|p| p.trim().to_ascii_lowercase()).as_deref() {
+        Some("ytmusic" | "youtube") => "Listen on YouTube Music",
+        Some("spotify") => "Listen on Spotify",
+        _ => "Open Track",
+    }
+}
+
+/// Derive a safe public track URL for Discord activity buttons from a track.
+///
+/// Never exposes temporary or internal `mpv` stream URLs.
+pub fn public_track_url_from_track(track: &crate::music::Track) -> Option<String> {
+    let provider = track.provider.trim().to_ascii_lowercase();
+    match provider.as_str() {
+        "ytmusic" | "youtube" => {
+            if let Some(id) = non_empty(track.track_id.as_deref())
+                && is_clean_track_id(id)
+            {
+                return Some(format!("https://music.youtube.com/watch?v={id}"));
+            }
+
+            let stream_url = non_empty(track.stream_url.as_deref())?;
+            for prefix in [
+                "https://music.youtube.com/watch?v=",
+                "http://music.youtube.com/watch?v=",
+                "https://www.youtube.com/watch?v=",
+                "http://www.youtube.com/watch?v=",
+                "https://youtube.com/watch?v=",
+                "http://youtube.com/watch?v=",
+            ] {
+                if let Some(rest) = stream_url.strip_prefix(prefix) {
+                    let video_id = rest.split(['&', '#']).next().unwrap_or("");
+                    if is_clean_track_id(video_id) {
+                        return Some(format!("https://music.youtube.com/watch?v={video_id}"));
+                    }
+                }
+            }
+            None
+        }
+        "spotify" => {
+            let raw_id = non_empty(track.spotify_id.as_deref())
+                .or_else(|| non_empty(track.track_id.as_deref()))?;
+            if let Some(track_part) = raw_id
+                .strip_prefix("https://open.spotify.com/track/")
+                .or_else(|| raw_id.strip_prefix("http://open.spotify.com/track/"))
+            {
+                let clean_id = track_part.split(['?', '#']).next().unwrap_or("");
+                if is_clean_track_id(clean_id) {
+                    return Some(format!("https://open.spotify.com/track/{clean_id}"));
+                }
+                return None;
+            }
+            let id = raw_id.strip_prefix("spotify:track:").unwrap_or(raw_id);
+            if is_clean_track_id(id) {
+                return Some(format!("https://open.spotify.com/track/{id}"));
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 impl From<&crate::music::Track> for PlaybackInfo {
     fn from(track: &crate::music::Track) -> Self {
         let mut info = Self::new(&track.title, &track.artist);
+        if let Some(provider) = non_empty(Some(track.provider.as_str())) {
+            info = info.with_provider(provider);
+        }
+        if let Some(url) = public_track_url_from_track(track) {
+            info = info.with_public_track_url(url);
+        }
         if let Some(album) = &track.album {
             info = info.with_album(album);
         }
@@ -208,15 +311,16 @@ pub fn build_activity(info: &PlaybackInfo) -> Activity {
         }
     }
 
-    // Optional stream button if a valid web link is provided
-    if let Some(url) = &info.stream_url {
-        let trimmed = url.trim();
-        if (trimmed.starts_with("http://") || trimmed.starts_with("https://"))
-            && trimmed.len() <= 512
-        {
-            builder = builder.button("Listen", trimmed);
-        }
+    // Provider-aware public track link (only when a valid public URL is provided)
+    if let Some(url) = info.public_track_url.as_deref().map(str::trim)
+        && is_valid_button_url(url)
+    {
+        let label = button_label_for_provider(info.provider.as_deref());
+        builder = builder.button(label, url);
     }
+
+    // Secondary repository button
+    builder = builder.button("Get ANSImuz", ANSIMUZ_GITHUB_URL);
 
     builder.build()
 }
@@ -231,7 +335,8 @@ mod tests {
             .with_album("A Night at the Opera")
             .with_position(Duration::from_secs(30))
             .with_duration(Duration::from_secs(354))
-            .with_stream_url("https://music.youtube.com/watch?v=mock");
+            .with_provider("ytmusic")
+            .with_public_track_url("https://music.youtube.com/watch?v=mock");
 
         let activity = build_activity(&info);
         assert!(activity.validate().is_ok());
@@ -262,8 +367,12 @@ mod tests {
         assert!(timestamps.end.is_some());
 
         let buttons = activity.buttons.as_ref().expect("buttons should exist");
-        assert_eq!(buttons.len(), 1);
-        assert_eq!(buttons[0].label, "Listen");
+        assert_eq!(buttons.len(), 2);
+        assert_eq!(buttons[0].label, "Listen on YouTube Music");
+        assert_eq!(buttons[0].url, "https://music.youtube.com/watch?v=mock");
+        assert_eq!(buttons[1].label, "Get ANSImuz");
+        assert_eq!(buttons[1].url, ANSIMUZ_GITHUB_URL);
+        activity.validate().expect("activity should validate");
     }
 
     #[test]
@@ -497,6 +606,11 @@ mod tests {
         assert_eq!(info.artist, "Artist Name");
         assert_eq!(info.album.as_deref(), Some("Album Name"));
         assert_eq!(info.duration, Some(Duration::from_millis(185_000)));
+        assert_eq!(info.provider.as_deref(), Some("spotify"));
+        assert_eq!(
+            info.public_track_url.as_deref(),
+            Some("https://open.spotify.com/track/sp_123")
+        );
 
         let artwork = crate::discord::artwork::ArtworkRequest::from_track(&track)
             .expect("artwork request should be extracted");
@@ -506,5 +620,142 @@ mod tests {
 
         let no_art = crate::music::Track::new("No Art", "Artist");
         assert!(crate::discord::artwork::ArtworkRequest::from_track(&no_art).is_none());
+    }
+
+    #[test]
+    fn test_public_track_url_ytmusic_from_id_and_watch_url() {
+        let mut from_id = crate::music::Track::new("Track", "Artist")
+            .with_provider("ytmusic")
+            .with_track_id("vid_full");
+        from_id.stream_url =
+            Some("https://rr1---sn-test.googlevideo.com/videoplayback?id=1".into());
+
+        let info = PlaybackInfo::from(&from_id);
+        assert_eq!(
+            info.public_track_url.as_deref(),
+            Some("https://music.youtube.com/watch?v=vid_full")
+        );
+
+        let activity = build_activity(&info);
+        activity
+            .validate()
+            .expect("ytmusic activity should validate");
+        let buttons = activity.buttons.as_ref().expect("buttons should exist");
+        assert_eq!(buttons.len(), 2);
+        assert_eq!(buttons[0].label, "Listen on YouTube Music");
+        assert_eq!(buttons[0].url, "https://music.youtube.com/watch?v=vid_full");
+        assert_eq!(buttons[1].label, "Get ANSImuz");
+        assert_eq!(buttons[1].url, ANSIMUZ_GITHUB_URL);
+
+        let mut from_watch_url =
+            crate::music::Track::new("Track", "Artist").with_provider("ytmusic");
+        from_watch_url.stream_url =
+            Some("https://youtube.com/watch?v=vid_watch&feature=share".into());
+        assert_eq!(
+            public_track_url_from_track(&from_watch_url).as_deref(),
+            Some("https://music.youtube.com/watch?v=vid_watch")
+        );
+
+        for internal_url in [
+            "https://rr1---sn-test.googlevideo.com/videoplayback?id=1",
+            "http://127.0.0.1:8080/audio.webm",
+            "/tmp/song.mp3",
+        ] {
+            let mut internal = crate::music::Track::new("Track", "Artist").with_provider("ytmusic");
+            internal.stream_url = Some(internal_url.into());
+            assert_eq!(public_track_url_from_track(&internal), None);
+        }
+    }
+
+    #[test]
+    fn test_public_track_url_spotify_never_leaks_youtube_stream_url() {
+        let mut track = crate::music::Track::new("Track", "Artist")
+            .with_provider("spotify")
+            .with_track_id("sp_track_fallback");
+        track.spotify_id = Some("6rqhFgbbKwnb9MLmUQDhG6".into());
+        track.stream_url = Some("https://music.youtube.com/watch?v=yt_matched".into());
+
+        let info = PlaybackInfo::from(&track);
+        assert_eq!(
+            info.public_track_url.as_deref(),
+            Some("https://open.spotify.com/track/6rqhFgbbKwnb9MLmUQDhG6")
+        );
+
+        let activity = build_activity(&info);
+        activity
+            .validate()
+            .expect("spotify activity should validate");
+        let buttons = activity.buttons.as_ref().expect("buttons should exist");
+        assert_eq!(buttons.len(), 2);
+        assert_eq!(buttons[0].label, "Listen on Spotify");
+        assert_eq!(
+            buttons[0].url,
+            "https://open.spotify.com/track/6rqhFgbbKwnb9MLmUQDhG6"
+        );
+        assert_eq!(buttons[1].label, "Get ANSImuz");
+        assert_eq!(buttons[1].url, ANSIMUZ_GITHUB_URL);
+
+        let mut missing_id = crate::music::Track::new("Track", "Artist").with_provider("spotify");
+        missing_id.spotify_id = Some("   ".into());
+        missing_id.stream_url = Some("https://music.youtube.com/watch?v=yt_matched".into());
+        assert_eq!(public_track_url_from_track(&missing_id), None);
+    }
+
+    #[test]
+    fn test_build_activity_other_provider_and_invalid_urls() {
+        let custom = PlaybackInfo::new("Track", "Artist")
+            .with_provider("soundcloud")
+            .with_public_track_url("https://example.com/tracks/1");
+        let custom_activity = build_activity(&custom);
+        custom_activity
+            .validate()
+            .expect("custom provider activity should validate");
+        let custom_buttons = custom_activity
+            .buttons
+            .as_ref()
+            .expect("buttons should exist");
+        assert_eq!(custom_buttons.len(), 2);
+        assert_eq!(custom_buttons[0].label, "Open Track");
+        assert_eq!(custom_buttons[0].url, "https://example.com/tracks/1");
+        assert_eq!(custom_buttons[1].label, "Get ANSImuz");
+        assert_eq!(custom_buttons[1].url, ANSIMUZ_GITHUB_URL);
+
+        let mut unknown = crate::music::Track::new("Local Song", "Artist")
+            .with_provider("local")
+            .with_track_id("local_1");
+        unknown.stream_url = Some("http://127.0.0.1:9000/song.flac".into());
+        let unknown_info = PlaybackInfo::from(&unknown);
+        assert_eq!(unknown_info.public_track_url, None);
+        let unknown_activity = build_activity(&unknown_info);
+        unknown_activity
+            .validate()
+            .expect("fallback single-button activity should validate");
+        let unknown_buttons = unknown_activity
+            .buttons
+            .as_ref()
+            .expect("Get ANSImuz button should still be present");
+        assert_eq!(unknown_buttons.len(), 1);
+        assert_eq!(unknown_buttons[0].label, "Get ANSImuz");
+        assert_eq!(unknown_buttons[0].url, ANSIMUZ_GITHUB_URL);
+
+        let too_long_url = format!("https://example.com/{}", "a".repeat(500));
+        for bad_url in [
+            "ftp://example.com/track",
+            "https://example.com/with space",
+            "https://",
+            "/tmp/file.mp3",
+            too_long_url.as_str(),
+        ] {
+            let info = PlaybackInfo::new("Track", "Artist")
+                .with_provider("ytmusic")
+                .with_public_track_url(bad_url);
+            let activity = build_activity(&info);
+            activity
+                .validate()
+                .expect("activity with invalid track URL omitted should validate");
+            let buttons = activity.buttons.as_ref().expect("Get ANSImuz should exist");
+            assert_eq!(buttons.len(), 1);
+            assert_eq!(buttons[0].label, "Get ANSImuz");
+        }
     }
 }

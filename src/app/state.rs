@@ -228,8 +228,6 @@ impl App {
                             }
                             let artwork =
                                 crate::discord::artwork::ArtworkRequest::from_track(track);
-                            // Sharing temporary/internal stream URLs through Discord activity button
-                            // Disabled for now until proper public track URLs are available.
                             worker.track_changed(info, artwork);
                         }
                         self.discord_worker = Some(worker);

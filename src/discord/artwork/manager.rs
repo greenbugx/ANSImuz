@@ -48,19 +48,16 @@ impl ArtworkManager {
         config: DiscordArtworkConfig,
     ) -> Result<Self, ArtworkError> {
         let max_cache_bytes = config.cache_max_bytes();
-        let cache =
-            ArtworkCache::try_load_with_capacity(custom_cache_dir, max_cache_bytes).map_err(
-                |e| ArtworkError::InitializationFailed {
-                    component: ArtworkInitComponent::Cache,
-                    message: e.to_string(),
-                },
-            )?;
-        let downloader = ArtworkDownloader::new().map_err(|e| {
-            ArtworkError::InitializationFailed {
+        let cache = ArtworkCache::try_load_with_capacity(custom_cache_dir, max_cache_bytes)
+            .map_err(|e| ArtworkError::InitializationFailed {
+                component: ArtworkInitComponent::Cache,
+                message: e.to_string(),
+            })?;
+        let downloader =
+            ArtworkDownloader::new().map_err(|e| ArtworkError::InitializationFailed {
                 component: ArtworkInitComponent::Downloader,
                 message: e.to_string(),
-            }
-        })?;
+            })?;
         let catbox = CatboxUploader::new().map_err(|e| ArtworkError::InitializationFailed {
             component: ArtworkInitComponent::CatboxUploader,
             message: e.to_string(),

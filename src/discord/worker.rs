@@ -30,7 +30,7 @@ pub(crate) fn log_discord(msg: &str) {
 #[derive(Debug)]
 enum DiscordCommand {
     TrackChanged {
-        playback: PlaybackInfo,
+        playback: Box<PlaybackInfo>,
         artwork: Option<ArtworkRequest>,
     },
     PositionChanged {
@@ -92,9 +92,10 @@ impl DiscordWorker {
     }
 
     pub fn track_changed(&self, playback: PlaybackInfo, artwork: Option<ArtworkRequest>) {
-        let _ = self
-            .sender
-            .send(DiscordCommand::TrackChanged { playback, artwork });
+        let _ = self.sender.send(DiscordCommand::TrackChanged {
+            playback: Box::new(playback),
+            artwork,
+        });
     }
 
     pub fn position_changed(&self, pos: Duration) {
@@ -237,7 +238,7 @@ fn run_worker_loop(
                         aw.resolve(generation, req);
                     }
 
-                    current_playback = Some(playback);
+                    current_playback = Some(*playback);
                 }
                 DiscordCommand::ArtworkResolved { generation, result } => {
                     // Only apply resolved artwork if generation matches currently playing track
