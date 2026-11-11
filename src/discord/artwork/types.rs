@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Discord Rich Presence artwork resolution request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +106,114 @@ impl fmt::Display for HostingProvider {
             Self::Catbox => write!(f, "catbox"),
             Self::Litterbox => write!(f, "litterbox"),
         }
+    }
+}
+
+/// Normalized image format shared across artwork caching and hosting providers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NormalizedImageFormat {
+    Jpeg,
+    Png,
+    Webp,
+    Gif,
+    Avif,
+}
+
+impl NormalizedImageFormat {
+    /// All supported normalized artwork formats.
+    pub const ALL: &'static [Self] = &[Self::Jpeg, Self::Png, Self::Webp, Self::Gif, Self::Avif];
+
+    /// Returns the MIME content type for this format.
+    #[must_use]
+    pub const fn mime_type(self) -> &'static str {
+        match self {
+            Self::Jpeg => "image/jpeg",
+            Self::Png => "image/png",
+            Self::Webp => "image/webp",
+            Self::Gif => "image/gif",
+            Self::Avif => "image/avif",
+        }
+    }
+
+    /// Returns the canonical lowercase file extension
+    //  without a leading dot btw.
+    #[must_use]
+    pub const fn extension(self) -> &'static str {
+        match self {
+            Self::Jpeg => "jpg",
+            Self::Png => "png",
+            Self::Webp => "webp",
+            Self::Gif => "gif",
+            Self::Avif => "avif",
+        }
+    }
+
+    /// Maps an `image::ImageFormat` into a supported normalized format.
+    #[must_use]
+    pub const fn from_image_format(format: image::ImageFormat) -> Option<Self> {
+        match format {
+            image::ImageFormat::Jpeg => Some(Self::Jpeg),
+            image::ImageFormat::Png => Some(Self::Png),
+            image::ImageFormat::WebP => Some(Self::Webp),
+            image::ImageFormat::Gif => Some(Self::Gif),
+            image::ImageFormat::Avif => Some(Self::Avif),
+            _ => None,
+        }
+    }
+
+    /// Converts into the corresponding `image::ImageFormat`.
+    #[must_use]
+    pub const fn to_image_format(self) -> image::ImageFormat {
+        match self {
+            Self::Jpeg => image::ImageFormat::Jpeg,
+            Self::Png => image::ImageFormat::Png,
+            Self::Webp => image::ImageFormat::WebP,
+            Self::Gif => image::ImageFormat::Gif,
+            Self::Avif => image::ImageFormat::Avif,
+        }
+    }
+
+    /// Detects image format strictly from magic byte signatures (never filename extensions).
+    pub fn from_bytes(image_bytes: &[u8]) -> Result<Self, ArtworkError> {
+        if image_bytes.is_empty() {
+            return Err(ArtworkError::UnsupportedInput(
+                "cannot upload empty image".to_string(),
+            ));
+        }
+
+        let guessed = image::guess_format(image_bytes).map_err(|err| {
+            ArtworkError::UnsupportedInput(format!("unrecognized image format: {err}"))
+        })?;
+        Self::from_image_format(guessed).ok_or_else(|| {
+            ArtworkError::UnsupportedInput(format!(
+                "unsupported normalized image format ({guessed:?})"
+            ))
+        })
+    }
+
+    /// Returns whether a HTTP `Content-Type` header specifies an accepted image MIME type.
+    #[must_use]
+    pub fn is_accepted_mime(mime: &str) -> bool {
+        let essence = mime
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        Self::ALL.iter().any(|fmt| fmt.mime_type() == essence)
+    }
+
+    /// Formats a multipart filename preserving only the caller's stem (defaulting to `"artwork"`).
+    #[must_use]
+    pub fn multipart_filename(self, filename: &str) -> String {
+        let stem = Path::new(filename)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("artwork");
+        format!("{stem}.{}", self.extension())
     }
 }
 

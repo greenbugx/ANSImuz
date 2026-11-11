@@ -1,4 +1,5 @@
 use super::cache::sha256_hex;
+use super::types::NormalizedImageFormat;
 use image::{DynamicImage, GenericImageView, imageops};
 use std::fs;
 use std::io::Read;
@@ -9,6 +10,7 @@ pub const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024; // 8 MB limit
 pub const MAX_DIMENSION: u32 = 4096;
 pub const MIN_DIMENSION: u32 = 10;
 pub const TARGET_MAX_SIDE: u32 = 1024;
+pub const NORMALIZED_IMAGE_FORMAT: NormalizedImageFormat = NormalizedImageFormat::Jpeg;
 
 /// Result of downloading, normalizing, and storing artwork locally.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +19,7 @@ pub struct DownloadedArtwork {
     pub relative_path: String,
     pub content_hash: String,
     pub bytes: Vec<u8>,
+    pub format: NormalizedImageFormat,
 }
 
 /// Normalizes image according to specifications:
@@ -35,6 +38,15 @@ pub fn normalize_image_with_side(
     img: DynamicImage,
     target_side: u32,
 ) -> Result<(Vec<u8>, String), String> {
+    let (bytes, hash, _format) = normalize_image_with_format(img, target_side)?;
+    Ok((bytes, hash))
+}
+
+/// Normalizes image with a configurable target side constraint and returns the encoded format.
+pub fn normalize_image_with_format(
+    img: DynamicImage,
+    target_side: u32,
+) -> Result<(Vec<u8>, String, NormalizedImageFormat), String> {
     let (w, h) = img.dimensions();
     if w < MIN_DIMENSION || h < MIN_DIMENSION {
         return Err(format!("Image dimensions ({w}x{h}) are too small"));
@@ -55,17 +67,18 @@ pub fn normalize_image_with_side(
     // Convert to RGB
     let rgb = resized.to_rgb8();
 
-    // Encode to standard JPEG
+    // Encode to normalized format
+    let format = NORMALIZED_IMAGE_FORMAT;
     let mut encoded = Vec::new();
     image::DynamicImage::ImageRgb8(rgb)
         .write_to(
             &mut std::io::Cursor::new(&mut encoded),
-            image::ImageFormat::Jpeg,
+            format.to_image_format(),
         )
         .map_err(|e| format!("Failed to encode artwork to JPEG: {e}"))?;
 
     let hash = sha256_hex(&encoded);
-    Ok((encoded, hash))
+    Ok((encoded, hash, format))
 }
 
 /// Persistent HTTP downloader with connection pooling for artwork fetching and normalization.
@@ -165,14 +178,15 @@ impl ArtworkDownloader {
             .decode()
             .map_err(|e| format!("Failed to decode artwork image: {e}"))?;
 
-        // Normalize (RGB, resize <= target_side maintaining aspect ratio, JPEG encode, SHA-256)
-        let (normalized_bytes, content_hash) = normalize_image_with_side(decoded, target_side)?;
+        // Normalize (RGB, resize <= target_side maintaining aspect ratio, encode, SHA-256)
+        let (normalized_bytes, content_hash, format) =
+            normalize_image_with_format(decoded, target_side)?;
 
         // Write to unique temporary file, then rename to hash-based filename
         fs::create_dir_all(images_dir)
             .map_err(|e| format!("Failed creating images directory: {e}"))?;
 
-        let file_name = format!("{content_hash}.jpg");
+        let file_name = format!("{content_hash}.{}", format.extension());
         let final_path = images_dir.join(&file_name);
         let relative_path = format!("images/{file_name}");
 
@@ -208,6 +222,7 @@ impl ArtworkDownloader {
             relative_path,
             content_hash,
             bytes: normalized_bytes,
+            format,
         })
     }
 }

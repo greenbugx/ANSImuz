@@ -1,12 +1,13 @@
 use super::cache::current_unix_timestamp;
-use super::types::{ArtworkError, ArtworkInitComponent, HostingProvider, UploadedArtwork};
+use super::types::{
+    ArtworkError, ArtworkInitComponent, HostingProvider, NormalizedImageFormat, UploadedArtwork,
+};
 use crate::config::LitterboxExpiry;
 use reqwest::StatusCode;
 use reqwest::blocking::multipart::{Form, Part};
 use serde::Deserialize;
 use std::io::Read;
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::path::Path;
 use std::time::Duration;
 
 pub const IMGDB_API_URL: &str = "https://imgdb.io/api/v1/upload?ttl=86400";
@@ -19,14 +20,6 @@ pub const LITTERBOX_RETENTION_SECS: u64 = LITTERBOX_RETENTION_HOURS * 3600;
 
 const MAX_IMGDB_JSON_BYTES: usize = 64 * 1024;
 const MAX_ERROR_BODY_BYTES: usize = 256;
-
-const ACCEPTED_IMAGE_MIME_TYPES: &[&str] = &[
-    "image/jpeg",
-    "image/png",
-    "image/webp",
-    "image/gif",
-    "image/avif",
-];
 
 const NON_IMAGE_EXTENSIONS: &[&str] = &[
     "html", "htm", "xhtml", "php", "asp", "aspx", "jsp", "cgi", "json", "xml", "txt", "js", "css",
@@ -88,16 +81,6 @@ fn read_bounded_error_snippet(mut reader: impl Read) -> String {
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
     snippet.trim().to_string()
-}
-
-fn is_accepted_image_mime(mime: &str) -> bool {
-    let essence = mime
-        .split(';')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase();
-    ACCEPTED_IMAGE_MIME_TYPES.contains(&essence.as_str())
 }
 
 fn parse_ascii_u64(raw: &str) -> Option<u64> {
@@ -220,36 +203,42 @@ fn classify_http_failure(
     ArtworkError::InvalidResponse(format!("{provider_label} returned HTTP {status}{detail}"))
 }
 
-fn detect_image_mime_and_filename(
+fn detect_upload_format(
+    provider_label: &str,
     image_bytes: &[u8],
-    filename: &str,
-) -> Result<(&'static str, String), ArtworkError> {
-    // Determine format strictly from image byte signatures; never trust the caller's filename extension.
-    let (mime, ext) = match image::guess_format(image_bytes) {
-        Ok(image::ImageFormat::Jpeg) => ("image/jpeg", "jpg"),
-        Ok(image::ImageFormat::Png) => ("image/png", "png"),
-        Ok(image::ImageFormat::WebP) => ("image/webp", "webp"),
-        Ok(image::ImageFormat::Gif) => ("image/gif", "gif"),
-        Ok(image::ImageFormat::Avif) => ("image/avif", "avif"),
-        Ok(other) => {
-            return Err(ArtworkError::UnsupportedInput(format!(
-                "Imgdb: unsupported normalized image format ({other:?})"
-            )));
+) -> Result<NormalizedImageFormat, ArtworkError> {
+    NormalizedImageFormat::from_bytes(image_bytes).map_err(|err| match err {
+        ArtworkError::UnsupportedInput(msg) => {
+            ArtworkError::UnsupportedInput(format!("{provider_label}: {msg}"))
         }
-        Err(err) => {
-            return Err(ArtworkError::UnsupportedInput(format!(
-                "Imgdb: unrecognized image format: {err}"
-            )));
-        }
-    };
+        other => other,
+    })
+}
 
-    let stem = Path::new(filename)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("artwork");
-    Ok((mime, format!("{stem}.{ext}")))
+#[derive(Clone, Copy)]
+struct MultipartImage<'a> {
+    bytes: &'a [u8],
+    format: NormalizedImageFormat,
+    filename: &'a str,
+}
+
+fn build_multipart_image_part(
+    provider_label: &str,
+    image: MultipartImage<'_>,
+) -> Result<Part, ArtworkError> {
+    if image.bytes.is_empty() {
+        return Err(ArtworkError::UnsupportedInput(format!(
+            "{provider_label}: cannot upload empty image"
+        )));
+    }
+
+    let effective_filename = image.format.multipart_filename(image.filename);
+    Part::bytes(image.bytes.to_vec())
+        .file_name(effective_filename)
+        .mime_str(image.format.mime_type())
+        .map_err(|e| {
+            ArtworkError::UnsupportedInput(format!("{provider_label}: invalid MIME type: {e}"))
+        })
 }
 
 fn is_disallowed_ipv4(ip: Ipv4Addr) -> bool {
@@ -596,7 +585,7 @@ impl ImgdbUploader {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .trim();
-        if !is_accepted_image_mime(content_type) {
+        if !NormalizedImageFormat::is_accepted_mime(content_type) {
             return Err(ArtworkError::InvalidResponse(format!(
                 "Imgdb returned URL served unsupported Content-Type: '{content_type}'"
             )));
@@ -616,27 +605,31 @@ impl ImgdbUploader {
         Ok(())
     }
 
-    /// Uploads normalized image bytes anonymously to Imgdb with `ttl=86400` and validates the response.
+    /// Uploads image bytes anonymously to Imgdb with `ttl=86400`, detecting format from the payload.
     pub fn upload(
         &self,
         image_bytes: &[u8],
         filename: &str,
     ) -> Result<UploadedArtwork, ArtworkError> {
-        if image_bytes.is_empty() {
-            return Err(ArtworkError::UnsupportedInput(
-                "Imgdb: cannot upload empty image".to_string(),
-            ));
-        }
+        let format = detect_upload_format("Imgdb", image_bytes)?;
+        self.upload_with_format(image_bytes, format, filename)
+    }
 
-        let (mime_type, effective_filename) =
-            detect_image_mime_and_filename(image_bytes, filename)?;
-        let part = Part::bytes(image_bytes.to_vec())
-            .file_name(effective_filename)
-            .mime_str(mime_type)
-            .map_err(|e| {
-                ArtworkError::UnsupportedInput(format!("Imgdb: invalid MIME type: {e}"))
-            })?;
-
+    /// Uploads normalized image bytes of known format anonymously to Imgdb with `ttl=86400`.
+    pub fn upload_with_format(
+        &self,
+        image_bytes: &[u8],
+        format: NormalizedImageFormat,
+        filename: &str,
+    ) -> Result<UploadedArtwork, ArtworkError> {
+        let part = build_multipart_image_part(
+            "Imgdb",
+            MultipartImage {
+                bytes: image_bytes,
+                format,
+                filename,
+            },
+        )?;
         let form = Form::new().part("file", part);
 
         let response = self
@@ -685,7 +678,7 @@ impl ImgdbUploader {
         }
 
         if let Some(ct) = parsed.content_type.as_deref()
-            && !is_accepted_image_mime(ct)
+            && !NormalizedImageFormat::is_accepted_mime(ct)
         {
             return Err(ArtworkError::InvalidResponse(format!(
                 "Imgdb returned unsupported image MIME type: '{}'",
@@ -725,37 +718,42 @@ impl ImgdbUploader {
 }
 
 impl ArtworkUploader for ImgdbUploader {
-    fn upload(&self, image_bytes: &[u8], filename: &str) -> Result<UploadedArtwork, ArtworkError> {
-        self.upload(image_bytes, filename)
+    fn upload(
+        &self,
+        image_bytes: &[u8],
+        format: NormalizedImageFormat,
+        filename: &str,
+    ) -> Result<UploadedArtwork, ArtworkError> {
+        self.upload_with_format(image_bytes, format, filename)
     }
 }
 
 /// Common interface for artwork hosting services.
 pub trait ArtworkUploader: Send + Sync {
-    fn upload(&self, image_bytes: &[u8], filename: &str) -> Result<UploadedArtwork, ArtworkError>;
+    fn upload(
+        &self,
+        image_bytes: &[u8],
+        format: NormalizedImageFormat,
+        filename: &str,
+    ) -> Result<UploadedArtwork, ArtworkError>;
 }
 
 fn upload_catbox_family(
     client: &reqwest::blocking::Client,
-    endpoint: &str,
     provider: HostingProvider,
-    provider_label: &str,
     retention_time: Option<&str>,
-    image_bytes: &[u8],
-    filename: &str,
+    image: MultipartImage<'_>,
 ) -> Result<String, ArtworkError> {
-    if image_bytes.is_empty() {
-        return Err(ArtworkError::UnsupportedInput(format!(
-            "{provider_label}: cannot upload empty image"
-        )));
-    }
-
-    let part = Part::bytes(image_bytes.to_vec())
-        .file_name(filename.to_string())
-        .mime_str("image/jpeg")
-        .map_err(|e| {
-            ArtworkError::UnsupportedInput(format!("{provider_label}: invalid MIME type: {e}"))
-        })?;
+    let (endpoint, provider_label) = match provider {
+        HostingProvider::Catbox => (CATBOX_API_URL, "Catbox"),
+        HostingProvider::Litterbox => (LITTERBOX_API_URL, "Litterbox"),
+        HostingProvider::Imgdb => {
+            return Err(ArtworkError::UnsupportedInput(
+                "Invalid catbox-family provider: imgdb".to_string(),
+            ));
+        }
+    };
+    let part = build_multipart_image_part(provider_label, image)?;
 
     let mut form = Form::new().text("reqtype", "fileupload");
     if let Some(time_str) = retention_time {
@@ -802,19 +800,21 @@ impl CatboxUploader {
         Ok(Self { client })
     }
 
-    fn upload_artwork(
+    fn upload_with_format(
         &self,
         image_bytes: &[u8],
+        format: NormalizedImageFormat,
         filename: &str,
     ) -> Result<UploadedArtwork, ArtworkError> {
         let url = upload_catbox_family(
             &self.client,
-            CATBOX_API_URL,
             HostingProvider::Catbox,
-            "Catbox",
             None,
-            image_bytes,
-            filename,
+            MultipartImage {
+                bytes: image_bytes,
+                format,
+                filename,
+            },
         )?;
         Ok(UploadedArtwork {
             url,
@@ -823,21 +823,28 @@ impl CatboxUploader {
         })
     }
 
-    /// Uploads normalized image bytes to Catbox, returning the hosted HTTPS URL.
+    /// Uploads image bytes to Catbox, detecting format from the payload and returning the HTTPS URL.
     pub fn upload(
         &self,
         image_bytes: &[u8],
         filename: &str,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        self.upload_artwork(image_bytes, filename)
+        let format = detect_upload_format("Catbox", image_bytes)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        self.upload_with_format(image_bytes, format, filename)
             .map(|uploaded| uploaded.url)
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
     }
 }
 
 impl ArtworkUploader for CatboxUploader {
-    fn upload(&self, image_bytes: &[u8], filename: &str) -> Result<UploadedArtwork, ArtworkError> {
-        self.upload_artwork(image_bytes, filename)
+    fn upload(
+        &self,
+        image_bytes: &[u8],
+        format: NormalizedImageFormat,
+        filename: &str,
+    ) -> Result<UploadedArtwork, ArtworkError> {
+        self.upload_with_format(image_bytes, format, filename)
     }
 }
 
@@ -873,19 +880,21 @@ impl LitterboxUploader {
         self.expiry.as_str()
     }
 
-    fn upload_artwork(
+    fn upload_with_format(
         &self,
         image_bytes: &[u8],
+        format: NormalizedImageFormat,
         filename: &str,
     ) -> Result<UploadedArtwork, ArtworkError> {
         let url = upload_catbox_family(
             &self.client,
-            LITTERBOX_API_URL,
             HostingProvider::Litterbox,
-            "Litterbox",
             Some(self.time_str()),
-            image_bytes,
-            filename,
+            MultipartImage {
+                bytes: image_bytes,
+                format,
+                filename,
+            },
         )?;
         let now = current_unix_timestamp();
         Ok(UploadedArtwork {
@@ -895,20 +904,27 @@ impl LitterboxUploader {
         })
     }
 
-    /// Uploads normalized image bytes to Litterbox with configured retention.
+    /// Uploads image bytes to Litterbox with configured retention, detecting format from the payload.
     pub fn upload(
         &self,
         image_bytes: &[u8],
         filename: &str,
     ) -> Result<UploadedArtwork, Box<dyn std::error::Error>> {
-        self.upload_artwork(image_bytes, filename)
+        let format = detect_upload_format("Litterbox", image_bytes)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        self.upload_with_format(image_bytes, format, filename)
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
     }
 }
 
 impl ArtworkUploader for LitterboxUploader {
-    fn upload(&self, image_bytes: &[u8], filename: &str) -> Result<UploadedArtwork, ArtworkError> {
-        self.upload_artwork(image_bytes, filename)
+    fn upload(
+        &self,
+        image_bytes: &[u8],
+        format: NormalizedImageFormat,
+        filename: &str,
+    ) -> Result<UploadedArtwork, ArtworkError> {
+        self.upload_with_format(image_bytes, format, filename)
     }
 }
 

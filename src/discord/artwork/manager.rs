@@ -2,7 +2,7 @@ use super::cache::{ArtworkCache, current_unix_timestamp, sha256_hex};
 use super::downloader::ArtworkDownloader;
 use super::types::{
     ArtworkError, ArtworkInitComponent, ArtworkRequest, ArtworkResult, CacheRecord, HostConfig,
-    HostingProvider,
+    HostingProvider, NormalizedImageFormat,
 };
 use super::uploader::{ArtworkUploader, CatboxUploader, ImgdbUploader, LitterboxUploader};
 use crate::config::DiscordArtworkConfig;
@@ -332,6 +332,8 @@ impl ArtworkManager {
         &mut self,
         host: HostingProvider,
         bytes: &[u8],
+        format: NormalizedImageFormat,
+        filename: &str,
     ) -> Result<(String, HostingProvider, Option<u64>), ArtworkError> {
         if self.is_provider_cooling_down(host) {
             return Err(ArtworkError::CooldownActive);
@@ -350,7 +352,7 @@ impl ArtworkManager {
             HostingProvider::Litterbox => self.litterbox.as_ref(),
         };
 
-        let result = uploader.upload(bytes, "art.jpg");
+        let result = uploader.upload(bytes, format, filename);
         match &result {
             Ok(_) => self.clear_provider_failure(host),
             Err(err) => self.record_provider_error(host, err),
@@ -395,6 +397,7 @@ impl ArtworkManager {
             )
         } else {
             let chain = self.resolve_provider_chain()?;
+            let upload_filename = downloaded.format.multipart_filename("artwork");
             let mut provider_errors = Vec::with_capacity(chain.len());
             let mut upload_success = None;
 
@@ -409,7 +412,12 @@ impl ArtworkManager {
                     crate::discord::log_discord("[Artwork] Imgdb upload started");
                 }
 
-                match self.upload_to_host(provider, &downloaded.bytes) {
+                match self.upload_to_host(
+                    provider,
+                    &downloaded.bytes,
+                    downloaded.format,
+                    &upload_filename,
+                ) {
                     Ok(res) => {
                         crate::discord::log_discord(&format!(
                             "[Artwork] {} upload succeeded ({})",
