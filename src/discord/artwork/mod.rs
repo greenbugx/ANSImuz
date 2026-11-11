@@ -32,8 +32,8 @@ pub use downloader::{
 };
 pub use manager::ArtworkManager;
 pub use types::{
-    ArtworkError, ArtworkRequest, ArtworkResult, CacheIndex, CacheRecord, HostConfig,
-    HostingProvider, UploadedArtwork,
+    ArtworkError, ArtworkInitComponent, ArtworkRequest, ArtworkResult, CacheIndex, CacheRecord,
+    HostConfig, HostingProvider, UploadedArtwork,
 };
 pub use uploader::{ArtworkUploader, CatboxUploader, LitterboxUploader};
 pub use worker::{ArtworkCommand, ArtworkEvent, ArtworkWorker};

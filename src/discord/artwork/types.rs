@@ -145,9 +145,33 @@ pub struct UploadedArtwork {
     pub expires_at: Option<u64>,
 }
 
+/// Subcomponent that failed during artwork manager initialization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtworkInitComponent {
+    Cache,
+    Downloader,
+    CatboxUploader,
+    LitterboxUploader,
+}
+
+impl fmt::Display for ArtworkInitComponent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cache => write!(f, "cache"),
+            Self::Downloader => write!(f, "downloader"),
+            Self::CatboxUploader => write!(f, "catbox uploader"),
+            Self::LitterboxUploader => write!(f, "litterbox uploader"),
+        }
+    }
+}
+
 /// Errors occurring during artwork fetching, normalization, caching, or uploading.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArtworkError {
+    InitializationFailed {
+        component: ArtworkInitComponent,
+        message: String,
+    },
     InvalidUrl(String),
     DownloadFailed(String),
     NormalizationFailed(String),
@@ -160,6 +184,9 @@ pub enum ArtworkError {
 impl fmt::Display for ArtworkError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InitializationFailed { component, message } => {
+                write!(f, "Artwork {component} initialization failed: {message}")
+            }
             Self::InvalidUrl(msg) => write!(f, "Invalid artwork URL: {msg}"),
             Self::DownloadFailed(msg) => write!(f, "Artwork download failed: {msg}"),
             Self::NormalizationFailed(msg) => write!(f, "Artwork normalization failed: {msg}"),

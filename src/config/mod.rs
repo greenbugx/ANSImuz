@@ -57,8 +57,42 @@ fn default_fallback_host() -> String {
     "litterbox".to_string()
 }
 
-fn default_litterbox_expiry() -> String {
-    "72h".to_string()
+/// Supported Litterbox temporary-hosting retention durations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum LitterboxExpiry {
+    #[serde(rename = "1h")]
+    OneHour,
+    #[serde(rename = "12h")]
+    TwelveHours,
+    #[serde(rename = "24h")]
+    TwentyFourHours,
+    #[default]
+    #[serde(rename = "72h")]
+    SeventyTwoHours,
+}
+
+impl LitterboxExpiry {
+    /// API time form parameter value sent to Litterbox.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OneHour => "1h",
+            Self::TwelveHours => "12h",
+            Self::TwentyFourHours => "24h",
+            Self::SeventyTwoHours => "72h",
+        }
+    }
+
+    /// Exact retention duration in seconds matching [`Self::as_str`].
+    #[must_use]
+    pub const fn duration_seconds(self) -> u64 {
+        match self {
+            Self::OneHour => 3600,
+            Self::TwelveHours => 12 * 3600,
+            Self::TwentyFourHours => 24 * 3600,
+            Self::SeventyTwoHours => 72 * 3600,
+        }
+    }
 }
 
 /// Artwork-specific configuration for Discord Rich Presence.
@@ -74,8 +108,8 @@ pub struct DiscordArtworkConfig {
     pub primary_host: String,
     #[serde(default = "default_fallback_host")]
     pub fallback_host: String,
-    #[serde(default = "default_litterbox_expiry")]
-    pub litterbox_expiry: String,
+    #[serde(default)]
+    pub litterbox_expiry: LitterboxExpiry,
 }
 
 impl Default for DiscordArtworkConfig {
@@ -86,7 +120,7 @@ impl Default for DiscordArtworkConfig {
             image_size: default_image_size(),
             primary_host: default_primary_host(),
             fallback_host: default_fallback_host(),
-            litterbox_expiry: default_litterbox_expiry(),
+            litterbox_expiry: LitterboxExpiry::default(),
         }
     }
 }
@@ -103,30 +137,13 @@ impl DiscordArtworkConfig {
     }
 
     #[must_use]
-    pub fn litterbox_duration_seconds(&self) -> u64 {
-        match self.litterbox_expiry.trim() {
-            "1h" => 3600,
-            "12h" => 12 * 3600,
-            "24h" => 24 * 3600,
-            "72h" => 72 * 3600,
-            other => {
-                if let Some(h) = other.strip_suffix('h').and_then(|s| s.parse::<u64>().ok()) {
-                    h.saturating_mul(3600)
-                } else {
-                    72 * 3600
-                }
-            }
-        }
+    pub const fn litterbox_duration_seconds(&self) -> u64 {
+        self.litterbox_expiry.duration_seconds()
     }
 
     #[must_use]
-    pub fn litterbox_time_str(&self) -> &str {
-        match self.litterbox_expiry.trim() {
-            "1h" => "1h",
-            "12h" => "12h",
-            "24h" => "24h",
-            _ => "72h",
-        }
+    pub const fn litterbox_time_str(&self) -> &'static str {
+        self.litterbox_expiry.as_str()
     }
 }
 
@@ -575,7 +592,10 @@ litterbox_expiry = "72h"
         assert_eq!(loaded.discord.artwork.image_size, 1024);
         assert_eq!(loaded.discord.artwork.primary_host, "catbox");
         assert_eq!(loaded.discord.artwork.fallback_host, "litterbox");
-        assert_eq!(loaded.discord.artwork.litterbox_expiry, "72h");
+        assert_eq!(
+            loaded.discord.artwork.litterbox_expiry,
+            LitterboxExpiry::SeventyTwoHours
+        );
 
         assert_eq!(loaded.discord.artwork.cache_max_bytes(), 250 * 1024 * 1024);
         assert_eq!(loaded.discord.artwork.max_download_bytes(), 8 * 1024 * 1024);
@@ -584,28 +604,42 @@ litterbox_expiry = "72h"
             72 * 3600
         );
         assert_eq!(loaded.discord.artwork.litterbox_time_str(), "72h");
+
+        let defaults = DiscordConfig::default();
+        assert!(!defaults.enabled);
+        assert!(defaults.artwork_enabled);
+        assert_eq!(defaults.artwork.primary_host, "catbox");
+        assert_eq!(defaults.artwork.fallback_host, "litterbox");
+        assert_eq!(
+            defaults.artwork.litterbox_expiry,
+            LitterboxExpiry::SeventyTwoHours
+        );
     }
 
     #[test]
     fn test_discord_artwork_expiry_variations() {
         let mut art_cfg = DiscordArtworkConfig {
-            litterbox_expiry: "1h".to_string(),
+            litterbox_expiry: LitterboxExpiry::OneHour,
             ..Default::default()
         };
         assert_eq!(art_cfg.litterbox_duration_seconds(), 3600);
         assert_eq!(art_cfg.litterbox_time_str(), "1h");
 
-        art_cfg.litterbox_expiry = "12h".to_string();
+        art_cfg.litterbox_expiry = LitterboxExpiry::TwelveHours;
         assert_eq!(art_cfg.litterbox_duration_seconds(), 12 * 3600);
         assert_eq!(art_cfg.litterbox_time_str(), "12h");
 
-        art_cfg.litterbox_expiry = "24h".to_string();
+        art_cfg.litterbox_expiry = LitterboxExpiry::TwentyFourHours;
         assert_eq!(art_cfg.litterbox_duration_seconds(), 24 * 3600);
         assert_eq!(art_cfg.litterbox_time_str(), "24h");
 
-        art_cfg.litterbox_expiry = "48h".to_string();
-        assert_eq!(art_cfg.litterbox_duration_seconds(), 48 * 3600);
-        assert_eq!(art_cfg.litterbox_time_str(), "72h"); // fallback to standard 72h string for API
+        art_cfg.litterbox_expiry = LitterboxExpiry::SeventyTwoHours;
+        assert_eq!(art_cfg.litterbox_duration_seconds(), 72 * 3600);
+        assert_eq!(art_cfg.litterbox_time_str(), "72h");
+
+        // Unsupported retention durations must fail validation at deserialization time
+        let unsupported = "[discord.artwork]\nlitterbox_expiry = \"48h\"\n";
+        assert!(toml::from_str::<Settings>(unsupported).is_err());
     }
 
     #[test]

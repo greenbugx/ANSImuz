@@ -83,24 +83,34 @@ pub struct ArtworkCache {
     index: CacheIndex,
     content_hash_index: HashMap<String, String>,
     max_cache_bytes: u64,
+    index_dirty: bool,
 }
 
 impl ArtworkCache {
-    /// Initialize or load the artwork cache with a specific storage ceiling (default 250 MB).
-    pub fn load_with_capacity(custom_base_dir: Option<PathBuf>, max_cache_bytes: u64) -> Self {
+    /// Initialize or load the artwork cache, propagating directory/index initialization errors.
+    pub fn try_load_with_capacity(
+        custom_base_dir: Option<PathBuf>,
+        max_cache_bytes: u64,
+    ) -> std::io::Result<Self> {
         let base_dir = custom_base_dir.unwrap_or_else(default_cache_dir);
         let images_dir = base_dir.join("images");
         let index_path = base_dir.join("index.json");
 
-        let _ = fs::create_dir_all(&images_dir);
+        fs::create_dir_all(&images_dir)?;
 
-        let index = if index_path.exists() {
-            fs::read_to_string(&index_path)
-                .ok()
-                .and_then(|data| serde_json::from_str::<CacheIndex>(&data).ok())
-                .unwrap_or_default()
-        } else {
-            CacheIndex::default()
+        let (index, corrupt_index) = match fs::read_to_string(&index_path) {
+            Ok(data) => match serde_json::from_str::<CacheIndex>(&data) {
+                Ok(parsed) => (parsed, false),
+                Err(err) => {
+                    crate::discord::log_discord(&format!(
+                        "[Artwork] Corrupt cache index at {}, resetting: {err}",
+                        index_path.display()
+                    ));
+                    (CacheIndex::default(), true)
+                }
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => (CacheIndex::default(), false),
+            Err(err) => return Err(err),
         };
 
         let mut cache = Self {
@@ -110,6 +120,7 @@ impl ArtworkCache {
             index,
             content_hash_index: HashMap::new(),
             max_cache_bytes,
+            index_dirty: corrupt_index,
         };
 
         // Validate persistent cache and rebuild lookup maps on startup
@@ -119,7 +130,30 @@ impl ArtworkCache {
             crate::discord::log_discord(&format!("[Artwork] Startup LRU prune failed: {err}"));
         }
 
-        cache
+        Ok(cache)
+    }
+
+    /// Initialize or load the artwork cache with a specific storage ceiling (default 250 MB).
+    pub fn load_with_capacity(custom_base_dir: Option<PathBuf>, max_cache_bytes: u64) -> Self {
+        let fallback_dir = custom_base_dir.clone().unwrap_or_else(default_cache_dir);
+        match Self::try_load_with_capacity(custom_base_dir, max_cache_bytes) {
+            Ok(cache) => cache,
+            Err(err) => {
+                crate::discord::log_discord(&format!(
+                    "[Artwork] Cache initialization failed at {}: {err}",
+                    fallback_dir.display()
+                ));
+                Self {
+                    images_dir: fallback_dir.join("images"),
+                    index_path: fallback_dir.join("index.json"),
+                    base_dir: fallback_dir,
+                    index: CacheIndex::default(),
+                    content_hash_index: HashMap::new(),
+                    max_cache_bytes,
+                    index_dirty: false,
+                }
+            }
+        }
     }
 
     /// Initialize or load the artwork cache from the given directory (or default).
@@ -152,11 +186,45 @@ impl ArtworkCache {
         &self.content_hash_index
     }
 
+    /// Deterministic ordering for deduplicating identical `content_hash` entries:
+    /// prefers locally valid records, permanent/Catbox over temporary Litterbox, latest
+    /// `last_accessed` timestamp, later expiration, primary track keys over `url:` keys,
+    /// and finally lexicographical key order so `HashMap` iteration never causes drift.
+    fn hash_candidate_rank<'a>(
+        key: &'a str,
+        record: &CacheRecord,
+        now_secs: u64,
+    ) -> (bool, bool, u64, u64, bool, &'a str) {
+        (
+            is_record_valid(record, now_secs),
+            record.expires_at.is_none(),
+            record.last_accessed.max(record.uploaded_at),
+            record.expires_at.unwrap_or(0),
+            !key.starts_with("url:"),
+            key,
+        )
+    }
+
     fn rebuild_content_hash_index(&mut self) {
+        self.rebuild_content_hash_index_at(current_unix_timestamp());
+    }
+
+    fn rebuild_content_hash_index_at(&mut self, now_secs: u64) {
         self.content_hash_index.clear();
         for (key, record) in &self.index.entries {
-            self.content_hash_index
-                .insert(record.content_hash.clone(), key.clone());
+            let replace = match self.content_hash_index.get(&record.content_hash) {
+                Some(existing_key) => {
+                    self.index.entries.get(existing_key).is_none_or(|existing| {
+                        Self::hash_candidate_rank(key, record, now_secs)
+                            > Self::hash_candidate_rank(existing_key, existing, now_secs)
+                    })
+                }
+                None => true,
+            };
+            if replace {
+                self.content_hash_index
+                    .insert(record.content_hash.clone(), key.clone());
+            }
         }
     }
 
@@ -164,6 +232,39 @@ impl ArtworkCache {
         path.replace('\\', "/")
     }
 
+    /// Recursively collects regular files and non-root subdirectories under `root`.
+    ///
+    /// Artwork cache currently stores images in a flat `images/<sha256>.jpg` layout,
+    /// while recursive collection ensures nested sharded directories are also cleaned.
+    fn collect_files_and_dirs(root: &Path) -> std::io::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+        let mut files = Vec::new();
+        let mut subdirs = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+
+        while let Some(dir) = stack.pop() {
+            for entry in fs::read_dir(&dir)? {
+                let Ok(entry) = entry else {
+                    continue;
+                };
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                let path = entry.path();
+                if file_type.is_dir() {
+                    subdirs.push(path.clone());
+                    stack.push(path);
+                } else if file_type.is_file() {
+                    files.push(path);
+                }
+            }
+        }
+
+        Ok((files, subdirs))
+    }
+
+    /// Removes orphaned image files not referenced by any index entry and prunes empty subdirectories.
+    ///
+    /// Current layout uses flat `images/<sha256>.jpg` files, with recursive traversal to handle nested layouts.
     fn clean_orphaned_images(&self, include_part_files: bool) -> u64 {
         if !self.images_dir.exists() {
             return 0;
@@ -175,16 +276,12 @@ impl ArtworkCache {
             .map(|r| Self::normalize_rel(&r.local_file))
             .collect();
 
-        let Ok(read_dir) = fs::read_dir(&self.images_dir) else {
+        let Ok((files, subdirs)) = Self::collect_files_and_dirs(&self.images_dir) else {
             return 0;
         };
 
         let mut pruned_bytes = 0u64;
-        for entry in read_dir.filter_map(|e| e.ok()) {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
+        for path in files {
             if !include_part_files && path.extension().and_then(|e| e.to_str()) == Some("part") {
                 continue;
             }
@@ -193,12 +290,18 @@ impl ArtworkCache {
             };
             let rel_str = rel.to_string_lossy().replace('\\', "/");
             if !referenced.contains(&rel_str) {
-                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                 if fs::remove_file(&path).is_ok() {
                     pruned_bytes += size;
                 }
             }
         }
+
+        // Remove empty nested directories deepest-first (if any were introduced).
+        for subdir in subdirs.into_iter().rev() {
+            let _ = fs::remove_dir(subdir);
+        }
+
         pruned_bytes
     }
 
@@ -208,13 +311,12 @@ impl ArtworkCache {
     /// 3. Remove invalid local entries.
     /// 4. Check local expiry metadata (purge expired Litterbox entries without deleting shared files).
     /// 5. Retain Catbox mappings with no known expiry.
-    /// 6. Rebuild in-memory lookup maps (content_hash index) and remove orphaned files.
+    /// 6. Rebuild in-memory lookup maps (content_hash index) deterministically and remove orphaned files.
     pub fn validate_and_rebuild_indexes(&mut self, now_secs: u64) -> usize {
         let mut removed = 0;
         let mut dirty = false;
         let mut valid_entries = HashMap::new();
         let mut expired_rel_files = Vec::new();
-        self.content_hash_index.clear();
 
         for (key, mut record) in self.index.entries.drain() {
             let local_path = self.base_dir.join(&record.local_file);
@@ -238,13 +340,11 @@ impl ArtworkCache {
                 dirty = true;
             }
 
-            // Rebuild in-memory content hash index
-            self.content_hash_index
-                .insert(record.content_hash.clone(), key.clone());
             valid_entries.insert(key, record);
         }
 
         self.index.entries = valid_entries;
+        self.rebuild_content_hash_index_at(now_secs);
 
         let referenced_files: HashSet<String> = self
             .index
@@ -263,12 +363,15 @@ impl ArtworkCache {
         // Clean any leftover orphaned files (including stale .part files) at startup
         self.clean_orphaned_images(true);
 
-        if (removed > 0 || dirty)
-            && let Err(err) = self.save_index()
-        {
-            crate::discord::log_discord(&format!(
-                "[Artwork] Failed to save validated index: {err}"
-            ));
+        if removed > 0 || dirty || self.index_dirty {
+            if let Err(err) = self.save_index() {
+                self.index_dirty = true;
+                crate::discord::log_discord(&format!(
+                    "[Artwork] Failed to save validated index: {err}"
+                ));
+            } else {
+                self.index_dirty = false;
+            }
         }
 
         removed
@@ -294,16 +397,13 @@ impl ArtworkCache {
                 .or_insert(recency);
         }
 
+        let (all_files, subdirs) = Self::collect_files_and_dirs(&self.images_dir)?;
         let mut files = Vec::new();
         let mut total_size = 0u64;
         let mut bytes_pruned = 0u64;
 
-        for entry in fs::read_dir(&self.images_dir)?.filter_map(|e| e.ok()) {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            let Ok(meta) = entry.metadata() else {
+        for path in all_files {
+            let Ok(meta) = fs::metadata(&path) else {
                 continue;
             };
             let size = meta.len();
@@ -329,6 +429,9 @@ impl ArtworkCache {
         }
 
         if total_size <= self.max_cache_bytes {
+            for subdir in subdirs.into_iter().rev() {
+                let _ = fs::remove_dir(subdir);
+            }
             return Ok(bytes_pruned);
         }
 
@@ -348,6 +451,10 @@ impl ArtworkCache {
             }
         }
 
+        for subdir in subdirs.into_iter().rev() {
+            let _ = fs::remove_dir(subdir);
+        }
+
         // Remove all index entries pointing to pruned files and rebuild content_hash_index
         if !pruned_rel_paths.is_empty() {
             self.index.entries.retain(|_, record| {
@@ -355,9 +462,12 @@ impl ArtworkCache {
             });
             self.rebuild_content_hash_index();
             if let Err(err) = self.save_index() {
+                self.index_dirty = true;
                 crate::discord::log_discord(&format!(
                     "[Artwork] Failed to save pruned index: {err}"
                 ));
+            } else {
+                self.index_dirty = false;
             }
         }
 
@@ -369,7 +479,7 @@ impl ArtworkCache {
     /// 2. If not found, check the source URL hash.
     /// 3. Check that the local file exists.
     /// 4. Check whether the hosted URL is locally valid according to its known metadata.
-    /// 5. Update `last_accessed` recency timestamp in the index on hit.
+    /// 5. Update `last_accessed` recency timestamp in memory (persisted on next write or `flush()`/`Drop`).
     /// 6. Return the cached result if valid, or `None` to re-resolve.
     pub fn lookup(&mut self, req: &ArtworkRequest, now_secs: u64) -> Option<ArtworkResult> {
         let pkey = make_primary_key(&req.provider, req.track_id.as_deref());
@@ -413,7 +523,7 @@ impl ArtworkCache {
             return None;
         }
 
-        // 5. Update last_accessed recency timestamp for the hit keys
+        // 5. Update last_accessed recency timestamp in memory (deferred until flush/mutation/Drop)
         let mut updated = false;
         if let Some(ref k) = pkey
             && let Some(entry) = self.index.entries.get_mut(k)
@@ -435,10 +545,8 @@ impl ArtworkCache {
             updated = true;
         }
 
-        if updated && let Err(err) = self.save_index() {
-            crate::discord::log_discord(&format!(
-                "[Artwork] Failed to persist cache last_accessed timestamp: {err}"
-            ));
+        if updated {
+            self.index_dirty = true;
         }
 
         // 6. Return the cached result if valid
@@ -448,6 +556,16 @@ impl ArtworkCache {
             local_path: full_local_path,
             content_hash: record.content_hash,
         })
+    }
+
+    /// Persists any deferred in-memory index updates (such as hit recency timestamps) to disk.
+    pub fn flush(&mut self) -> std::io::Result<()> {
+        if !self.index_dirty {
+            return Ok(());
+        }
+        self.save_index()?;
+        self.index_dirty = false;
+        Ok(())
     }
 
     /// Invalidate cached entries matching a request (e.g. if a remote image fails to load).
@@ -473,9 +591,12 @@ impl ArtworkCache {
             self.rebuild_content_hash_index();
             self.clean_orphaned_images(false);
             if let Err(err) = self.save_index() {
+                self.index_dirty = true;
                 crate::discord::log_discord(&format!(
                     "[Artwork] Failed to save index after invalidation: {err}"
                 ));
+            } else {
+                self.index_dirty = false;
             }
         }
 
@@ -493,9 +614,12 @@ impl ArtworkCache {
             self.rebuild_content_hash_index();
             self.clean_orphaned_images(false);
             if let Err(err) = self.save_index() {
+                self.index_dirty = true;
                 crate::discord::log_discord(&format!(
                     "[Artwork] Failed to save index after hosted URL invalidation: {err}"
                 ));
+            } else {
+                self.index_dirty = false;
             }
         }
 
@@ -539,13 +663,11 @@ impl ArtworkCache {
         let primary_key = make_primary_key(&req.provider, req.track_id.as_deref());
         let url_key = make_url_key(&req.source_url);
 
-        let mut needs_hash_rebuild = false;
         let mut replaced_local_files = false;
 
         if let Some(ref pkey) = primary_key
             && let Some(prev) = self.index.entries.get(pkey).cloned()
         {
-            needs_hash_rebuild = true;
             if Self::normalize_rel(&prev.local_file) != Self::normalize_rel(&record.local_file) {
                 replaced_local_files = true;
             }
@@ -563,34 +685,26 @@ impl ArtworkCache {
             }
         }
 
-        if let Some(prev_url) = self.index.entries.get(&url_key) {
-            needs_hash_rebuild = true;
-            if Self::normalize_rel(&prev_url.local_file) != Self::normalize_rel(&record.local_file)
-            {
-                replaced_local_files = true;
-            }
+        if let Some(prev_url) = self.index.entries.get(&url_key)
+            && Self::normalize_rel(&prev_url.local_file) != Self::normalize_rel(&record.local_file)
+        {
+            replaced_local_files = true;
         }
 
-        let content_hash = record.content_hash.clone();
+        let now = record.last_accessed.max(record.uploaded_at);
 
         if let Some(key) = primary_key {
-            self.content_hash_index
-                .insert(content_hash.clone(), key.clone());
             self.index.entries.insert(key, record.clone());
         }
-
-        self.content_hash_index
-            .insert(content_hash, url_key.clone());
         self.index.entries.insert(url_key, record);
 
-        if needs_hash_rebuild {
-            self.rebuild_content_hash_index();
-        }
+        self.rebuild_content_hash_index_at(now);
         if replaced_local_files {
             self.clean_orphaned_images(false);
         }
 
         self.save_index()?;
+        self.index_dirty = false;
         if let Err(err) = self.prune_lru() {
             crate::discord::log_discord(&format!("[Artwork] Failed to prune LRU cache: {err}"));
         }
@@ -633,6 +747,18 @@ impl ArtworkCache {
         }
 
         Ok(())
+    }
+}
+
+impl Drop for ArtworkCache {
+    fn drop(&mut self) {
+        if self.index_dirty && self.base_dir.exists()
+            && let Err(err) = self.flush()
+        {
+            crate::discord::log_discord(&format!(
+                "[Artwork] Failed to flush deferred cache index on drop: {err}"
+            ));
+        }
     }
 }
 
@@ -1223,6 +1349,155 @@ mod tests {
             "shared URL key still used by track_b must stay"
         );
         assert!(shared_file.exists());
+
+        let _ = fs::remove_dir_all(cache.base_dir());
+    }
+
+    #[test]
+    fn lookup_updates_recency_in_memory_without_eager_disk_write_until_flush() {
+        let temp_dir = std::env::temp_dir().join("ansimuz_test_deferred_flush");
+        let _ = fs::remove_dir_all(&temp_dir);
+        let mut cache = ArtworkCache::try_load_with_capacity(Some(temp_dir.clone()), 10_000)
+            .expect("init cache");
+
+        let file_path = cache.images_dir().join("hit.jpg");
+        fs::write(&file_path, b"img-bytes").unwrap();
+
+        let req = ArtworkRequest::new("spotify", Some("hit_1".into()), "https://example.com/hit.jpg");
+        cache
+            .insert_and_save(
+                &req,
+                CacheRecord {
+                    source_url: req.source_url.clone(),
+                    local_file: "images/hit.jpg".to_string(),
+                    hosted_url: "https://files.catbox.moe/hit.jpg".to_string(),
+                    host: HostingProvider::Catbox,
+                    content_hash: "hash_hit".to_string(),
+                    uploaded_at: 1_000,
+                    expires_at: None,
+                    last_accessed: 1_000,
+                },
+            )
+            .unwrap();
+
+        let disk_before_hit = fs::read_to_string(cache.index_path()).unwrap();
+        assert!(cache.lookup(&req, 2_000).is_some());
+        assert!(cache.lookup(&req, 3_000).is_some());
+        assert_eq!(cache.entries()["spotify:hit_1"].last_accessed, 3_000);
+
+        let disk_after_hit = fs::read_to_string(cache.index_path()).unwrap();
+        assert_eq!(
+            disk_before_hit, disk_after_hit,
+            "cache hits must not serialize index.json on every lookup"
+        );
+
+        // Dropping flushes deferred recency updates to disk cleanly
+        drop(cache);
+        let reloaded = ArtworkCache::try_load_with_capacity(Some(temp_dir.clone()), 10_000)
+            .expect("reload cache");
+        assert_eq!(reloaded.entries()["spotify:hit_1"].last_accessed, 3_000);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn rebuild_content_hash_index_picks_most_recent_valid_deterministically() {
+        let mut cache = create_test_cache("deterministic_hash");
+        let now = 50_000u64;
+
+        let shared_file = cache.images_dir().join("dup.jpg");
+        fs::write(&shared_file, b"dup-bytes").unwrap();
+
+        let mut index = CacheIndex::default();
+        index.entries.insert(
+            "spotify:older_cat".into(),
+            CacheRecord {
+                source_url: "https://example.com/older.jpg".into(),
+                local_file: "images/dup.jpg".into(),
+                hosted_url: "https://files.catbox.moe/older.jpg".into(),
+                host: HostingProvider::Catbox,
+                content_hash: "dup_hash".into(),
+                uploaded_at: now - 500,
+                expires_at: None,
+                last_accessed: now - 500,
+            },
+        );
+        index.entries.insert(
+            "spotify:newest_cat".into(),
+            CacheRecord {
+                source_url: "https://example.com/newest.jpg".into(),
+                local_file: "images/dup.jpg".into(),
+                hosted_url: "https://files.catbox.moe/newest.jpg".into(),
+                host: HostingProvider::Catbox,
+                content_hash: "dup_hash".into(),
+                uploaded_at: now - 200,
+                expires_at: None,
+                last_accessed: now - 10,
+            },
+        );
+        index.entries.insert(
+            "spotify:temp_lit".into(),
+            CacheRecord {
+                source_url: "https://example.com/lit.jpg".into(),
+                local_file: "images/dup.jpg".into(),
+                hosted_url: "https://litterbox.catbox.moe/lit.jpg".into(),
+                host: HostingProvider::Litterbox,
+                content_hash: "dup_hash".into(),
+                uploaded_at: now - 5,
+                expires_at: Some(now + 3600),
+                last_accessed: now - 5,
+            },
+        );
+
+        cache.index = index;
+        cache.rebuild_content_hash_index_at(now);
+
+        assert_eq!(
+            cache.content_hash_index().get("dup_hash").map(String::as_str),
+            Some("spotify:newest_cat")
+        );
+
+        let _ = fs::remove_dir_all(cache.base_dir());
+    }
+
+    #[test]
+    fn clean_orphaned_images_removes_nested_orphans_and_empty_subdirs() {
+        let mut cache = create_test_cache("nested_orphans");
+        let now = 50_000u64;
+
+        let kept_subdir = cache.images_dir().join("ab");
+        let empty_orphan_subdir = cache.images_dir().join("cd").join("ef");
+        fs::create_dir_all(&kept_subdir).unwrap();
+        fs::create_dir_all(&empty_orphan_subdir).unwrap();
+
+        let kept_file = kept_subdir.join("kept.jpg");
+        let orphan_file = empty_orphan_subdir.join("orphan.jpg");
+        fs::write(&kept_file, b"kept").unwrap();
+        fs::write(&orphan_file, b"orphan-data").unwrap();
+
+        let req = ArtworkRequest::new("spotify", Some("k1".into()), "https://example.com/k1.jpg");
+        cache
+            .insert_and_save(
+                &req,
+                CacheRecord {
+                    source_url: req.source_url.clone(),
+                    local_file: "images/ab/kept.jpg".to_string(),
+                    hosted_url: "https://files.catbox.moe/kept.jpg".to_string(),
+                    host: HostingProvider::Catbox,
+                    content_hash: "hash_kept".to_string(),
+                    uploaded_at: now,
+                    expires_at: None,
+                    last_accessed: now,
+                },
+            )
+            .unwrap();
+
+        assert!(kept_file.exists(), "referenced nested file must remain");
+        assert!(!orphan_file.exists(), "nested orphan file must be removed");
+        assert!(
+            !cache.images_dir().join("cd").exists(),
+            "empty nested orphan directories must be removed"
+        );
 
         let _ = fs::remove_dir_all(cache.base_dir());
     }

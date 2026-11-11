@@ -1,7 +1,8 @@
 use super::cache::{ArtworkCache, current_unix_timestamp, sha256_hex};
 use super::downloader::ArtworkDownloader;
 use super::types::{
-    ArtworkError, ArtworkRequest, ArtworkResult, CacheRecord, HostConfig, HostingProvider,
+    ArtworkError, ArtworkInitComponent, ArtworkRequest, ArtworkResult, CacheRecord, HostConfig,
+    HostingProvider,
 };
 use super::uploader::{ArtworkUploader, CatboxUploader, LitterboxUploader};
 use crate::config::DiscordArtworkConfig;
@@ -41,20 +42,34 @@ impl ArtworkManager {
         Self::with_config(custom_cache_dir, DiscordArtworkConfig::default())
     }
 
-    /// Creates a new artwork manager with custom configuration, propagating HTTP client errors.
+    /// Creates a new artwork manager with custom configuration, preserving component context on errors.
     pub fn with_config(
         custom_cache_dir: Option<PathBuf>,
         config: DiscordArtworkConfig,
     ) -> Result<Self, ArtworkError> {
         let max_cache_bytes = config.cache_max_bytes();
-        let cache = ArtworkCache::load_with_capacity(custom_cache_dir, max_cache_bytes);
+        let cache =
+            ArtworkCache::try_load_with_capacity(custom_cache_dir, max_cache_bytes).map_err(
+                |e| ArtworkError::InitializationFailed {
+                    component: ArtworkInitComponent::Cache,
+                    message: e.to_string(),
+                },
+            )?;
         let downloader = ArtworkDownloader::new().map_err(|e| {
-            ArtworkError::Io(format!("Failed to initialize artwork downloader: {e}"))
+            ArtworkError::InitializationFailed {
+                component: ArtworkInitComponent::Downloader,
+                message: e.to_string(),
+            }
         })?;
-        let catbox = CatboxUploader::new()
-            .map_err(|e| ArtworkError::Io(format!("Failed to initialize Catbox uploader: {e}")))?;
-        let litterbox = LitterboxUploader::with_expiry(&config.litterbox_expiry).map_err(|e| {
-            ArtworkError::Io(format!("Failed to initialize Litterbox uploader: {e}"))
+        let catbox = CatboxUploader::new().map_err(|e| ArtworkError::InitializationFailed {
+            component: ArtworkInitComponent::CatboxUploader,
+            message: e.to_string(),
+        })?;
+        let litterbox = LitterboxUploader::with_expiry(config.litterbox_expiry).map_err(|e| {
+            ArtworkError::InitializationFailed {
+                component: ArtworkInitComponent::LitterboxUploader,
+                message: e.to_string(),
+            }
         })?;
         Ok(Self {
             cache,
@@ -382,5 +397,29 @@ mod tests {
         assert_eq!(HostConfig::parse("none"), Ok(HostConfig::Disabled));
         assert_eq!(HostConfig::parse(""), Ok(HostConfig::Disabled));
         assert!(HostConfig::parse("imgur").is_err());
+    }
+
+    #[test]
+    fn manager_with_config_preserves_cache_initialization_error_context() {
+        let blocking_file = std::env::temp_dir().join("ansimuz_test_mgr_invalid_cache_file");
+        std::fs::write(&blocking_file, b"not-a-directory").unwrap();
+
+        let res = ArtworkManager::with_config(
+            Some(blocking_file.clone()),
+            DiscordArtworkConfig::default(),
+        );
+        let _ = std::fs::remove_file(&blocking_file);
+
+        let err = match res {
+            Ok(_) => panic!("expected cache initialization failure when base path is a file"),
+            Err(e) => e,
+        };
+        assert!(matches!(
+            err,
+            ArtworkError::InitializationFailed {
+                component: ArtworkInitComponent::Cache,
+                ..
+            }
+        ));
     }
 }

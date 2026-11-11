@@ -1,5 +1,6 @@
 use super::cache::current_unix_timestamp;
 use super::types::{ArtworkError, HostingProvider, UploadedArtwork};
+use crate::config::LitterboxExpiry;
 use reqwest::blocking::multipart::{Form, Part};
 use std::time::Duration;
 
@@ -77,45 +78,33 @@ impl ArtworkUploader for CatboxUploader {
 /// Litterbox image uploader for temporary hosting (configurable retention up to 72h).
 pub struct LitterboxUploader {
     client: reqwest::blocking::Client,
-    time: String,
-    duration_secs: u64,
+    expiry: LitterboxExpiry,
 }
 
 impl LitterboxUploader {
     /// Builds Litterbox uploader client configured for 72h retention fallback.
     pub fn new() -> Result<Self, reqwest::Error> {
-        Self::with_expiry("72h")
+        Self::with_expiry(LitterboxExpiry::default())
     }
 
-    /// Builds Litterbox uploader client with specified expiry period ("1h", "12h", "24h", "72h").
-    pub fn with_expiry(expiry: &str) -> Result<Self, reqwest::Error> {
+    /// Builds Litterbox uploader client with validated retention expiry.
+    pub fn with_expiry(expiry: LitterboxExpiry) -> Result<Self, reqwest::Error> {
         let client =
             super::build_http_client(Duration::from_secs(10), Duration::from_secs(30), None)?;
 
-        let (time, duration_secs) = match expiry.trim() {
-            "1h" => ("1h".to_string(), 3600),
-            "12h" => ("12h".to_string(), 12 * 3600),
-            "24h" => ("24h".to_string(), 24 * 3600),
-            _ => ("72h".to_string(), LITTERBOX_RETENTION_SECS),
-        };
-
-        Ok(Self {
-            client,
-            time,
-            duration_secs,
-        })
+        Ok(Self { client, expiry })
     }
 
     /// Access configured retention duration in seconds.
     #[must_use]
-    pub fn duration_secs(&self) -> u64 {
-        self.duration_secs
+    pub const fn duration_secs(&self) -> u64 {
+        self.expiry.duration_seconds()
     }
 
     /// Access configured retention time string.
     #[must_use]
-    pub fn time_str(&self) -> &str {
-        &self.time
+    pub const fn time_str(&self) -> &'static str {
+        self.expiry.as_str()
     }
 
     /// Uploads normalized image bytes to Litterbox with configured retention.
@@ -130,7 +119,7 @@ impl LitterboxUploader {
 
         let form = Form::new()
             .text("reqtype", "fileupload")
-            .text("time", self.time.clone())
+            .text("time", self.time_str().to_string())
             .part("fileToUpload", part);
 
         let response = self.client.post(LITTERBOX_API_URL).multipart(form).send()?;
@@ -148,7 +137,7 @@ impl LitterboxUploader {
         Ok(UploadedArtwork {
             url: body,
             provider: HostingProvider::Litterbox,
-            expires_at: Some(now + self.duration_secs),
+            expires_at: Some(now + self.duration_secs()),
         })
     }
 }
@@ -176,15 +165,19 @@ mod tests {
 
     #[test]
     fn test_litterbox_uploader_with_expiry() {
-        let u1 = LitterboxUploader::with_expiry("1h").unwrap();
+        let u1 = LitterboxUploader::with_expiry(LitterboxExpiry::OneHour).unwrap();
         assert_eq!(u1.time_str(), "1h");
         assert_eq!(u1.duration_secs(), 3600);
 
-        let u2 = LitterboxUploader::with_expiry("24h").unwrap();
+        let u12 = LitterboxUploader::with_expiry(LitterboxExpiry::TwelveHours).unwrap();
+        assert_eq!(u12.time_str(), "12h");
+        assert_eq!(u12.duration_secs(), 12 * 3600);
+
+        let u2 = LitterboxUploader::with_expiry(LitterboxExpiry::TwentyFourHours).unwrap();
         assert_eq!(u2.time_str(), "24h");
         assert_eq!(u2.duration_secs(), 24 * 3600);
 
-        let u3 = LitterboxUploader::with_expiry("72h").unwrap();
+        let u3 = LitterboxUploader::with_expiry(LitterboxExpiry::SeventyTwoHours).unwrap();
         assert_eq!(u3.time_str(), "72h");
         assert_eq!(u3.duration_secs(), 72 * 3600);
     }
