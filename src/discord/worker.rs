@@ -28,7 +28,7 @@ pub(crate) fn log_discord(msg: &str) {
 }
 
 #[derive(Debug)]
-enum DiscordCommand {
+pub(crate) enum DiscordCommand {
     TrackChanged {
         playback: Box<PlaybackInfo>,
         artwork: Option<ArtworkRequest>,
@@ -122,6 +122,17 @@ impl DiscordWorker {
 
     pub fn clear(&self) {
         let _ = self.sender.send(DiscordCommand::Clear);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn spawn_test_recorder() -> (Self, Receiver<DiscordCommand>) {
+        let (sender, receiver) = channel();
+        let worker = Self {
+            sender,
+            connected: Arc::new(AtomicBool::new(false)),
+            thread_handle: None,
+        };
+        (worker, receiver)
     }
 
     pub fn shutdown(&mut self) {
