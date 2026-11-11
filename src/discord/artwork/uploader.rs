@@ -100,6 +100,43 @@ fn is_accepted_image_mime(mime: &str) -> bool {
     ACCEPTED_IMAGE_MIME_TYPES.contains(&essence.as_str())
 }
 
+fn parse_ascii_u64(raw: &str) -> Option<u64> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || !trimmed.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    trimmed.parse::<u64>().ok()
+}
+
+fn is_valid_byte_zero_content_range(raw: &str) -> bool {
+    let Some((unit, spec)) = raw.trim().split_once(char::is_whitespace) else {
+        return false;
+    };
+    if !unit.eq_ignore_ascii_case("bytes") {
+        return false;
+    }
+    let Some((range_part, total_part)) = spec.trim().split_once('/') else {
+        return false;
+    };
+    let Some((start_str, end_str)) = range_part.trim().split_once('-') else {
+        return false;
+    };
+    let (Some(start), Some(end)) = (parse_ascii_u64(start_str), parse_ascii_u64(end_str)) else {
+        return false;
+    };
+    if start != 0 || start > end {
+        return false;
+    }
+    let total_trimmed = total_part.trim();
+    if total_trimmed == "*" {
+        return true;
+    }
+    let Some(total) = parse_ascii_u64(total_trimmed) else {
+        return false;
+    };
+    total > 0 && end < total
+}
+
 /// Parses an HTTP `Retry-After` header as integer delta-seconds.
 ///
 /// Limitation: This crate has no date/time dependency, so only integer delta-seconds values
@@ -108,7 +145,7 @@ fn is_accepted_image_mime(mime: &str) -> bool {
 fn parse_retry_after_secs(header: Option<&reqwest::header::HeaderValue>) -> Option<u64> {
     header
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.trim().parse::<u64>().ok())
+        .and_then(parse_ascii_u64)
 }
 
 fn format_retry_after_suffix(
@@ -511,7 +548,7 @@ impl ImgdbUploader {
     }
 
     fn verify_returned_image_url(&self, url: &reqwest::Url) -> Result<(), ArtworkError> {
-        let response = match self.client.head(url.clone()).send() {
+        let (response, used_get) = match self.client.head(url.clone()).send() {
             Ok(resp)
                 if matches!(
                     resp.status(),
@@ -520,23 +557,52 @@ impl ImgdbUploader {
                         | StatusCode::NOT_IMPLEMENTED
                 ) =>
             {
-                self.client.get(url.clone()).send()
+                // Request only the first byte so the server does not transmit the full image body.
+                (
+                    self.client
+                        .get(url.clone())
+                        .header(reqwest::header::RANGE, "bytes=0-0")
+                        .send(),
+                    true,
+                )
             }
-            other => other,
-        }
-        .map_err(|e| {
+            other => (other, false),
+        };
+        let response = response.map_err(|e| {
             ArtworkError::InvalidResponse(format!("Imgdb returned URL verification failed: {e}"))
         })?;
 
-        if !response.status().is_success() {
+        let status = response.status();
+        let headers = response.headers();
+
+        if used_get {
+            match status {
+                StatusCode::OK => {}
+                StatusCode::PARTIAL_CONTENT => {
+                    let content_range = headers
+                        .get(reqwest::header::CONTENT_RANGE)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("");
+                    if !is_valid_byte_zero_content_range(content_range) {
+                        return Err(ArtworkError::InvalidResponse(format!(
+                            "Imgdb returned URL GET verification gave HTTP 206 with invalid Content-Range: '{}'",
+                            content_range.trim()
+                        )));
+                    }
+                }
+                _ => {
+                    return Err(ArtworkError::InvalidResponse(format!(
+                        "Imgdb returned URL GET verification gave HTTP {status}"
+                    )));
+                }
+            }
+        } else if status != StatusCode::OK {
             return Err(ArtworkError::InvalidResponse(format!(
-                "Imgdb returned URL verification gave HTTP {}",
-                response.status()
+                "Imgdb returned URL HEAD verification gave HTTP {status}"
             )));
         }
 
-        let content_type = response
-            .headers()
+        let content_type = headers
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
@@ -547,6 +613,17 @@ impl ImgdbUploader {
             )));
         }
 
+        if let Some(len_val) = headers.get(reqwest::header::CONTENT_LENGTH) {
+            let parsed_len = len_val.to_str().ok().and_then(parse_ascii_u64);
+            if parsed_len.is_none_or(|n| n == 0) {
+                return Err(ArtworkError::InvalidResponse(
+                    "Imgdb returned URL served invalid or zero Content-Length".to_string(),
+                ));
+            }
+        }
+
+        // Only headers are required
+        // drop the streaming response without consuming the body.
         Ok(())
     }
 
