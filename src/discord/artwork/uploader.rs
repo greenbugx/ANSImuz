@@ -10,11 +10,7 @@ pub const LITTERBOX_RETENTION_SECS: u64 = LITTERBOX_RETENTION_HOURS * 3600;
 
 /// Common interface for artwork hosting services.
 pub trait ArtworkUploader: Send + Sync {
-    fn upload(
-        &self,
-        image_bytes: &[u8],
-        filename: &str,
-    ) -> Result<UploadedArtwork, ArtworkError>;
+    fn upload(&self, image_bytes: &[u8], filename: &str) -> Result<UploadedArtwork, ArtworkError>;
 }
 
 /// Catbox image uploader implementing anonymous file uploads.
@@ -24,13 +20,9 @@ pub struct CatboxUploader {
 
 impl CatboxUploader {
     /// Builds Catbox uploader client with connection and request timeouts.
-    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        let client = reqwest::blocking::Client::builder()
-            .http1_only()
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(30))
-            .build()?;
+    pub fn new() -> Result<Self, reqwest::Error> {
+        let client =
+            super::build_http_client(Duration::from_secs(10), Duration::from_secs(30), None)?;
         Ok(Self { client })
     }
 
@@ -51,11 +43,7 @@ impl CatboxUploader {
             .part("fileToUpload", part);
 
         // Send POST request
-        let response = self
-            .client
-            .post(CATBOX_API_URL)
-            .multipart(form)
-            .send()?;
+        let response = self.client.post(CATBOX_API_URL).multipart(form).send()?;
 
         // Check HTTP status code
         if !response.status().is_success() {
@@ -72,18 +60,8 @@ impl CatboxUploader {
     }
 }
 
-impl Default for CatboxUploader {
-    fn default() -> Self {
-        Self::new().expect("failed to initialize Catbox HTTP client")
-    }
-}
-
 impl ArtworkUploader for CatboxUploader {
-    fn upload(
-        &self,
-        image_bytes: &[u8],
-        filename: &str,
-    ) -> Result<UploadedArtwork, ArtworkError> {
+    fn upload(&self, image_bytes: &[u8], filename: &str) -> Result<UploadedArtwork, ArtworkError> {
         let url = self
             .upload(image_bytes, filename)
             .map_err(|e| ArtworkError::UploadFailed(format!("Catbox: {e}")))?;
@@ -105,18 +83,14 @@ pub struct LitterboxUploader {
 
 impl LitterboxUploader {
     /// Builds Litterbox uploader client configured for 72h retention fallback.
-    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new() -> Result<Self, reqwest::Error> {
         Self::with_expiry("72h")
     }
 
     /// Builds Litterbox uploader client with specified expiry period ("1h", "12h", "24h", "72h").
-    pub fn with_expiry(expiry: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let client = reqwest::blocking::Client::builder()
-            .http1_only()
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(30))
-            .build()?;
+    pub fn with_expiry(expiry: &str) -> Result<Self, reqwest::Error> {
+        let client =
+            super::build_http_client(Duration::from_secs(10), Duration::from_secs(30), None)?;
 
         let (time, duration_secs) = match expiry.trim() {
             "1h" => ("1h".to_string(), 3600),
@@ -159,11 +133,7 @@ impl LitterboxUploader {
             .text("time", self.time.clone())
             .part("fileToUpload", part);
 
-        let response = self
-            .client
-            .post(LITTERBOX_API_URL)
-            .multipart(form)
-            .send()?;
+        let response = self.client.post(LITTERBOX_API_URL).multipart(form).send()?;
 
         if !response.status().is_success() {
             return Err(format!("Litterbox returned HTTP status {}", response.status()).into());
@@ -183,18 +153,8 @@ impl LitterboxUploader {
     }
 }
 
-impl Default for LitterboxUploader {
-    fn default() -> Self {
-        Self::new().expect("failed to initialize Litterbox HTTP client")
-    }
-}
-
 impl ArtworkUploader for LitterboxUploader {
-    fn upload(
-        &self,
-        image_bytes: &[u8],
-        filename: &str,
-    ) -> Result<UploadedArtwork, ArtworkError> {
+    fn upload(&self, image_bytes: &[u8], filename: &str) -> Result<UploadedArtwork, ArtworkError> {
         self.upload(image_bytes, filename)
             .map_err(|e| ArtworkError::UploadFailed(format!("Litterbox: {e}")))
     }
@@ -235,7 +195,11 @@ mod tests {
         let uploader = CatboxUploader::new().unwrap();
         let img = image::DynamicImage::new_rgb8(10, 10);
         let mut jpeg = Vec::new();
-        img.write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg).unwrap();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut jpeg),
+            image::ImageFormat::Jpeg,
+        )
+        .unwrap();
         let res = uploader.upload(&jpeg, "test.jpg");
         println!("Result: {:?}", res);
         assert!(res.is_ok());

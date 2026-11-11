@@ -1,7 +1,7 @@
 use crate::config::DiscordConfig;
 use crate::discord::activity::{PlaybackInfo, build_activity};
-use crate::discord::artwork::worker::{ArtworkEvent, ArtworkWorker};
 use crate::discord::artwork::types::{ArtworkError, ArtworkRequest, ArtworkResult};
+use crate::discord::artwork::worker::{ArtworkEvent, ArtworkWorker};
 use crate::discord::client::DiscordClient;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -28,8 +28,11 @@ pub(crate) fn log_discord(msg: &str) {
 }
 
 #[derive(Debug)]
-pub enum DiscordCommand {
-    TrackChanged(PlaybackInfo),
+enum DiscordCommand {
+    TrackChanged {
+        playback: PlaybackInfo,
+        artwork: Option<ArtworkRequest>,
+    },
     PositionChanged {
         position: Duration,
         duration: Option<Duration>,
@@ -38,7 +41,6 @@ pub enum DiscordCommand {
     Resumed(Duration),
     Clear,
     Shutdown,
-    #[doc(hidden)]
     ArtworkResolved {
         generation: u64,
         result: Result<ArtworkResult, ArtworkError>,
@@ -69,7 +71,13 @@ impl DiscordWorker {
         let thread_handle = thread::Builder::new()
             .name("discord-rpc-worker".to_string())
             .spawn(move || {
-                run_worker_loop(&client_id, receiver, connected_flag, internal_sender, config);
+                run_worker_loop(
+                    &client_id,
+                    receiver,
+                    connected_flag,
+                    internal_sender,
+                    config,
+                );
             })?;
 
         Ok(Self {
@@ -83,12 +91,10 @@ impl DiscordWorker {
         self.connected.load(Ordering::Relaxed)
     }
 
-    pub fn sender(&self) -> &Sender<DiscordCommand> {
-        &self.sender
-    }
-
-    pub fn track_changed(&self, info: PlaybackInfo) {
-        let _ = self.sender.send(DiscordCommand::TrackChanged(info));
+    pub fn track_changed(&self, playback: PlaybackInfo, artwork: Option<ArtworkRequest>) {
+        let _ = self
+            .sender
+            .send(DiscordCommand::TrackChanged { playback, artwork });
     }
 
     pub fn position_changed(&self, pos: Duration) {
@@ -156,14 +162,19 @@ fn run_worker_loop(
     // Dedicated artwork worker keeping network operations off the playback path
     let mut artwork_worker = if config.artwork_enabled {
         let tx_clone = internal_sender;
-        match ArtworkWorker::spawn_with_forwarder(config.artwork.clone(), move |event| match event {
-            ArtworkEvent::Resolved { generation, result } => {
-                let _ = tx_clone.send(DiscordCommand::ArtworkResolved { generation, result });
-            }
-        }) {
+        match ArtworkWorker::spawn_with_forwarder(
+            config.artwork.clone(),
+            move |event| match event {
+                ArtworkEvent::Resolved { generation, result } => {
+                    let _ = tx_clone.send(DiscordCommand::ArtworkResolved { generation, result });
+                }
+            },
+        ) {
             Ok(w) => Some(w),
             Err(e) => {
-                log_discord(&format!("[Discord RPC] Failed to spawn artwork worker: {e}"));
+                log_discord(&format!(
+                    "[Discord RPC] Failed to spawn artwork worker: {e}"
+                ));
                 None
             }
         }
@@ -197,14 +208,14 @@ fn run_worker_loop(
 
         match receiver.recv_timeout(timeout) {
             Ok(cmd) => match cmd {
-                DiscordCommand::TrackChanged(info) => {
+                DiscordCommand::TrackChanged { playback, artwork } => {
                     // Generation tracking
                     current_generation += 1;
                     let generation = current_generation;
 
                     log_discord(&format!(
                         "[Discord RPC] Track changed (gen {generation}): {} — {}",
-                        info.title, info.artist
+                        playback.title, playback.artist
                     ));
 
                     // Publish initial activity immediately using default fallback asset ("logo")
@@ -214,24 +225,19 @@ fn run_worker_loop(
                         &connected_flag,
                         &mut next_reconnect_at,
                         &mut current_backoff,
-                        &info,
+                        &playback,
                     );
 
                     // Request artwork resolution in parallel without blocking if enabled
                     if config.artwork_enabled
-                        && let Some(ref art_url) = info.art_url
-                        && !art_url.trim().is_empty()
+                        && let Some(req) = artwork
+                        && !req.source_url.trim().is_empty()
                         && let Some(ref aw) = artwork_worker
                     {
-                        let req = ArtworkRequest::new(
-                            info.provider.clone().unwrap_or_else(|| "unknown".to_string()),
-                            info.track_id.clone(),
-                            art_url.clone(),
-                        );
                         aw.resolve(generation, req);
                     }
 
-                    current_playback = Some(info);
+                    current_playback = Some(playback);
                 }
                 DiscordCommand::ArtworkResolved { generation, result } => {
                     // Only apply resolved artwork if generation matches currently playing track
@@ -472,11 +478,13 @@ mod tests {
     fn test_worker_lifecycle_and_channel_drain() {
         let mut worker = DiscordWorker::spawn("dummy_id").expect("spawn worker");
         assert!(!worker.is_connected());
-        let track = PlaybackInfo::new("Title", "Artist")
-            .with_provider("ytmusic")
-            .with_track_id("vid1")
-            .with_art_url("https://example.com/art.jpg");
-        worker.track_changed(track);
+        let track = PlaybackInfo::new("Title", "Artist");
+        let artwork = ArtworkRequest::new(
+            "ytmusic",
+            Some("vid1".into()),
+            "https://example.com/art.jpg",
+        );
+        worker.track_changed(track, Some(artwork));
         worker.position_changed(Duration::from_secs(10));
         worker.paused();
         worker.resumed(Duration::from_secs(10));
@@ -490,7 +498,7 @@ mod tests {
         let track = PlaybackInfo::new("Title", "Artist")
             .with_position(Duration::from_secs(10))
             .with_duration(Duration::from_secs(300));
-        worker.track_changed(track);
+        worker.track_changed(track, None);
 
         // Small incremental tick (<= 2s should not trigger redundant seek)
         worker.position_changed(Duration::from_secs(11));
@@ -520,7 +528,7 @@ mod tests {
         // Start track with unknown duration
         let track = PlaybackInfo::new("Stream Title", "Stream Artist");
         assert!(track.duration.is_none());
-        worker.track_changed(track);
+        worker.track_changed(track, None);
 
         // First position update delivers newly discovered duration from MPV
         worker.playback_progress(Duration::from_secs(1), Some(Duration::from_secs(210)));
@@ -534,12 +542,14 @@ mod tests {
         let mut worker = DiscordWorker::spawn("dummy_id").expect("spawn worker");
 
         // Track changed: publish new title and artist, trigger asynchronous artwork resolve
-        let track = PlaybackInfo::new("Track A", "Artist A")
-            .with_provider("spotify")
-            .with_track_id("track_1")
-            .with_art_url("https://example.com/art.jpg")
-            .with_duration(Duration::from_secs(180));
-        worker.track_changed(track);
+        let track =
+            PlaybackInfo::new("Track A", "Artist A").with_duration(Duration::from_secs(180));
+        let artwork = ArtworkRequest::new(
+            "spotify",
+            Some("track_1".into()),
+            "https://example.com/art.jpg",
+        );
+        worker.track_changed(track, Some(artwork));
 
         // Position changed: update timestamps, never trigger artwork upload
         worker.playback_progress(Duration::from_secs(5), Some(Duration::from_secs(180)));

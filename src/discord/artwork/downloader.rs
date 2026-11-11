@@ -31,13 +31,18 @@ pub fn normalize_image(img: DynamicImage) -> Result<(Vec<u8>, String), String> {
 }
 
 /// Normalizes image with a configurable target side constraint.
-pub fn normalize_image_with_side(img: DynamicImage, target_side: u32) -> Result<(Vec<u8>, String), String> {
+pub fn normalize_image_with_side(
+    img: DynamicImage,
+    target_side: u32,
+) -> Result<(Vec<u8>, String), String> {
     let (w, h) = img.dimensions();
     if w < MIN_DIMENSION || h < MIN_DIMENSION {
         return Err(format!("Image dimensions ({w}x{h}) are too small"));
     }
     if w > MAX_DIMENSION || h > MAX_DIMENSION {
-        return Err(format!("Image dimensions ({w}x{h}) exceed maximum allowed ({MAX_DIMENSION})"));
+        return Err(format!(
+            "Image dimensions ({w}x{h}) exceed maximum allowed ({MAX_DIMENSION})"
+        ));
     }
 
     // Resize to fit within target_side x target_side while preserving aspect ratio (do not stretch)
@@ -53,7 +58,10 @@ pub fn normalize_image_with_side(img: DynamicImage, target_side: u32) -> Result<
     // Encode to standard JPEG
     let mut encoded = Vec::new();
     image::DynamicImage::ImageRgb8(rgb)
-        .write_to(&mut std::io::Cursor::new(&mut encoded), image::ImageFormat::Jpeg)
+        .write_to(
+            &mut std::io::Cursor::new(&mut encoded),
+            image::ImageFormat::Jpeg,
+        )
         .map_err(|e| format!("Failed to encode artwork to JPEG: {e}"))?;
 
     let hash = sha256_hex(&encoded);
@@ -67,14 +75,12 @@ pub struct ArtworkDownloader {
 
 impl ArtworkDownloader {
     /// Initializes an artwork downloader with a pooled HTTP/1.1 client, redirect limit, and timeouts.
-    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        let client = reqwest::blocking::Client::builder()
-            .http1_only()
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-            .redirect(reqwest::redirect::Policy::limited(5))
-            .connect_timeout(Duration::from_secs(8))
-            .timeout(Duration::from_secs(15))
-            .build()?;
+    pub fn new() -> Result<Self, reqwest::Error> {
+        let client = super::build_http_client(
+            Duration::from_secs(8),
+            Duration::from_secs(15),
+            Some(reqwest::redirect::Policy::limited(5)),
+        )?;
         Ok(Self { client })
     }
 
@@ -109,13 +115,19 @@ impl ArtworkDownloader {
 
         // Check HTTP status code
         if !response.status().is_success() {
-            return Err(format!("HTTP request failed with status: {}", response.status()));
+            return Err(format!(
+                "HTTP request failed with status: {}",
+                response.status()
+            ));
         }
 
         // Check Content-Type header if present
         if let Some(content_type) = response.headers().get(reqwest::header::CONTENT_TYPE) {
             let ct = content_type.to_str().unwrap_or_default().to_lowercase();
-            if !ct.starts_with("image/") && !ct.starts_with("application/octet-stream") && !ct.is_empty() {
+            if !ct.starts_with("image/")
+                && !ct.starts_with("application/octet-stream")
+                && !ct.is_empty()
+            {
                 return Err(format!("Response is not an image (Content-Type: {ct})"));
             }
         }
@@ -200,12 +212,6 @@ impl ArtworkDownloader {
     }
 }
 
-impl Default for ArtworkDownloader {
-    fn default() -> Self {
-        Self::new().expect("failed to initialize artwork downloader HTTP client")
-    }
-}
-
 /// Download artwork from an HTTPS URL and normalize it to the cache `images/` directory.
 pub fn download_and_normalize(url: &str, images_dir: &Path) -> Result<DownloadedArtwork, String> {
     download_and_normalize_with_limits(url, images_dir, MAX_IMAGE_BYTES, TARGET_MAX_SIDE)
@@ -229,7 +235,7 @@ mod tests {
 
     #[test]
     fn normalize_image_preserves_aspect_ratio_and_resizes() {
-        // Create 2000x1000 image 
+        // Create 2000x1000 image
         // 2:1 aspect ratio
         let img = image::RgbaImage::new(2000, 1000);
         let dyn_img = DynamicImage::ImageRgba8(img);
@@ -267,4 +273,3 @@ mod tests {
         assert!(res.unwrap_err().contains("HTTPS"));
     }
 }
-

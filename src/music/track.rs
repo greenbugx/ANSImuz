@@ -365,8 +365,11 @@ mod tests {
             dict.set_item("artist", "Jody Wisternoff, Booka Shade")
                 .unwrap();
             dict.set_item("album", "Night Falls Album").unwrap();
-            dict.set_item("art_url", "https://img.youtube.com/vi/vid_123/maxresdefault.jpg")
-                .unwrap();
+            dict.set_item(
+                "art_url",
+                "https://img.youtube.com/vi/vid_123/maxresdefault.jpg",
+            )
+            .unwrap();
             dict.set_item("stream_url", "https://youtube.com/watch?v=vid_123")
                 .unwrap();
 

@@ -807,12 +807,10 @@ mod tests {
         let mut app = App::new();
         let theme = Theme::new(None);
         app.enqueue(
-            Track::new("First Queue Song", "Queue Artist")
-                .with_stream_url("http://stream/1"),
+            Track::new("First Queue Song", "Queue Artist").with_stream_url("http://stream/1"),
         );
         app.enqueue(
-            Track::new("Second Queue Song", "Queue Artist 2")
-                .with_stream_url("http://stream/2"),
+            Track::new("Second Queue Song", "Queue Artist 2").with_stream_url("http://stream/2"),
         );
         app.tracks = vec![Track::new("Search Track", "Search Artist")];
         app.selected = 0;

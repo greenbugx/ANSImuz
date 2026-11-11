@@ -1,6 +1,8 @@
 use super::cache::{ArtworkCache, current_unix_timestamp, sha256_hex};
 use super::downloader::ArtworkDownloader;
-use super::types::{ArtworkError, ArtworkRequest, ArtworkResult, CacheRecord, HostingProvider};
+use super::types::{
+    ArtworkError, ArtworkRequest, ArtworkResult, CacheRecord, HostConfig, HostingProvider,
+};
 use super::uploader::{ArtworkUploader, CatboxUploader, LitterboxUploader};
 use crate::config::DiscordArtworkConfig;
 use std::collections::HashMap;
@@ -35,32 +37,36 @@ pub struct ArtworkManager {
 
 impl ArtworkManager {
     /// Creates a new artwork manager with default settings.
-    #[must_use]
-    pub fn new(custom_cache_dir: Option<PathBuf>) -> Self {
+    pub fn new(custom_cache_dir: Option<PathBuf>) -> Result<Self, ArtworkError> {
         Self::with_config(custom_cache_dir, DiscordArtworkConfig::default())
     }
 
-    /// Creates a new artwork manager with custom configuration.
-    #[must_use]
+    /// Creates a new artwork manager with custom configuration, propagating HTTP client errors.
     pub fn with_config(
         custom_cache_dir: Option<PathBuf>,
         config: DiscordArtworkConfig,
-    ) -> Self {
+    ) -> Result<Self, ArtworkError> {
         let max_cache_bytes = config.cache_max_bytes();
         let cache = ArtworkCache::load_with_capacity(custom_cache_dir, max_cache_bytes);
-        let litterbox = LitterboxUploader::with_expiry(&config.litterbox_expiry)
-            .unwrap_or_default();
-        Self {
+        let downloader = ArtworkDownloader::new().map_err(|e| {
+            ArtworkError::Io(format!("Failed to initialize artwork downloader: {e}"))
+        })?;
+        let catbox = CatboxUploader::new()
+            .map_err(|e| ArtworkError::Io(format!("Failed to initialize Catbox uploader: {e}")))?;
+        let litterbox = LitterboxUploader::with_expiry(&config.litterbox_expiry).map_err(|e| {
+            ArtworkError::Io(format!("Failed to initialize Litterbox uploader: {e}"))
+        })?;
+        Ok(Self {
             cache,
-            downloader: ArtworkDownloader::default(),
-            catbox: CatboxUploader::default(),
+            downloader,
+            catbox,
             litterbox,
             config,
             failure_cooldowns: HashMap::new(),
             failure_cooldown_duration: DEFAULT_FAILURE_COOLDOWN,
             catbox_failure: None,
             catbox_cooldown_duration: DEFAULT_CATBOX_COOLDOWN,
-        }
+        })
     }
 
     /// Access configuration.
@@ -109,7 +115,8 @@ impl ArtworkManager {
     }
 
     fn record_failure(&mut self, identity: &str) {
-        self.failure_cooldowns.insert(identity.to_string(), Instant::now());
+        self.failure_cooldowns
+            .insert(identity.to_string(), Instant::now());
     }
 
     fn clear_failure(&mut self, identity: &str) {
@@ -126,10 +133,7 @@ impl ArtworkManager {
     /// 7. Fall back to Litterbox.
     /// 8. Persist cache entry.
     /// 9. Return hosted artwork.
-    pub fn resolve(
-        &mut self,
-        request: ArtworkRequest,
-    ) -> Result<ArtworkResult, ArtworkError> {
+    pub fn resolve(&mut self, request: ArtworkRequest) -> Result<ArtworkResult, ArtworkError> {
         let identity = artwork_identity(&request);
         let now = current_unix_timestamp();
 
@@ -157,11 +161,11 @@ impl ArtworkManager {
 
     fn upload_to_host(
         &mut self,
-        host: &str,
+        host: HostingProvider,
         bytes: &[u8],
     ) -> Result<(String, HostingProvider, Option<u64>), ArtworkError> {
         let uploaded = match host {
-            "catbox" => {
+            HostingProvider::Catbox => {
                 if self.is_catbox_cooling_down() {
                     return Err(ArtworkError::CooldownActive);
                 }
@@ -172,8 +176,9 @@ impl ArtworkManager {
                 }
                 result?
             }
-            "litterbox" => ArtworkUploader::upload(&self.litterbox, bytes, "art.jpg")?,
-            other => return Err(ArtworkError::UploadFailed(format!("Unsupported host: {other}"))),
+            HostingProvider::Litterbox => {
+                ArtworkUploader::upload(&self.litterbox, bytes, "art.jpg")?
+            }
         };
         Ok((uploaded.url, uploaded.provider, uploaded.expires_at))
     }
@@ -198,33 +203,46 @@ impl ArtworkManager {
 
         // Check for duplicate content using in-memory content hash index
         // Tracks sharing the same cover don't cause duplicate uploads!
-        let (hosted_url, host, expires_at) = if let Some(existing) =
-            self.cache.find_reusable_upload(&downloaded.content_hash, now)
+        let (hosted_url, host, expires_at) = if let Some(existing) = self
+            .cache
+            .find_reusable_upload(&downloaded.content_hash, now)
         {
-            (existing.hosted_url.clone(), existing.host, existing.expires_at)
+            (
+                existing.hosted_url.clone(),
+                existing.host,
+                existing.expires_at,
+            )
         } else {
-            let primary = self.config.primary_host.trim().to_lowercase();
-            let fallback = self.config.fallback_host.trim().to_lowercase();
+            let primary = HostConfig::parse(&self.config.primary_host)?
+                .as_provider()
+                .ok_or_else(|| {
+                    ArtworkError::UploadFailed("Primary artwork host is disabled".to_string())
+                })?;
+            let fallback_cfg = HostConfig::parse(&self.config.fallback_host);
 
-            let upload_res = match self.upload_to_host(&primary, &downloaded.bytes) {
-                Ok(res) => Ok(res),
-                Err(primary_err) => {
-                    if !fallback.is_empty() && fallback != primary && fallback != "none" {
+            match self.upload_to_host(primary, &downloaded.bytes) {
+                Ok(res) => res,
+                Err(primary_err) => match fallback_cfg {
+                    Ok(HostConfig::Provider(fallback)) if fallback != primary => {
                         crate::discord::log_discord(&format!(
                             "Warning: {primary} upload failed ({primary_err}), falling back to {fallback}"
                         ));
-                        self.upload_to_host(&fallback, &downloaded.bytes)
-                            .map_err(|fb_err| {
+                        self.upload_to_host(fallback, &downloaded.bytes).map_err(
+                            |fb_err| {
                                 ArtworkError::UploadFailed(format!(
                                     "Both {primary} ({primary_err}) and {fallback} ({fb_err}) uploads failed"
                                 ))
-                            })
-                    } else {
-                        Err(primary_err)
+                            },
+                        )?
                     }
-                }
-            };
-            upload_res?
+                    Ok(_) => return Err(primary_err),
+                    Err(fb_err) => {
+                        return Err(ArtworkError::UploadFailed(format!(
+                            "Primary {primary} failed ({primary_err}); invalid fallback host ({fb_err})"
+                        )));
+                    }
+                },
+            }
         };
 
         // Persist cache entry atomically without failing artwork publication if index save errors
@@ -239,9 +257,7 @@ impl ArtworkManager {
             last_accessed: now,
         };
         if let Err(err) = self.cache.insert_and_save(request, record) {
-            crate::discord::log_discord(&format!(
-                "[Artwork] Failed to persist cache entry: {err}"
-            ));
+            crate::discord::log_discord(&format!("[Artwork] Failed to persist cache entry: {err}"));
         }
 
         // Return hosted artwork
@@ -266,10 +282,7 @@ impl ArtworkManager {
     }
 
     /// Invalidates any existing cache mapping (including its stale remote URL) and re-resolves freshly.
-    pub fn refresh(
-        &mut self,
-        request: ArtworkRequest,
-    ) -> Result<ArtworkResult, ArtworkError> {
+    pub fn refresh(&mut self, request: ArtworkRequest) -> Result<ArtworkResult, ArtworkError> {
         let now = current_unix_timestamp();
         let identity = artwork_identity(&request);
         self.clear_failure(&identity);
@@ -295,7 +308,12 @@ impl ArtworkManager {
 
         match self.resolve(req.clone()) {
             Ok(result) => result.hosted_url,
-            Err(_) => crate::discord::activity::DEFAULT_LARGE_IMAGE.to_string(),
+            Err(err) => {
+                crate::discord::log_discord(&format!(
+                    "[Artwork] Failed to resolve artwork asset key (using default): {err}"
+                ));
+                crate::discord::activity::DEFAULT_LARGE_IMAGE.to_string()
+            }
         }
     }
 }
@@ -306,13 +324,20 @@ mod tests {
 
     #[test]
     fn manager_fallback_to_default_asset_on_none_or_error() {
-        let mut manager = ArtworkManager::new(None);
-        assert_eq!(manager.resolve_asset_key(None), crate::discord::activity::DEFAULT_LARGE_IMAGE);
+        let mut manager = ArtworkManager::new(None).expect("artwork manager init");
+        assert_eq!(
+            manager.resolve_asset_key(None),
+            crate::discord::activity::DEFAULT_LARGE_IMAGE
+        );
     }
 
     #[test]
     fn manager_cooldown_and_identity_generation() {
-        let req = ArtworkRequest::new("ytmusic", Some("vid123".into()), "https://example.com/art.jpg");
+        let req = ArtworkRequest::new(
+            "ytmusic",
+            Some("vid123".into()),
+            "https://example.com/art.jpg",
+        );
         let id = artwork_identity(&req);
         assert_eq!(id, "ytmusic:vid123");
 
@@ -320,7 +345,7 @@ mod tests {
         let id_url = artwork_identity(&req_no_id);
         assert!(id_url.starts_with("url:"));
 
-        let mut manager = ArtworkManager::new(None);
+        let mut manager = ArtworkManager::new(None).expect("artwork manager init");
         assert!(!manager.is_cooling_down(&id));
         manager.record_failure(&id);
         assert!(manager.is_cooling_down(&id));
@@ -330,7 +355,7 @@ mod tests {
 
     #[test]
     fn manager_catbox_cooldown_tracking() {
-        let mut manager = ArtworkManager::new(None);
+        let mut manager = ArtworkManager::new(None).expect("artwork manager init");
         assert!(!manager.is_catbox_cooling_down());
         manager.record_catbox_failure();
         assert!(manager.is_catbox_cooling_down());
@@ -342,5 +367,20 @@ mod tests {
         assert!(manager.is_catbox_cooling_down());
         std::thread::sleep(Duration::from_millis(25));
         assert!(!manager.is_catbox_cooling_down());
+    }
+
+    #[test]
+    fn manager_host_config_parsing() {
+        assert_eq!(
+            HostConfig::parse(" CatBox "),
+            Ok(HostConfig::Provider(HostingProvider::Catbox))
+        );
+        assert_eq!(
+            HostConfig::parse("litterbox"),
+            Ok(HostConfig::Provider(HostingProvider::Litterbox))
+        );
+        assert_eq!(HostConfig::parse("none"), Ok(HostConfig::Disabled));
+        assert_eq!(HostConfig::parse(""), Ok(HostConfig::Disabled));
+        assert!(HostConfig::parse("imgur").is_err());
     }
 }

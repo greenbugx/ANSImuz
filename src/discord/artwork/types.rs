@@ -12,12 +12,31 @@ pub struct ArtworkRequest {
 
 impl ArtworkRequest {
     #[must_use]
-    pub fn new(provider: impl Into<String>, track_id: Option<String>, source_url: impl Into<String>) -> Self {
+    pub fn new(
+        provider: impl Into<String>,
+        track_id: Option<String>,
+        source_url: impl Into<String>,
+    ) -> Self {
         Self {
             provider: provider.into(),
             track_id,
             source_url: source_url.into(),
         }
+    }
+
+    /// Extracts an artwork resolution request from a track when a non-empty artwork URL is present.
+    #[must_use]
+    pub fn from_track(track: &crate::music::Track) -> Option<Self> {
+        let art_url = track
+            .art_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())?;
+        Some(Self::new(
+            track.provider.clone(),
+            track.track_id.clone(),
+            art_url.to_string(),
+        ))
     }
 }
 
@@ -28,6 +47,46 @@ pub struct ArtworkResult {
     pub hosted_url: String,
     pub local_path: PathBuf,
     pub content_hash: String,
+}
+
+/// Configured artwork hosting target parsed from configuration strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostConfig {
+    Disabled,
+    Provider(HostingProvider),
+}
+
+impl HostConfig {
+    /// Parses a host configuration value
+    // "catbox", "litterbox", "none", or empty).
+    pub fn parse(value: &str) -> Result<Self, ArtworkError> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "catbox" => Ok(Self::Provider(HostingProvider::Catbox)),
+            "litterbox" => Ok(Self::Provider(HostingProvider::Litterbox)),
+            "" | "none" => Ok(Self::Disabled),
+            other => Err(ArtworkError::UploadFailed(format!(
+                "Unsupported host: {other}"
+            ))),
+        }
+    }
+
+    /// Returns the concrete hosting provider when enabled.
+    #[must_use]
+    pub fn as_provider(self) -> Option<HostingProvider> {
+        match self {
+            Self::Disabled => None,
+            Self::Provider(provider) => Some(provider),
+        }
+    }
+}
+
+impl fmt::Display for HostConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Disabled => write!(f, "none"),
+            Self::Provider(provider) => provider.fmt(f),
+        }
+    }
 }
 
 /// Supported third-party image hosting providers.
@@ -113,5 +172,3 @@ impl fmt::Display for ArtworkError {
 }
 
 impl std::error::Error for ArtworkError {}
-
-

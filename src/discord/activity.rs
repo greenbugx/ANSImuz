@@ -1,5 +1,5 @@
-use presenceforge::{ActivityBuilder, ActivityType};
 use presenceforge::activity::Activity;
+use presenceforge::{ActivityBuilder, ActivityType};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_LARGE_IMAGE: &str = "logo";
@@ -16,9 +16,6 @@ pub struct PlaybackInfo {
     pub duration: Option<Duration>,
     pub is_paused: bool,
     pub stream_url: Option<String>,
-    pub provider: Option<String>,
-    pub track_id: Option<String>,
-    pub art_url: Option<String>,
     pub large_image: Option<String>,
     pub large_text: Option<String>,
     pub small_image: Option<String>,
@@ -35,9 +32,6 @@ impl PlaybackInfo {
             duration: None,
             is_paused: false,
             stream_url: None,
-            provider: None,
-            track_id: None,
-            art_url: None,
             large_image: None,
             large_text: None,
             small_image: None,
@@ -70,21 +64,6 @@ impl PlaybackInfo {
         self
     }
 
-    pub fn with_provider(mut self, provider: impl Into<String>) -> Self {
-        self.provider = Some(provider.into());
-        self
-    }
-
-    pub fn with_track_id(mut self, track_id: impl Into<String>) -> Self {
-        self.track_id = Some(track_id.into());
-        self
-    }
-
-    pub fn with_art_url(mut self, art_url: impl Into<String>) -> Self {
-        self.art_url = Some(art_url.into());
-        self
-    }
-
     pub fn with_large_image(mut self, image: impl Into<String>) -> Self {
         self.large_image = Some(image.into());
         self
@@ -103,6 +82,19 @@ impl PlaybackInfo {
     pub fn with_small_text(mut self, text: impl Into<String>) -> Self {
         self.small_text = Some(text.into());
         self
+    }
+}
+
+impl From<&crate::music::Track> for PlaybackInfo {
+    fn from(track: &crate::music::Track) -> Self {
+        let mut info = Self::new(&track.title, &track.artist);
+        if let Some(album) = &track.album {
+            info = info.with_album(album);
+        }
+        if let Some(dur_ms) = track.duration_ms {
+            info = info.with_duration(Duration::from_millis(dur_ms));
+        }
+        info
     }
 }
 
@@ -272,7 +264,10 @@ mod tests {
         let activity = build_activity(&info);
         assert!(activity.validate().is_ok());
         let assets = activity.assets.as_ref().expect("assets should exist");
-        assert_eq!(assets.large_image.as_deref(), Some("https://files.catbox.moe/abc123.jpg"));
+        assert_eq!(
+            assets.large_image.as_deref(),
+            Some("https://files.catbox.moe/abc123.jpg")
+        );
         assert_eq!(assets.large_text.as_deref(), Some("Movements"));
         assert_eq!(assets.small_image.as_deref(), Some(DEFAULT_SMALL_IMAGE));
         assert_eq!(assets.small_text.as_deref(), Some(DEFAULT_SMALL_TEXT));
@@ -317,7 +312,12 @@ mod tests {
         // Paused state: timestamps removed/omitted, artwork preserved
         let paused_activity = build_activity(&info);
         assert_eq!(
-            paused_activity.assets.as_ref().unwrap().large_image.as_deref(),
+            paused_activity
+                .assets
+                .as_ref()
+                .unwrap()
+                .large_image
+                .as_deref(),
             Some("https://files.catbox.moe/abc123.jpg")
         );
         if let Some(ts) = paused_activity.timestamps.as_ref() {
@@ -330,7 +330,12 @@ mod tests {
         info.position = Some(Duration::from_secs(50));
         let resumed_activity = build_activity(&info);
         assert_eq!(
-            resumed_activity.assets.as_ref().unwrap().large_image.as_deref(),
+            resumed_activity
+                .assets
+                .as_ref()
+                .unwrap()
+                .large_image
+                .as_deref(),
             Some("https://files.catbox.moe/abc123.jpg")
         );
         let ts = resumed_activity
@@ -426,9 +431,7 @@ mod tests {
         ];
 
         for (activity_type, expected) in cases {
-            let activity = ActivityBuilder::new()
-                .activity_type(activity_type)
-                .build();
+            let activity = ActivityBuilder::new().activity_type(activity_type).build();
 
             let json = serde_json::to_value(activity).unwrap();
 
@@ -446,9 +449,33 @@ mod tests {
 
     #[test]
     fn activity_type_deserializes_from_json() {
-        let activity: Activity =
-            serde_json::from_str(r#"{"type": 2}"#).unwrap();
+        let activity: Activity = serde_json::from_str(r#"{"type": 2}"#).unwrap();
 
         assert_eq!(activity.r#type, Some(ActivityType::Listening));
+    }
+
+    #[test]
+    fn test_playback_info_and_artwork_request_from_track() {
+        let track = crate::music::Track::new("Track Title", "Artist Name")
+            .with_provider("spotify")
+            .with_track_id("sp_123")
+            .with_album("Album Name")
+            .with_art_url("https://i.scdn.co/image/abc")
+            .with_duration_ms(185_000);
+
+        let info = PlaybackInfo::from(&track);
+        assert_eq!(info.title, "Track Title");
+        assert_eq!(info.artist, "Artist Name");
+        assert_eq!(info.album.as_deref(), Some("Album Name"));
+        assert_eq!(info.duration, Some(Duration::from_millis(185_000)));
+
+        let artwork = crate::discord::artwork::ArtworkRequest::from_track(&track)
+            .expect("artwork request should be extracted");
+        assert_eq!(artwork.provider, "spotify");
+        assert_eq!(artwork.track_id.as_deref(), Some("sp_123"));
+        assert_eq!(artwork.source_url, "https://i.scdn.co/image/abc");
+
+        let no_art = crate::music::Track::new("No Art", "Artist");
+        assert!(crate::discord::artwork::ArtworkRequest::from_track(&no_art).is_none());
     }
 }

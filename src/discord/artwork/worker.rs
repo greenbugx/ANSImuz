@@ -45,12 +45,13 @@ impl ArtworkWorker {
         event_sender: Sender<ArtworkEvent>,
         config: DiscordArtworkConfig,
     ) -> std::io::Result<Self> {
+        let manager = ArtworkManager::with_config(None, config).map_err(std::io::Error::other)?;
         let (cmd_tx, cmd_rx) = channel();
 
         let thread_handle = thread::Builder::new()
             .name("discord-artwork-worker".to_string())
             .spawn(move || {
-                run_artwork_worker(cmd_rx, event_sender, config);
+                run_artwork_worker(cmd_rx, event_sender, manager);
             })?;
 
         Ok(Self {
@@ -70,13 +71,14 @@ impl ArtworkWorker {
     where
         F: FnMut(ArtworkEvent) + Send + 'static,
     {
+        let manager = ArtworkManager::with_config(None, config).map_err(std::io::Error::other)?;
         let (cmd_tx, cmd_rx) = channel();
         let (event_tx, event_rx) = channel();
 
         let thread_handle = thread::Builder::new()
             .name("discord-artwork-worker".to_string())
             .spawn(move || {
-                run_artwork_worker(cmd_rx, event_tx, config);
+                run_artwork_worker(cmd_rx, event_tx, manager);
             })?;
 
         let forwarder_handle = match thread::Builder::new()
@@ -139,17 +141,21 @@ impl Drop for ArtworkWorker {
 fn run_artwork_worker(
     receiver: Receiver<ArtworkCommand>,
     sender: Sender<ArtworkEvent>,
-    config: DiscordArtworkConfig,
+    mut manager: ArtworkManager,
 ) {
-    let mut manager = ArtworkManager::with_config(None, config);
-
     while let Ok(cmd) = receiver.recv() {
         match cmd {
-            ArtworkCommand::Resolve { generation, request } => {
+            ArtworkCommand::Resolve {
+                generation,
+                request,
+            } => {
                 let result = manager.resolve(request);
                 let _ = sender.send(ArtworkEvent::Resolved { generation, result });
             }
-            ArtworkCommand::Refresh { generation, request } => {
+            ArtworkCommand::Refresh {
+                generation,
+                request,
+            } => {
                 let result = manager.refresh(request);
                 let _ = sender.send(ArtworkEvent::Resolved { generation, result });
             }
@@ -166,17 +172,15 @@ mod tests {
     #[test]
     fn worker_with_forwarder_joins_cleanly_on_shutdown() {
         let (tx, rx) = channel();
-        let mut worker = ArtworkWorker::spawn_with_forwarder(
-            DiscordArtworkConfig::default(),
-            move |event| {
+        let mut worker =
+            ArtworkWorker::spawn_with_forwarder(DiscordArtworkConfig::default(), move |event| {
                 match event {
                     ArtworkEvent::Resolved { generation, result } => {
                         let _ = tx.send((generation, result));
                     }
                 }
-            },
-        )
-        .expect("spawn artwork worker with forwarder");
+            })
+            .expect("spawn artwork worker with forwarder");
 
         // Trigger an immediate local error (non-HTTPS scheme) to exercise full roundtrip
         worker.resolve(
@@ -197,4 +201,3 @@ mod tests {
         assert!(worker.forwarder_handle.is_none());
     }
 }
-

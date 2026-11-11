@@ -453,26 +453,11 @@ pub fn start_playback(
             }
 
             if let Some(worker) = &app.discord_worker {
-                let mut info = crate::discord::PlaybackInfo::new(&track.title, &track.artist)
-                    .with_provider(&track.provider);
-                if let Some(id) = &track.track_id {
-                    info = info.with_track_id(id);
-                }
-                if let Some(album) = &track.album {
-                    info = info.with_album(album);
-                }
-                if let Some(art) = &track.art_url {
-                    info = info.with_art_url(art);
-                }
-                if let Some(dur_ms) = track.duration_ms {
-                    info = info.with_duration(Duration::from_millis(dur_ms));
-                }
+                let info = crate::discord::PlaybackInfo::from(&track);
+                let artwork = crate::discord::artwork::ArtworkRequest::from_track(&track);
                 // Sharing temporary/internal stream URLs through Discord activity button
                 // Disabled for now until proper public track URLs are available.
-                // if track.has_stream_url() {
-                //     info = info.with_stream_url(&track.stream_url);
-                // }
-                worker.track_changed(info);
+                worker.track_changed(info, artwork);
             }
             Ok(())
         }

@@ -151,7 +151,7 @@ impl Default for DiscordConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Settings {
     #[serde(default)]
     pub audio_cache: bool,
@@ -162,9 +162,65 @@ pub struct Settings {
     #[serde(default)]
     pub provider: Provider,
     #[serde(default)]
-    pub discord_rpc: bool,
-    #[serde(default)]
     pub discord: DiscordConfig,
+}
+
+#[derive(Deserialize)]
+struct DiscordConfigDeser {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default = "default_true")]
+    artwork_enabled: bool,
+    #[serde(default)]
+    artwork: DiscordArtworkConfig,
+}
+
+impl Default for DiscordConfigDeser {
+    fn default() -> Self {
+        Self {
+            enabled: None,
+            artwork_enabled: true,
+            artwork: DiscordArtworkConfig::default(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct SettingsDeser {
+    #[serde(default)]
+    audio_cache: bool,
+    #[serde(default = "default_true")]
+    art_hq: bool,
+    #[serde(default)]
+    art_palette: bool,
+    #[serde(default)]
+    provider: Provider,
+    #[serde(default)]
+    discord_rpc: Option<bool>,
+    #[serde(default)]
+    discord: DiscordConfigDeser,
+}
+
+impl<'de> Deserialize<'de> for Settings {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = SettingsDeser::deserialize(deserializer)?;
+        // Canonical setting is `discord.enabled`; fall back to legacy `discord_rpc` only when omitted.
+        let enabled = raw.discord.enabled.or(raw.discord_rpc).unwrap_or(false);
+        Ok(Self {
+            audio_cache: raw.audio_cache,
+            art_hq: raw.art_hq,
+            art_palette: raw.art_palette,
+            provider: raw.provider,
+            discord: DiscordConfig {
+                enabled,
+                artwork_enabled: raw.discord.artwork_enabled,
+                artwork: raw.discord.artwork,
+            },
+        })
+    }
 }
 
 impl Default for Settings {
@@ -174,7 +230,6 @@ impl Default for Settings {
             art_hq: true,
             art_palette: false,
             provider: Provider::YtMusic,
-            discord_rpc: false,
             discord: DiscordConfig::default(),
         }
     }
@@ -188,14 +243,8 @@ impl Settings {
             return defaults;
         };
 
-        // 1. Try parsing as TOML with Serde
-        if let Ok(mut settings) = toml::from_str::<Settings>(&content) {
-            // Keep legacy discord_rpc and discord.enabled synchronized
-            if settings.discord.enabled {
-                settings.discord_rpc = true;
-            } else if settings.discord_rpc {
-                settings.discord.enabled = true;
-            }
+        // 1. Try parsing as TOML with Serde (includes legacy `discord_rpc` migration)
+        if let Ok(settings) = toml::from_str::<Settings>(&content) {
             return settings;
         }
 
@@ -218,9 +267,7 @@ impl Settings {
                     };
                 }
                 "discord_rpc" => {
-                    let val = value.trim() == "true";
-                    settings.discord_rpc = val;
-                    settings.discord.enabled = val;
+                    settings.discord.enabled = value.trim() == "true";
                 }
                 _ => {}
             }
@@ -235,10 +282,7 @@ impl Settings {
             fs::create_dir_all(parent)?;
         }
 
-        let mut to_save = self.clone();
-        to_save.discord_rpc = to_save.discord.enabled;
-
-        let toml_content = toml::to_string_pretty(&to_save)
+        let toml_content = toml::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
         fs::write(path, toml_content)
@@ -473,7 +517,6 @@ mod tests {
             art_hq: false,
             art_palette: true,
             provider: Provider::Spotify,
-            discord_rpc: true,
             discord: DiscordConfig {
                 enabled: true,
                 artwork_enabled: true,
@@ -486,13 +529,26 @@ mod tests {
         assert!(toml_str.contains("art_hq = false"));
         assert!(toml_str.contains("art_palette = true"));
         assert!(toml_str.contains("provider = \"spotify\""));
-        assert!(toml_str.contains("discord_rpc = true"));
+        assert!(!toml_str.contains("discord_rpc"));
         assert!(toml_str.contains("[discord]"));
         assert!(toml_str.contains("enabled = true"));
         assert!(toml_str.contains("[discord.artwork]"));
 
         let loaded: Settings = toml::from_str(&toml_str).expect("deserialize toml");
         assert_eq!(loaded, settings);
+    }
+
+    #[test]
+    fn test_legacy_discord_rpc_toml_migrates_to_discord_enabled() {
+        let legacy_toml = "provider = \"ytmusic\"\ndiscord_rpc = true\n";
+        let loaded: Settings = toml::from_str(legacy_toml).expect("migrate legacy discord_rpc");
+        assert!(loaded.discord.enabled);
+
+        // Explicit [discord].enabled takes precedence over a stale top-level discord_rpc flag
+        let explicit_disabled = "discord_rpc = true\n\n[discord]\nenabled = false\n";
+        let loaded_disabled: Settings =
+            toml::from_str(explicit_disabled).expect("deserialize explicit override");
+        assert!(!loaded_disabled.discord.enabled);
     }
 
     #[test]
@@ -523,7 +579,10 @@ litterbox_expiry = "72h"
 
         assert_eq!(loaded.discord.artwork.cache_max_bytes(), 250 * 1024 * 1024);
         assert_eq!(loaded.discord.artwork.max_download_bytes(), 8 * 1024 * 1024);
-        assert_eq!(loaded.discord.artwork.litterbox_duration_seconds(), 72 * 3600);
+        assert_eq!(
+            loaded.discord.artwork.litterbox_duration_seconds(),
+            72 * 3600
+        );
         assert_eq!(loaded.discord.artwork.litterbox_time_str(), "72h");
     }
 
@@ -555,8 +614,8 @@ litterbox_expiry = "72h"
             "audio_cache = true\nart_hq = true\nart_palette = false\nprovider = \"ytmusic\"\n";
         let loaded: Settings = toml::from_str(existing_toml).expect("deserialize existing toml");
         assert!(
-            !loaded.discord_rpc,
-            "Existing config without discord_rpc must default to false"
+            !loaded.discord.enabled,
+            "Existing config without discord setting must default to false"
         );
     }
 
@@ -580,7 +639,7 @@ litterbox_expiry = "72h"
                                 _ => Provider::YtMusic,
                             };
                     }
-                    "discord_rpc" => settings.discord_rpc = value.trim() == "true",
+                    "discord_rpc" => settings.discord.enabled = value.trim() == "true",
                     _ => {}
                 }
             }
@@ -590,7 +649,7 @@ litterbox_expiry = "72h"
         assert!(!settings.art_hq);
         assert!(settings.art_palette);
         assert_eq!(settings.provider, Provider::Spotify);
-        assert!(settings.discord_rpc);
+        assert!(settings.discord.enabled);
     }
 
     #[test]

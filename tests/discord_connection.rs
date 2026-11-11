@@ -121,7 +121,7 @@ fn test_discord_worker_thread_non_blocking() {
         .with_position(Duration::from_secs(45))
         .with_duration(Duration::from_secs(354));
 
-    worker.track_changed(track);
+    worker.track_changed(track, None);
     sleep(Duration::from_millis(50));
 
     worker.position_changed(Duration::from_secs(50));

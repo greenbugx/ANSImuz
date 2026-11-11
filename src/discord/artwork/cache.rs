@@ -10,7 +10,9 @@ pub const DEFAULT_MAX_CACHE_BYTES: u64 = 250 * 1024 * 1024; // 250 MB ceiling
 /// Returns the default base directory for Discord artwork cache.
 #[must_use]
 pub fn default_cache_dir() -> PathBuf {
-    crate::config::cache_base_dir().join("discord").join("artwork")
+    crate::config::cache_base_dir()
+        .join("discord")
+        .join("artwork")
 }
 
 /// Compute hex-encoded SHA-256 hash of bytes.
@@ -183,9 +185,7 @@ impl ArtworkCache {
             if !path.is_file() {
                 continue;
             }
-            if !include_part_files
-                && path.extension().and_then(|e| e.to_str()) == Some("part")
-            {
+            if !include_part_files && path.extension().and_then(|e| e.to_str()) == Some("part") {
                 continue;
             }
             let Ok(rel) = path.strip_prefix(&self.base_dir) else {
@@ -266,7 +266,9 @@ impl ArtworkCache {
         if (removed > 0 || dirty)
             && let Err(err) = self.save_index()
         {
-            crate::discord::log_discord(&format!("[Artwork] Failed to save validated index: {err}"));
+            crate::discord::log_discord(&format!(
+                "[Artwork] Failed to save validated index: {err}"
+            ));
         }
 
         removed
@@ -353,7 +355,9 @@ impl ArtworkCache {
             });
             self.rebuild_content_hash_index();
             if let Err(err) = self.save_index() {
-                crate::discord::log_discord(&format!("[Artwork] Failed to save pruned index: {err}"));
+                crate::discord::log_discord(&format!(
+                    "[Artwork] Failed to save pruned index: {err}"
+                ));
             }
         }
 
@@ -519,7 +523,11 @@ impl ArtworkCache {
     }
 
     /// Insert a record for a request and atomically persist `index.json`.
-    pub fn insert_and_save(&mut self, req: &ArtworkRequest, mut record: CacheRecord) -> std::io::Result<()> {
+    pub fn insert_and_save(
+        &mut self,
+        req: &ArtworkRequest,
+        mut record: CacheRecord,
+    ) -> std::io::Result<()> {
         if record.last_accessed == 0 {
             record.last_accessed = if record.uploaded_at > 0 {
                 record.uploaded_at
@@ -528,16 +536,59 @@ impl ArtworkCache {
             };
         }
 
+        let primary_key = make_primary_key(&req.provider, req.track_id.as_deref());
+        let url_key = make_url_key(&req.source_url);
+
+        let mut needs_hash_rebuild = false;
+        let mut replaced_local_files = false;
+
+        if let Some(ref pkey) = primary_key
+            && let Some(prev) = self.index.entries.get(pkey).cloned()
+        {
+            needs_hash_rebuild = true;
+            if Self::normalize_rel(&prev.local_file) != Self::normalize_rel(&record.local_file) {
+                replaced_local_files = true;
+            }
+            let prev_trimmed = prev.source_url.trim();
+            if prev_trimmed != req.source_url.trim() {
+                let old_url_key = make_url_key(prev_trimmed);
+                if old_url_key != url_key {
+                    let still_used = self.index.entries.iter().any(|(k, r)| {
+                        k != pkey && k != &old_url_key && r.source_url.trim() == prev_trimmed
+                    });
+                    if !still_used {
+                        self.index.entries.remove(&old_url_key);
+                    }
+                }
+            }
+        }
+
+        if let Some(prev_url) = self.index.entries.get(&url_key) {
+            needs_hash_rebuild = true;
+            if Self::normalize_rel(&prev_url.local_file) != Self::normalize_rel(&record.local_file)
+            {
+                replaced_local_files = true;
+            }
+        }
+
         let content_hash = record.content_hash.clone();
 
-        if let Some(key) = make_primary_key(&req.provider, req.track_id.as_deref()) {
-            self.content_hash_index.insert(content_hash.clone(), key.clone());
+        if let Some(key) = primary_key {
+            self.content_hash_index
+                .insert(content_hash.clone(), key.clone());
             self.index.entries.insert(key, record.clone());
         }
 
-        let url_key = make_url_key(&req.source_url);
-        self.content_hash_index.insert(content_hash, url_key.clone());
+        self.content_hash_index
+            .insert(content_hash, url_key.clone());
         self.index.entries.insert(url_key, record);
+
+        if needs_hash_rebuild {
+            self.rebuild_content_hash_index();
+        }
+        if replaced_local_files {
+            self.clean_orphaned_images(false);
+        }
 
         self.save_index()?;
         if let Err(err) = self.prune_lru() {
@@ -605,7 +656,11 @@ mod tests {
         fs::create_dir_all(local_abs.parent().unwrap()).unwrap();
         fs::write(&local_abs, b"image-data").unwrap();
 
-        let req = ArtworkRequest::new("ytmusic", Some("vid123".into()), "https://example.com/art.jpg");
+        let req = ArtworkRequest::new(
+            "ytmusic",
+            Some("vid123".into()),
+            "https://example.com/art.jpg",
+        );
 
         // Litterbox valid record
         let record = CacheRecord {
@@ -664,40 +719,53 @@ mod tests {
         fs::write(&expired_lit_file, b"lit-bytes").unwrap();
 
         let mut index = CacheIndex::default();
-        index.entries.insert("ytmusic:valid_cat".into(), CacheRecord {
-            source_url: "https://example.com/cat.jpg".into(),
-            local_file: "images/cat.jpg".into(),
-            hosted_url: "https://files.catbox.moe/cat.jpg".into(),
-            host: HostingProvider::Catbox,
-            content_hash: "cat_hash".into(),
-            uploaded_at: now - 1000,
-            expires_at: None,
-            last_accessed: now - 1000,
-        });
+        index.entries.insert(
+            "ytmusic:valid_cat".into(),
+            CacheRecord {
+                source_url: "https://example.com/cat.jpg".into(),
+                local_file: "images/cat.jpg".into(),
+                hosted_url: "https://files.catbox.moe/cat.jpg".into(),
+                host: HostingProvider::Catbox,
+                content_hash: "cat_hash".into(),
+                uploaded_at: now - 1000,
+                expires_at: None,
+                last_accessed: now - 1000,
+            },
+        );
 
-        index.entries.insert("ytmusic:missing_file".into(), CacheRecord {
-            source_url: "https://example.com/missing.jpg".into(),
-            local_file: "images/missing.jpg".into(),
-            hosted_url: "https://files.catbox.moe/missing.jpg".into(),
-            host: HostingProvider::Catbox,
-            content_hash: "missing_hash".into(),
-            uploaded_at: now - 1000,
-            expires_at: None,
-            last_accessed: now - 1000,
-        });
+        index.entries.insert(
+            "ytmusic:missing_file".into(),
+            CacheRecord {
+                source_url: "https://example.com/missing.jpg".into(),
+                local_file: "images/missing.jpg".into(),
+                hosted_url: "https://files.catbox.moe/missing.jpg".into(),
+                host: HostingProvider::Catbox,
+                content_hash: "missing_hash".into(),
+                uploaded_at: now - 1000,
+                expires_at: None,
+                last_accessed: now - 1000,
+            },
+        );
 
-        index.entries.insert("ytmusic:expired_lit".into(), CacheRecord {
-            source_url: "https://example.com/lit.jpg".into(),
-            local_file: "images/lit.jpg".into(),
-            hosted_url: "https://litterbox.catbox.moe/lit.jpg".into(),
-            host: HostingProvider::Litterbox,
-            content_hash: "lit_hash".into(),
-            uploaded_at: now - 10_000,
-            expires_at: Some(now - 100), // Expired!
-            last_accessed: now - 10_000,
-        });
+        index.entries.insert(
+            "ytmusic:expired_lit".into(),
+            CacheRecord {
+                source_url: "https://example.com/lit.jpg".into(),
+                local_file: "images/lit.jpg".into(),
+                hosted_url: "https://litterbox.catbox.moe/lit.jpg".into(),
+                host: HostingProvider::Litterbox,
+                content_hash: "lit_hash".into(),
+                uploaded_at: now - 10_000,
+                expires_at: Some(now - 100), // Expired!
+                last_accessed: now - 10_000,
+            },
+        );
 
-        fs::write(temp_dir.join("index.json"), serde_json::to_string_pretty(&index).unwrap()).unwrap();
+        fs::write(
+            temp_dir.join("index.json"),
+            serde_json::to_string_pretty(&index).unwrap(),
+        )
+        .unwrap();
 
         // Load cache which triggers startup validation
         let cache = ArtworkCache::load(Some(temp_dir.clone()));
@@ -730,30 +798,40 @@ mod tests {
 
         fs::write(&file1, vec![0u8; 80]).unwrap();
         let req1 = ArtworkRequest::new("ytmusic", Some("1".into()), "https://example.com/1.jpg");
-        cache.insert_and_save(&req1, CacheRecord {
-            source_url: "https://example.com/1.jpg".into(),
-            local_file: "images/file1.jpg".into(),
-            hosted_url: "https://files.catbox.moe/1.jpg".into(),
-            host: HostingProvider::Catbox,
-            content_hash: "hash1".into(),
-            uploaded_at: 100,
-            expires_at: None,
-            last_accessed: 100,
-        }).unwrap();
+        cache
+            .insert_and_save(
+                &req1,
+                CacheRecord {
+                    source_url: "https://example.com/1.jpg".into(),
+                    local_file: "images/file1.jpg".into(),
+                    hosted_url: "https://files.catbox.moe/1.jpg".into(),
+                    host: HostingProvider::Catbox,
+                    content_hash: "hash1".into(),
+                    uploaded_at: 100,
+                    expires_at: None,
+                    last_accessed: 100,
+                },
+            )
+            .unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(20));
         fs::write(&file2, vec![0u8; 80]).unwrap();
         let req2 = ArtworkRequest::new("ytmusic", Some("2".into()), "https://example.com/2.jpg");
-        cache.insert_and_save(&req2, CacheRecord {
-            source_url: "https://example.com/2.jpg".into(),
-            local_file: "images/file2.jpg".into(),
-            hosted_url: "https://files.catbox.moe/2.jpg".into(),
-            host: HostingProvider::Catbox,
-            content_hash: "hash2".into(),
-            uploaded_at: 200,
-            expires_at: None,
-            last_accessed: 200,
-        }).unwrap();
+        cache
+            .insert_and_save(
+                &req2,
+                CacheRecord {
+                    source_url: "https://example.com/2.jpg".into(),
+                    local_file: "images/file2.jpg".into(),
+                    hosted_url: "https://files.catbox.moe/2.jpg".into(),
+                    host: HostingProvider::Catbox,
+                    content_hash: "hash2".into(),
+                    uploaded_at: 200,
+                    expires_at: None,
+                    last_accessed: 200,
+                },
+            )
+            .unwrap();
 
         // Total was 160 bytes > 100 bytes ceiling -> oldest file1 should be pruned
         assert!(!file1.exists());
@@ -778,30 +856,40 @@ mod tests {
 
         fs::write(&file1, vec![0u8; 80]).unwrap();
         let req1 = ArtworkRequest::new("ytmusic", Some("1".into()), "https://example.com/1.jpg");
-        cache.insert_and_save(&req1, CacheRecord {
-            source_url: req1.source_url.clone(),
-            local_file: "images/file1.jpg".into(),
-            hosted_url: "https://files.catbox.moe/1.jpg".into(),
-            host: HostingProvider::Catbox,
-            content_hash: "hash1".into(),
-            uploaded_at: 100,
-            expires_at: None,
-            last_accessed: 100,
-        }).unwrap();
+        cache
+            .insert_and_save(
+                &req1,
+                CacheRecord {
+                    source_url: req1.source_url.clone(),
+                    local_file: "images/file1.jpg".into(),
+                    hosted_url: "https://files.catbox.moe/1.jpg".into(),
+                    host: HostingProvider::Catbox,
+                    content_hash: "hash1".into(),
+                    uploaded_at: 100,
+                    expires_at: None,
+                    last_accessed: 100,
+                },
+            )
+            .unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(20));
         fs::write(&file2, vec![0u8; 80]).unwrap();
         let req2 = ArtworkRequest::new("ytmusic", Some("2".into()), "https://example.com/2.jpg");
-        cache.insert_and_save(&req2, CacheRecord {
-            source_url: req2.source_url.clone(),
-            local_file: "images/file2.jpg".into(),
-            hosted_url: "https://files.catbox.moe/2.jpg".into(),
-            host: HostingProvider::Catbox,
-            content_hash: "hash2".into(),
-            uploaded_at: 200,
-            expires_at: None,
-            last_accessed: 200,
-        }).unwrap();
+        cache
+            .insert_and_save(
+                &req2,
+                CacheRecord {
+                    source_url: req2.source_url.clone(),
+                    local_file: "images/file2.jpg".into(),
+                    hosted_url: "https://files.catbox.moe/2.jpg".into(),
+                    host: HostingProvider::Catbox,
+                    content_hash: "hash2".into(),
+                    uploaded_at: 200,
+                    expires_at: None,
+                    last_accessed: 200,
+                },
+            )
+            .unwrap();
 
         // Hit req1 at t=300: file1 still has an OLDER filesystem mtime than file2,
         // but its last_accessed timestamp is now newer (300 > 200).
@@ -812,19 +900,30 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         fs::write(&file3, vec![0u8; 80]).unwrap();
         let req3 = ArtworkRequest::new("ytmusic", Some("3".into()), "https://example.com/3.jpg");
-        cache.insert_and_save(&req3, CacheRecord {
-            source_url: req3.source_url.clone(),
-            local_file: "images/file3.jpg".into(),
-            hosted_url: "https://files.catbox.moe/3.jpg".into(),
-            host: HostingProvider::Catbox,
-            content_hash: "hash3".into(),
-            uploaded_at: 400,
-            expires_at: None,
-            last_accessed: 400,
-        }).unwrap();
+        cache
+            .insert_and_save(
+                &req3,
+                CacheRecord {
+                    source_url: req3.source_url.clone(),
+                    local_file: "images/file3.jpg".into(),
+                    hosted_url: "https://files.catbox.moe/3.jpg".into(),
+                    host: HostingProvider::Catbox,
+                    content_hash: "hash3".into(),
+                    uploaded_at: 400,
+                    expires_at: None,
+                    last_accessed: 400,
+                },
+            )
+            .unwrap();
 
-        assert!(file1.exists(), "file1 was recently accessed and must survive LRU");
-        assert!(!file2.exists(), "file2 was least recently accessed and must be evicted");
+        assert!(
+            file1.exists(),
+            "file1 was recently accessed and must survive LRU"
+        );
+        assert!(
+            !file2.exists(),
+            "file2 was least recently accessed and must be evicted"
+        );
         assert!(file3.exists());
         assert!(cache.entries().contains_key("ytmusic:1"));
         assert!(!cache.entries().contains_key("ytmusic:2"));
@@ -847,49 +946,70 @@ mod tests {
 
         fs::write(&shared, vec![0u8; 80]).unwrap();
         let req_a = ArtworkRequest::new("ytmusic", Some("a".into()), "https://example.com/a.jpg");
-        cache.insert_and_save(&req_a, CacheRecord {
-            source_url: req_a.source_url.clone(),
-            local_file: "images/shared.jpg".into(),
-            hosted_url: "https://files.catbox.moe/shared.jpg".into(),
-            host: HostingProvider::Catbox,
-            content_hash: "hash_shared".into(),
-            uploaded_at: 100,
-            expires_at: None,
-            last_accessed: 100,
-        }).unwrap();
+        cache
+            .insert_and_save(
+                &req_a,
+                CacheRecord {
+                    source_url: req_a.source_url.clone(),
+                    local_file: "images/shared.jpg".into(),
+                    hosted_url: "https://files.catbox.moe/shared.jpg".into(),
+                    host: HostingProvider::Catbox,
+                    content_hash: "hash_shared".into(),
+                    uploaded_at: 100,
+                    expires_at: None,
+                    last_accessed: 100,
+                },
+            )
+            .unwrap();
 
         // Hit req_a later? Keep req_a stale (100), add req_b referencing same shared file at 500
         let req_b = ArtworkRequest::new("ytmusic", Some("b".into()), "https://example.com/b.jpg");
-        cache.insert_and_save(&req_b, CacheRecord {
-            source_url: req_b.source_url.clone(),
-            local_file: "images/shared.jpg".into(),
-            hosted_url: "https://files.catbox.moe/shared.jpg".into(),
-            host: HostingProvider::Catbox,
-            content_hash: "hash_shared".into(),
-            uploaded_at: 500,
-            expires_at: None,
-            last_accessed: 500,
-        }).unwrap();
+        cache
+            .insert_and_save(
+                &req_b,
+                CacheRecord {
+                    source_url: req_b.source_url.clone(),
+                    local_file: "images/shared.jpg".into(),
+                    hosted_url: "https://files.catbox.moe/shared.jpg".into(),
+                    host: HostingProvider::Catbox,
+                    content_hash: "hash_shared".into(),
+                    uploaded_at: 500,
+                    expires_at: None,
+                    last_accessed: 500,
+                },
+            )
+            .unwrap();
 
         // Insert another unique file with recency 200 (older than shared file's max recency 500)
         // plus an unindexed orphan file on disk.
         fs::write(&orphan, vec![0u8; 50]).unwrap();
         fs::write(&other, vec![0u8; 80]).unwrap();
         let req_c = ArtworkRequest::new("ytmusic", Some("c".into()), "https://example.com/c.jpg");
-        cache.insert_and_save(&req_c, CacheRecord {
-            source_url: req_c.source_url.clone(),
-            local_file: "images/other.jpg".into(),
-            hosted_url: "https://files.catbox.moe/other.jpg".into(),
-            host: HostingProvider::Catbox,
-            content_hash: "hash_other".into(),
-            uploaded_at: 200,
-            expires_at: None,
-            last_accessed: 200,
-        }).unwrap();
+        cache
+            .insert_and_save(
+                &req_c,
+                CacheRecord {
+                    source_url: req_c.source_url.clone(),
+                    local_file: "images/other.jpg".into(),
+                    hosted_url: "https://files.catbox.moe/other.jpg".into(),
+                    host: HostingProvider::Catbox,
+                    content_hash: "hash_other".into(),
+                    uploaded_at: 200,
+                    expires_at: None,
+                    last_accessed: 200,
+                },
+            )
+            .unwrap();
 
-        assert!(!orphan.exists(), "Orphaned file must be removed during pruning");
+        assert!(
+            !orphan.exists(),
+            "Orphaned file must be removed during pruning"
+        );
         assert!(!other.exists(), "Older unshared file must be evicted");
-        assert!(shared.exists(), "Shared file kept alive by recent entry req_b must remain");
+        assert!(
+            shared.exists(),
+            "Shared file kept alive by recent entry req_b must remain"
+        );
         assert!(cache.entries().contains_key("ytmusic:b"));
 
         let _ = fs::remove_dir_all(&temp_dir);
@@ -907,34 +1027,50 @@ mod tests {
         let now = 200_000u64;
 
         let mut index = CacheIndex::default();
-        index.entries.insert("ytmusic:expired_lit".into(), CacheRecord {
-            source_url: "https://example.com/1.jpg".into(),
-            local_file: "images/shared.jpg".into(),
-            hosted_url: "https://litterbox.catbox.moe/exp.jpg".into(),
-            host: HostingProvider::Litterbox,
-            content_hash: "shared_hash".into(),
-            uploaded_at: now - 10_000,
-            expires_at: Some(now - 10),
-            last_accessed: now - 10_000,
-        });
-        index.entries.insert("ytmusic:valid_cat".into(), CacheRecord {
-            source_url: "https://example.com/2.jpg".into(),
-            local_file: "images/shared.jpg".into(),
-            hosted_url: "https://files.catbox.moe/keep.jpg".into(),
-            host: HostingProvider::Catbox,
-            content_hash: "shared_hash".into(),
-            uploaded_at: now - 500,
-            expires_at: None,
-            last_accessed: 0, // Test backfill from uploaded_at
-        });
+        index.entries.insert(
+            "ytmusic:expired_lit".into(),
+            CacheRecord {
+                source_url: "https://example.com/1.jpg".into(),
+                local_file: "images/shared.jpg".into(),
+                hosted_url: "https://litterbox.catbox.moe/exp.jpg".into(),
+                host: HostingProvider::Litterbox,
+                content_hash: "shared_hash".into(),
+                uploaded_at: now - 10_000,
+                expires_at: Some(now - 10),
+                last_accessed: now - 10_000,
+            },
+        );
+        index.entries.insert(
+            "ytmusic:valid_cat".into(),
+            CacheRecord {
+                source_url: "https://example.com/2.jpg".into(),
+                local_file: "images/shared.jpg".into(),
+                hosted_url: "https://files.catbox.moe/keep.jpg".into(),
+                host: HostingProvider::Catbox,
+                content_hash: "shared_hash".into(),
+                uploaded_at: now - 500,
+                expires_at: None,
+                last_accessed: 0, // Test backfill from uploaded_at
+            },
+        );
 
-        fs::write(temp_dir.join("index.json"), serde_json::to_string_pretty(&index).unwrap()).unwrap();
+        fs::write(
+            temp_dir.join("index.json"),
+            serde_json::to_string_pretty(&index).unwrap(),
+        )
+        .unwrap();
 
         let cache = ArtworkCache::load(Some(temp_dir.clone()));
         assert!(!cache.entries().contains_key("ytmusic:expired_lit"));
         assert!(cache.entries().contains_key("ytmusic:valid_cat"));
-        assert_eq!(cache.entries()["ytmusic:valid_cat"].last_accessed, now - 500);
-        assert!(shared_file.exists(), "Shared image must not be deleted when expired sibling is purged");
+        assert_eq!(
+            cache.entries()["ytmusic:valid_cat"].last_accessed,
+            now - 500
+        );
+        assert!(
+            shared_file.exists(),
+            "Shared image must not be deleted when expired sibling is purged"
+        );
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
@@ -950,21 +1086,143 @@ mod tests {
         fs::write(&local_abs, b"image-data").unwrap();
 
         let req = ArtworkRequest::new("ytmusic", Some("v1".into()), "https://example.com/v1.jpg");
-        cache.insert_and_save(&req, CacheRecord {
-            source_url: req.source_url.clone(),
-            local_file: local_rel.to_string(),
-            hosted_url: "https://files.catbox.moe/stale.jpg".to_string(),
-            host: HostingProvider::Catbox,
-            content_hash: "h_stale".to_string(),
-            uploaded_at: now,
-            expires_at: None,
-            last_accessed: now,
-        }).unwrap();
+        cache
+            .insert_and_save(
+                &req,
+                CacheRecord {
+                    source_url: req.source_url.clone(),
+                    local_file: local_rel.to_string(),
+                    hosted_url: "https://files.catbox.moe/stale.jpg".to_string(),
+                    host: HostingProvider::Catbox,
+                    content_hash: "h_stale".to_string(),
+                    uploaded_at: now,
+                    expires_at: None,
+                    last_accessed: now,
+                },
+            )
+            .unwrap();
 
         assert!(cache.lookup(&req, now).is_some());
         assert!(cache.invalidate(&req));
         assert!(cache.lookup(&req, now).is_none());
         assert!(cache.find_reusable_upload("h_stale", now).is_none());
+
+        let _ = fs::remove_dir_all(cache.base_dir());
+    }
+
+    #[test]
+    fn insert_update_removes_stale_url_duplicate_and_refreshes_hash_index() {
+        let mut cache = create_test_cache("update_dedup");
+        let now = 100_000u64;
+
+        let file1 = cache.images_dir().join("old.jpg");
+        let file2 = cache.images_dir().join("new.jpg");
+        fs::write(&file1, b"old-bytes").unwrap();
+
+        let url1 = "https://example.com/old.jpg";
+        let url2 = "https://example.com/new.jpg";
+
+        let req_v1 = ArtworkRequest::new("spotify", Some("track_1".into()), url1);
+        cache
+            .insert_and_save(
+                &req_v1,
+                CacheRecord {
+                    source_url: url1.to_string(),
+                    local_file: "images/old.jpg".to_string(),
+                    hosted_url: "https://files.catbox.moe/old.jpg".to_string(),
+                    host: HostingProvider::Catbox,
+                    content_hash: "hash_old".to_string(),
+                    uploaded_at: now,
+                    expires_at: None,
+                    last_accessed: now,
+                },
+            )
+            .unwrap();
+
+        let old_url_key = make_url_key(url1);
+        assert!(cache.entries().contains_key("spotify:track_1"));
+        assert!(cache.entries().contains_key(&old_url_key));
+
+        // Update same track to new artwork URL/file/hash
+        fs::write(&file2, b"new-bytes").unwrap();
+        let req_v2 = ArtworkRequest::new("spotify", Some("track_1".into()), url2);
+        cache
+            .insert_and_save(
+                &req_v2,
+                CacheRecord {
+                    source_url: url2.to_string(),
+                    local_file: "images/new.jpg".to_string(),
+                    hosted_url: "https://files.catbox.moe/new.jpg".to_string(),
+                    host: HostingProvider::Catbox,
+                    content_hash: "hash_new".to_string(),
+                    uploaded_at: now + 10,
+                    expires_at: None,
+                    last_accessed: now + 10,
+                },
+            )
+            .unwrap();
+
+        let new_url_key = make_url_key(url2);
+        assert!(
+            !cache.entries().contains_key(&old_url_key),
+            "stale URL key must be removed"
+        );
+        assert!(cache.entries().contains_key(&new_url_key));
+        assert_eq!(
+            cache.entries()["spotify:track_1"].hosted_url,
+            "https://files.catbox.moe/new.jpg"
+        );
+        assert!(
+            !cache.content_hash_index().contains_key("hash_old"),
+            "stale hash must be cleared"
+        );
+        assert!(cache.content_hash_index().contains_key("hash_new"));
+        assert!(
+            !file1.exists(),
+            "unreferenced replaced file must be removed"
+        );
+        assert!(file2.exists());
+
+        // When another track shares a URL, updating one track must keep the URL key alive for the sibling
+        let shared_file = cache.images_dir().join("shared.jpg");
+        fs::write(&shared_file, b"shared-bytes").unwrap();
+        let req_a = ArtworkRequest::new("spotify", Some("track_a".into()), url1);
+        let req_b = ArtworkRequest::new("spotify", Some("track_b".into()), url1);
+        let shared_rec = CacheRecord {
+            source_url: url1.to_string(),
+            local_file: "images/shared.jpg".to_string(),
+            hosted_url: "https://files.catbox.moe/shared.jpg".to_string(),
+            host: HostingProvider::Catbox,
+            content_hash: "hash_shared".to_string(),
+            uploaded_at: now + 20,
+            expires_at: None,
+            last_accessed: now + 20,
+        };
+        cache.insert_and_save(&req_a, shared_rec.clone()).unwrap();
+        cache.insert_and_save(&req_b, shared_rec).unwrap();
+
+        let req_a_new = ArtworkRequest::new("spotify", Some("track_a".into()), url2);
+        cache
+            .insert_and_save(
+                &req_a_new,
+                CacheRecord {
+                    source_url: url2.to_string(),
+                    local_file: "images/new.jpg".to_string(),
+                    hosted_url: "https://files.catbox.moe/new.jpg".to_string(),
+                    host: HostingProvider::Catbox,
+                    content_hash: "hash_new".to_string(),
+                    uploaded_at: now + 30,
+                    expires_at: None,
+                    last_accessed: now + 30,
+                },
+            )
+            .unwrap();
+
+        assert!(
+            cache.entries().contains_key(&old_url_key),
+            "shared URL key still used by track_b must stay"
+        );
+        assert!(shared_file.exists());
 
         let _ = fs::remove_dir_all(cache.base_dir());
     }

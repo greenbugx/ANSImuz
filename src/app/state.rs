@@ -188,7 +188,7 @@ impl App {
     }
 
     pub fn init_discord(&mut self) {
-        if (self.settings.discord.enabled || self.settings.discord_rpc) && self.discord_worker.is_none() {
+        if self.settings.discord.enabled && self.discord_worker.is_none() {
             match crate::discord::DiscordWorker::spawn_with_config(
                 crate::discord::DEFAULT_CLIENT_ID,
                 self.settings.discord.clone(),
@@ -200,7 +200,7 @@ impl App {
     }
 
     pub fn is_discord_connected(&self) -> bool {
-        (self.settings.discord.enabled || self.settings.discord_rpc)
+        self.settings.discord.enabled
             && self
                 .discord_worker
                 .as_ref()
@@ -209,7 +209,6 @@ impl App {
 
     pub fn toggle_discord_rpc(&mut self) {
         self.settings.discord.enabled = !self.settings.discord.enabled;
-        self.settings.discord_rpc = self.settings.discord.enabled;
         if let Err(error) = self.settings.save() {
             self.set_status(format!("SETTINGS ERROR: {error}"));
         }
@@ -222,33 +221,16 @@ impl App {
                 ) {
                     Ok(worker) => {
                         if let Some(track) = self.current_track() {
-                            let mut info =
-                                crate::discord::PlaybackInfo::new(&track.title, &track.artist)
-                                    .with_provider(&track.provider);
-                            if let Some(id) = &track.track_id {
-                                info = info.with_track_id(id);
-                            }
-                            if let Some(album) = &track.album {
-                                info = info.with_album(album);
-                            }
-                            if let Some(art) = &track.art_url {
-                                info = info.with_art_url(art);
-                            }
-                            if let Some(dur_ms) = track.duration_ms {
-                                info = info.with_duration(Duration::from_millis(dur_ms));
-                            }
+                            let mut info = crate::discord::PlaybackInfo::from(track)
+                                .with_paused(self.is_paused());
                             if let Some(pos) = self.current_position {
                                 info = info.with_position(pos);
                             }
-                            if self.is_paused() {
-                                info = info.with_paused(true);
-                            }
+                            let artwork =
+                                crate::discord::artwork::ArtworkRequest::from_track(track);
                             // Sharing temporary/internal stream URLs through Discord activity button
                             // Disabled for now until proper public track URLs are available.
-                            // if track.has_stream_url() {
-                            //     info = info.with_stream_url(&track.stream_url);
-                            // }
-                            worker.track_changed(info);
+                            worker.track_changed(info, artwork);
                         }
                         self.discord_worker = Some(worker);
                     }

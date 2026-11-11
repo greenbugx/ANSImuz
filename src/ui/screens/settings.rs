@@ -33,13 +33,9 @@ pub fn render_settings(
     } else {
         dim
     };
-    let discord_on = settings.discord.enabled || settings.discord_rpc;
+    let discord_on = settings.discord.enabled;
     let discord_state = if discord_on { "ON" } else { "OFF" };
-    let discord_style = if discord_on {
-        bold_primary
-    } else {
-        dim
-    };
+    let discord_style = if discord_on { bold_primary } else { dim };
 
     let mode = if settings.art_hq { "HQ" } else { "PIXEL" };
     let mode_style = if settings.art_hq { bold_primary } else { dim };
