@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 pub const DEFAULT_FAILURE_COOLDOWN: Duration = Duration::from_secs(60);
 pub const DEFAULT_CATBOX_COOLDOWN: Duration = Duration::from_secs(60);
 pub const DEFAULT_PROVIDER_COOLDOWN: Duration = Duration::from_secs(60);
+pub const SHORT_PROVIDER_COOLDOWN: Duration = Duration::from_secs(10);
 const MAX_RETRY_AFTER_COOLDOWN: Duration = Duration::from_secs(3600);
 
 fn provider_display_title(provider: HostingProvider) -> &'static str {
@@ -160,19 +161,41 @@ impl ArtworkManager {
             .is_some_and(|until| Instant::now() < *until)
     }
 
-    fn record_provider_failure(
-        &mut self,
+    fn cooldown_for_error(
+        &self,
         provider: HostingProvider,
-        retry_after_secs: Option<u64>,
-    ) {
-        // Note: `retry_after_secs` only captures integer delta-seconds `Retry-After` headers
-        // HTTP-date `Retry-After` values produce `None` and intentionally use the default cooldown.
-        let duration = match retry_after_secs {
-            Some(0) => return,
-            Some(secs) => Duration::from_secs(secs).min(MAX_RETRY_AFTER_COOLDOWN),
-            None => self.default_cooldown_for_provider(provider),
-        };
-        if !duration.is_zero() {
+        err: &ArtworkError,
+    ) -> Option<Duration> {
+        match err {
+            ArtworkError::RateLimited {
+                retry_after_secs, ..
+            } => match retry_after_secs {
+                Some(0) => None,
+                Some(secs) => Some(Duration::from_secs(*secs).min(MAX_RETRY_AFTER_COOLDOWN)),
+                // `retry_after_secs` only captures integer delta-seconds `Retry-After` headers
+                // HTTP-date `Retry-After` values yield `None` and fall back to default cooldown.
+                None => Some(self.default_cooldown_for_provider(provider)),
+            },
+            // HTTP 5xx, HTTP 408, timeouts, and connection failures cool down the provider.
+            ArtworkError::UploadFailed(_) => Some(self.default_cooldown_for_provider(provider)),
+            // Invalid JSON, invalid URLs, or malformed server responses warrant only a short cooldown.
+            ArtworkError::InvalidResponse(_) | ArtworkError::InvalidUrl(_) => {
+                Some(SHORT_PROVIDER_COOLDOWN.min(self.default_cooldown_for_provider(provider)))
+            }
+            // Input/local/initialization/cooldown errors must not blame an otherwise healthy provider.
+            ArtworkError::UnsupportedInput(_)
+            | ArtworkError::DownloadFailed(_)
+            | ArtworkError::NormalizationFailed(_)
+            | ArtworkError::InitializationFailed { .. }
+            | ArtworkError::CooldownActive
+            | ArtworkError::Io(_) => None,
+        }
+    }
+
+    fn record_provider_error(&mut self, provider: HostingProvider, err: &ArtworkError) {
+        if let Some(duration) = self.cooldown_for_error(provider, err)
+            && !duration.is_zero()
+        {
             self.provider_cooldowns
                 .insert(provider, Instant::now() + duration);
         }
@@ -190,7 +213,10 @@ impl ArtworkManager {
 
     #[cfg(test)]
     fn record_catbox_failure(&mut self) {
-        self.record_provider_failure(HostingProvider::Catbox, None);
+        self.record_provider_error(
+            HostingProvider::Catbox,
+            &ArtworkError::UploadFailed("test failure".to_string()),
+        );
     }
 
     #[cfg(test)]
@@ -327,15 +353,7 @@ impl ArtworkManager {
         let result = uploader.upload(bytes, "art.jpg");
         match &result {
             Ok(_) => self.clear_provider_failure(host),
-            Err(err) => {
-                let retry_after = match err {
-                    ArtworkError::RateLimited {
-                        retry_after_secs, ..
-                    } => *retry_after_secs,
-                    _ => None,
-                };
-                self.record_provider_failure(host, retry_after);
-            }
+            Err(err) => self.record_provider_error(host, err),
         }
 
         let uploaded = result?;

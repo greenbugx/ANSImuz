@@ -111,6 +111,78 @@ fn parse_retry_after_secs(header: Option<&reqwest::header::HeaderValue>) -> Opti
         .and_then(|s| s.trim().parse::<u64>().ok())
 }
 
+fn format_retry_after_suffix(
+    header: Option<&reqwest::header::HeaderValue>,
+) -> (Option<u64>, String) {
+    let retry_after_secs = parse_retry_after_secs(header);
+    let suffix = if let Some(secs) = retry_after_secs {
+        format!(" (Retry-After: {secs}s)")
+    } else if let Some(raw) = header
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let sanitized: String = raw
+            .chars()
+            .take(64)
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        format!(" (unparsed Retry-After: '{sanitized}'; using default cooldown)")
+    } else {
+        String::new()
+    };
+    (retry_after_secs, suffix)
+}
+
+fn classify_send_error(provider_label: &str, err: reqwest::Error) -> ArtworkError {
+    if err.is_timeout() {
+        ArtworkError::UploadFailed(format!("{provider_label} request timed out: {err}"))
+    } else {
+        ArtworkError::UploadFailed(format!("{provider_label} request failed: {err}"))
+    }
+}
+
+fn classify_http_failure(
+    provider: HostingProvider,
+    provider_label: &str,
+    response: reqwest::blocking::Response,
+) -> ArtworkError {
+    let status = response.status();
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        let (retry_after_secs, suffix) =
+            format_retry_after_suffix(response.headers().get(reqwest::header::RETRY_AFTER));
+        return ArtworkError::RateLimited {
+            provider,
+            retry_after_secs,
+            message: format!("{provider_label} returned HTTP 429 Too Many Requests{suffix}"),
+        };
+    }
+
+    let snippet = read_bounded_error_snippet(response);
+    let detail = if snippet.is_empty() {
+        String::new()
+    } else {
+        format!(": {snippet}")
+    };
+
+    if matches!(
+        status,
+        StatusCode::PAYLOAD_TOO_LARGE | StatusCode::UNSUPPORTED_MEDIA_TYPE
+    ) {
+        return ArtworkError::UnsupportedInput(format!(
+            "{provider_label} rejected artwork input with HTTP {status}{detail}"
+        ));
+    }
+
+    if status == StatusCode::REQUEST_TIMEOUT || status.is_server_error() {
+        return ArtworkError::UploadFailed(format!(
+            "{provider_label} returned HTTP {status}{detail}"
+        ));
+    }
+
+    ArtworkError::InvalidResponse(format!("{provider_label} returned HTTP {status}{detail}"))
+}
+
 fn detect_image_mime_and_filename(
     image_bytes: &[u8],
     filename: &str,
@@ -122,7 +194,7 @@ fn detect_image_mime_and_filename(
         Ok(image::ImageFormat::Gif) => Some(("image/gif", "gif")),
         Ok(image::ImageFormat::Avif) => Some(("image/avif", "avif")),
         Ok(other) => {
-            return Err(ArtworkError::UploadFailed(format!(
+            return Err(ArtworkError::UnsupportedInput(format!(
                 "Imgdb: unsupported normalized image format ({other:?})"
             )));
         }
@@ -142,7 +214,7 @@ fn detect_image_mime_and_filename(
     };
 
     let (mime, ext) = detected.ok_or_else(|| {
-        ArtworkError::UploadFailed("Imgdb: unrecognized image format".to_string())
+        ArtworkError::UnsupportedInput("Imgdb: unrecognized image format".to_string())
     })?;
 
     let stem = Path::new(filename)
@@ -485,7 +557,7 @@ impl ImgdbUploader {
         filename: &str,
     ) -> Result<UploadedArtwork, ArtworkError> {
         if image_bytes.is_empty() {
-            return Err(ArtworkError::UploadFailed(
+            return Err(ArtworkError::UnsupportedInput(
                 "Imgdb: cannot upload empty image".to_string(),
             ));
         }
@@ -495,7 +567,9 @@ impl ImgdbUploader {
         let part = Part::bytes(image_bytes.to_vec())
             .file_name(effective_filename)
             .mime_str(mime_type)
-            .map_err(|e| ArtworkError::UploadFailed(format!("Imgdb: invalid MIME type: {e}")))?;
+            .map_err(|e| {
+                ArtworkError::UnsupportedInput(format!("Imgdb: invalid MIME type: {e}"))
+            })?;
 
         let form = Form::new().part("file", part);
 
@@ -504,51 +578,14 @@ impl ImgdbUploader {
             .post(self.upload_url.clone())
             .multipart(form)
             .send()
-            .map_err(|e| {
-                if e.is_timeout() {
-                    ArtworkError::UploadFailed(format!("Imgdb request timed out: {e}"))
-                } else {
-                    ArtworkError::UploadFailed(format!("Imgdb request failed: {e}"))
-                }
-            })?;
+            .map_err(|e| classify_send_error("Imgdb", e))?;
 
-        let status = response.status();
-        if status == StatusCode::TOO_MANY_REQUESTS {
-            let retry_after_header = response.headers().get(reqwest::header::RETRY_AFTER);
-            let retry_after_secs = parse_retry_after_secs(retry_after_header);
-            let suffix = if let Some(secs) = retry_after_secs {
-                format!(" (Retry-After: {secs}s)")
-            } else if let Some(raw) = retry_after_header
-                .and_then(|v| v.to_str().ok())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            {
-                let sanitized: String = raw
-                    .chars()
-                    .take(64)
-                    .map(|c| if c.is_control() { ' ' } else { c })
-                    .collect();
-                format!(" (unparsed Retry-After: '{sanitized}'; using default cooldown)")
-            } else {
-                String::new()
-            };
-            return Err(ArtworkError::RateLimited {
-                provider: HostingProvider::Imgdb,
-                retry_after_secs,
-                message: format!("Imgdb returned HTTP 429 Too Many Requests{suffix}"),
-            });
-        }
-
-        if !status.is_success() {
-            let snippet = read_bounded_error_snippet(response);
-            let detail = if snippet.is_empty() {
-                String::new()
-            } else {
-                format!(": {snippet}")
-            };
-            return Err(ArtworkError::UploadFailed(format!(
-                "Imgdb returned HTTP {status}{detail}"
-            )));
+        if !response.status().is_success() {
+            return Err(classify_http_failure(
+                HostingProvider::Imgdb,
+                "Imgdb",
+                response,
+            ));
         }
 
         let raw_body = read_bounded_bytes(response, MAX_IMGDB_JSON_BYTES).map_err(|e| {
@@ -632,6 +669,60 @@ pub trait ArtworkUploader: Send + Sync {
     fn upload(&self, image_bytes: &[u8], filename: &str) -> Result<UploadedArtwork, ArtworkError>;
 }
 
+fn upload_catbox_family(
+    client: &reqwest::blocking::Client,
+    endpoint: &str,
+    provider: HostingProvider,
+    provider_label: &str,
+    retention_time: Option<&str>,
+    image_bytes: &[u8],
+    filename: &str,
+) -> Result<String, ArtworkError> {
+    if image_bytes.is_empty() {
+        return Err(ArtworkError::UnsupportedInput(format!(
+            "{provider_label}: cannot upload empty image"
+        )));
+    }
+
+    let part = Part::bytes(image_bytes.to_vec())
+        .file_name(filename.to_string())
+        .mime_str("image/jpeg")
+        .map_err(|e| {
+            ArtworkError::UnsupportedInput(format!("{provider_label}: invalid MIME type: {e}"))
+        })?;
+
+    let mut form = Form::new().text("reqtype", "fileupload");
+    if let Some(time_str) = retention_time {
+        form = form.text("time", time_str.to_string());
+    }
+    form = form.part("fileToUpload", part);
+
+    let response = client
+        .post(endpoint)
+        .multipart(form)
+        .send()
+        .map_err(|e| classify_send_error(provider_label, e))?;
+
+    if !response.status().is_success() {
+        return Err(classify_http_failure(provider, provider_label, response));
+    }
+
+    let body = response
+        .text()
+        .map_err(|e| {
+            ArtworkError::InvalidResponse(format!("{provider_label} response read failed: {e}"))
+        })?
+        .trim()
+        .to_string();
+    if !body.starts_with("https://") {
+        return Err(ArtworkError::InvalidResponse(format!(
+            "{provider_label} returned invalid URL: {body}"
+        )));
+    }
+
+    Ok(body)
+}
+
 /// Catbox image uploader implementing anonymous file uploads.
 pub struct CatboxUploader {
     client: reqwest::blocking::Client,
@@ -645,51 +736,42 @@ impl CatboxUploader {
         Ok(Self { client })
     }
 
+    fn upload_artwork(
+        &self,
+        image_bytes: &[u8],
+        filename: &str,
+    ) -> Result<UploadedArtwork, ArtworkError> {
+        let url = upload_catbox_family(
+            &self.client,
+            CATBOX_API_URL,
+            HostingProvider::Catbox,
+            "Catbox",
+            None,
+            image_bytes,
+            filename,
+        )?;
+        Ok(UploadedArtwork {
+            url,
+            provider: HostingProvider::Catbox,
+            expires_at: None,
+        })
+    }
+
     /// Uploads normalized image bytes to Catbox, returning the hosted HTTPS URL.
     pub fn upload(
         &self,
         image_bytes: &[u8],
         filename: &str,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        // Build multipart part with filename and MIME type
-        let part = Part::bytes(image_bytes.to_vec())
-            .file_name(filename.to_string())
-            .mime_str("image/jpeg")?;
-
-        // Build multipart form (anonymous upload: omit userhash)
-        let form = Form::new()
-            .text("reqtype", "fileupload")
-            .part("fileToUpload", part);
-
-        // Send POST request
-        let response = self.client.post(CATBOX_API_URL).multipart(form).send()?;
-
-        // Check HTTP status code
-        if !response.status().is_success() {
-            return Err(format!("Catbox returned HTTP status {}", response.status()).into());
-        }
-
-        // Trim response body and validate that it's a valid HTTPS URL
-        let body = response.text()?.trim().to_string();
-        if !body.starts_with("https://") {
-            return Err(format!("Catbox returned invalid URL: {body}").into());
-        }
-
-        Ok(body)
+        self.upload_artwork(image_bytes, filename)
+            .map(|uploaded| uploaded.url)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
     }
 }
 
 impl ArtworkUploader for CatboxUploader {
     fn upload(&self, image_bytes: &[u8], filename: &str) -> Result<UploadedArtwork, ArtworkError> {
-        let url = self
-            .upload(image_bytes, filename)
-            .map_err(|e| ArtworkError::UploadFailed(format!("Catbox: {e}")))?;
-
-        Ok(UploadedArtwork {
-            url,
-            provider: HostingProvider::Catbox,
-            expires_at: None,
-        })
+        self.upload_artwork(image_bytes, filename)
     }
 }
 
@@ -725,45 +807,42 @@ impl LitterboxUploader {
         self.expiry.as_str()
     }
 
+    fn upload_artwork(
+        &self,
+        image_bytes: &[u8],
+        filename: &str,
+    ) -> Result<UploadedArtwork, ArtworkError> {
+        let url = upload_catbox_family(
+            &self.client,
+            LITTERBOX_API_URL,
+            HostingProvider::Litterbox,
+            "Litterbox",
+            Some(self.time_str()),
+            image_bytes,
+            filename,
+        )?;
+        let now = current_unix_timestamp();
+        Ok(UploadedArtwork {
+            url,
+            provider: HostingProvider::Litterbox,
+            expires_at: Some(now + self.duration_secs()),
+        })
+    }
+
     /// Uploads normalized image bytes to Litterbox with configured retention.
     pub fn upload(
         &self,
         image_bytes: &[u8],
         filename: &str,
     ) -> Result<UploadedArtwork, Box<dyn std::error::Error>> {
-        let part = Part::bytes(image_bytes.to_vec())
-            .file_name(filename.to_string())
-            .mime_str("image/jpeg")?;
-
-        let form = Form::new()
-            .text("reqtype", "fileupload")
-            .text("time", self.time_str().to_string())
-            .part("fileToUpload", part);
-
-        let response = self.client.post(LITTERBOX_API_URL).multipart(form).send()?;
-
-        if !response.status().is_success() {
-            return Err(format!("Litterbox returned HTTP status {}", response.status()).into());
-        }
-
-        let body = response.text()?.trim().to_string();
-        if !body.starts_with("https://") {
-            return Err(format!("Litterbox returned invalid URL: {body}").into());
-        }
-
-        let now = current_unix_timestamp();
-        Ok(UploadedArtwork {
-            url: body,
-            provider: HostingProvider::Litterbox,
-            expires_at: Some(now + self.duration_secs()),
-        })
+        self.upload_artwork(image_bytes, filename)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
     }
 }
 
 impl ArtworkUploader for LitterboxUploader {
     fn upload(&self, image_bytes: &[u8], filename: &str) -> Result<UploadedArtwork, ArtworkError> {
-        self.upload(image_bytes, filename)
-            .map_err(|e| ArtworkError::UploadFailed(format!("Litterbox: {e}")))
+        self.upload_artwork(image_bytes, filename)
     }
 }
 

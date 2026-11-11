@@ -180,6 +180,8 @@ pub enum ArtworkError {
     InvalidUrl(String),
     DownloadFailed(String),
     NormalizationFailed(String),
+    /// The input artwork payload/format is invalid or rejected as unsupported (do not blame provider).
+    UnsupportedInput(String),
     UploadFailed(String),
     InvalidResponse(String),
     /// Provider rejected the upload with HTTP 429 Too Many Requests.
@@ -204,6 +206,7 @@ impl fmt::Display for ArtworkError {
             Self::InvalidUrl(msg) => write!(f, "Invalid artwork URL: {msg}"),
             Self::DownloadFailed(msg) => write!(f, "Artwork download failed: {msg}"),
             Self::NormalizationFailed(msg) => write!(f, "Artwork normalization failed: {msg}"),
+            Self::UnsupportedInput(msg) => write!(f, "Unsupported artwork input: {msg}"),
             Self::UploadFailed(msg) => write!(f, "Artwork upload failed: {msg}"),
             Self::InvalidResponse(msg) => write!(f, "Invalid artwork response: {msg}"),
             Self::RateLimited { message, .. } => write!(f, "Artwork host rate-limited: {message}"),
