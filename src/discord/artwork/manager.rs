@@ -249,31 +249,42 @@ impl ArtworkManager {
     }
 
     fn resolve_provider_chain(&self) -> Result<Vec<HostingProvider>, ArtworkError> {
-        let primary = HostConfig::parse(&self.config.primary_host)?
+        let primary = HostConfig::parse(&self.config.primary_host)
+            .map_err(|err| {
+                ArtworkError::UploadFailed(format!("Invalid primary host configuration ({err})"))
+            })?
             .as_provider()
             .ok_or_else(|| {
                 ArtworkError::UploadFailed("Primary artwork host is disabled".to_string())
             })?;
-        let fallback_cfg = HostConfig::parse(&self.config.fallback_host).map_err(|fb_err| {
-            ArtworkError::UploadFailed(format!("Invalid fallback host configuration ({fb_err})"))
-        })?;
+
+        let fallback_cfg = match HostConfig::parse(&self.config.fallback_host) {
+            Ok(cfg) => Some(cfg),
+            Err(fb_err) => {
+                crate::discord::log_discord(&format!(
+                    "[Artwork] Invalid fallback host configuration '{}' ({fb_err}); using default fallback behavior",
+                    self.config.fallback_host.trim()
+                ));
+                None
+            }
+        };
 
         let mut chain = Vec::with_capacity(3);
         match primary {
             HostingProvider::Imgdb => {
                 chain.push(HostingProvider::Imgdb);
                 // Preserve Catbox -> Litterbox fallback chain unless fallbacks are explicitly disabled.
-                // Do not let a legacy/configured `fallback_host = "litterbox"` skip Catbox.
-                if !matches!(fallback_cfg, HostConfig::Disabled) {
+                // Do not let a legacy/malformed `fallback_host` skip the default Imgdb fallback chain.
+                if !matches!(fallback_cfg, Some(HostConfig::Disabled)) {
                     chain.push(HostingProvider::Catbox);
                     chain.push(HostingProvider::Litterbox);
                 }
             }
             HostingProvider::Catbox => {
                 chain.push(HostingProvider::Catbox);
-                if !matches!(fallback_cfg, HostConfig::Disabled) {
+                if !matches!(fallback_cfg, Some(HostConfig::Disabled)) {
                     let fallback = match fallback_cfg {
-                        HostConfig::Provider(p) if p != HostingProvider::Catbox => p,
+                        Some(HostConfig::Provider(p)) if p != HostingProvider::Catbox => p,
                         _ => HostingProvider::Litterbox,
                     };
                     chain.push(fallback);
@@ -281,7 +292,7 @@ impl ArtworkManager {
             }
             HostingProvider::Litterbox => {
                 chain.push(HostingProvider::Litterbox);
-                if let HostConfig::Provider(fallback) = fallback_cfg
+                if let Some(HostConfig::Provider(fallback)) = fallback_cfg
                     && fallback != HostingProvider::Litterbox
                 {
                     chain.push(fallback);
