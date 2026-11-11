@@ -345,6 +345,10 @@ pub struct ImgdbUploader {
 
 impl ImgdbUploader {
     /// Builds an Imgdb uploader with a pooled HTTPS-only HTTP/1.1 client, no redirects, and timeouts.
+    ///
+    /// Upload response fields (`url`, `kind`, `type`, `size`, `expires`) are always validated.
+    /// Extra remote URL HEAD/GET verification is disabled by default to avoid extra round trips
+    /// and false fallback on transient CDN failures; use [`Self::with_verify_returned_url`] to opt in.
     pub fn new() -> Result<Self, reqwest::Error> {
         let client = super::build_http_client(
             Duration::from_secs(10),
@@ -354,8 +358,15 @@ impl ImgdbUploader {
         Ok(Self {
             client,
             upload_url: IMGDB_API_URL.to_string(),
-            verify_returned_url: true,
+            verify_returned_url: false,
         })
+    }
+
+    /// Enables or disables optional HEAD/GET verification of the returned Imgdb image URL.
+    #[must_use]
+    pub const fn with_verify_returned_url(mut self, verify: bool) -> Self {
+        self.verify_returned_url = verify;
+        self
     }
 
     fn verify_returned_image_url(&self, url: &str) -> Result<(), ArtworkError> {
