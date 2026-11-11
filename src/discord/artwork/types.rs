@@ -58,9 +58,10 @@ pub enum HostConfig {
 
 impl HostConfig {
     /// Parses a host configuration value
-    // "catbox", "litterbox", "none", or empty).
+    /// ("imgdb", "catbox", "litterbox", "none", or empty).
     pub fn parse(value: &str) -> Result<Self, ArtworkError> {
         match value.trim().to_ascii_lowercase().as_str() {
+            "imgdb" => Ok(Self::Provider(HostingProvider::Imgdb)),
             "catbox" => Ok(Self::Provider(HostingProvider::Catbox)),
             "litterbox" => Ok(Self::Provider(HostingProvider::Litterbox)),
             "" | "none" => Ok(Self::Disabled),
@@ -90,9 +91,10 @@ impl fmt::Display for HostConfig {
 }
 
 /// Supported third-party image hosting providers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HostingProvider {
+    Imgdb,
     Catbox,
     Litterbox,
 }
@@ -100,6 +102,7 @@ pub enum HostingProvider {
 impl fmt::Display for HostingProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Imgdb => write!(f, "imgdb"),
             Self::Catbox => write!(f, "catbox"),
             Self::Litterbox => write!(f, "litterbox"),
         }
@@ -150,6 +153,7 @@ pub struct UploadedArtwork {
 pub enum ArtworkInitComponent {
     Cache,
     Downloader,
+    ImgdbUploader,
     CatboxUploader,
     LitterboxUploader,
 }
@@ -159,6 +163,7 @@ impl fmt::Display for ArtworkInitComponent {
         match self {
             Self::Cache => write!(f, "cache"),
             Self::Downloader => write!(f, "downloader"),
+            Self::ImgdbUploader => write!(f, "imgdb uploader"),
             Self::CatboxUploader => write!(f, "catbox uploader"),
             Self::LitterboxUploader => write!(f, "litterbox uploader"),
         }
@@ -177,6 +182,11 @@ pub enum ArtworkError {
     NormalizationFailed(String),
     UploadFailed(String),
     InvalidResponse(String),
+    RateLimited {
+        provider: HostingProvider,
+        retry_after_secs: Option<u64>,
+        message: String,
+    },
     CooldownActive,
     Io(String),
 }
@@ -192,6 +202,7 @@ impl fmt::Display for ArtworkError {
             Self::NormalizationFailed(msg) => write!(f, "Artwork normalization failed: {msg}"),
             Self::UploadFailed(msg) => write!(f, "Artwork upload failed: {msg}"),
             Self::InvalidResponse(msg) => write!(f, "Invalid artwork response: {msg}"),
+            Self::RateLimited { message, .. } => write!(f, "Artwork host rate-limited: {message}"),
             Self::CooldownActive => write!(f, "Artwork retry cooldown is active"),
             Self::Io(msg) => write!(f, "I/O error: {msg}"),
         }

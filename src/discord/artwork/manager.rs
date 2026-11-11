@@ -4,7 +4,7 @@ use super::types::{
     ArtworkError, ArtworkInitComponent, ArtworkRequest, ArtworkResult, CacheRecord, HostConfig,
     HostingProvider,
 };
-use super::uploader::{ArtworkUploader, CatboxUploader, LitterboxUploader};
+use super::uploader::{ArtworkUploader, CatboxUploader, ImgdbUploader, LitterboxUploader};
 use crate::config::DiscordArtworkConfig;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -12,6 +12,16 @@ use std::time::{Duration, Instant};
 
 pub const DEFAULT_FAILURE_COOLDOWN: Duration = Duration::from_secs(60);
 pub const DEFAULT_CATBOX_COOLDOWN: Duration = Duration::from_secs(60);
+pub const DEFAULT_PROVIDER_COOLDOWN: Duration = Duration::from_secs(60);
+const MAX_RETRY_AFTER_COOLDOWN: Duration = Duration::from_secs(3600);
+
+fn provider_display_title(provider: HostingProvider) -> &'static str {
+    match provider {
+        HostingProvider::Imgdb => "Imgdb",
+        HostingProvider::Catbox => "Catbox",
+        HostingProvider::Litterbox => "Litterbox",
+    }
+}
 
 /// Derives a stable artwork identity key from an ArtworkRequest.
 #[must_use]
@@ -27,12 +37,13 @@ pub fn artwork_identity(req: &ArtworkRequest) -> String {
 pub struct ArtworkManager {
     cache: ArtworkCache,
     downloader: ArtworkDownloader,
-    catbox: CatboxUploader,
-    litterbox: LitterboxUploader,
+    imgdb: Option<Box<dyn ArtworkUploader>>,
+    catbox: Box<dyn ArtworkUploader>,
+    litterbox: Box<dyn ArtworkUploader>,
     config: DiscordArtworkConfig,
     failure_cooldowns: HashMap<String, Instant>,
     failure_cooldown_duration: Duration,
-    catbox_failure: Option<Instant>,
+    provider_cooldowns: HashMap<HostingProvider, Instant>,
     catbox_cooldown_duration: Duration,
 }
 
@@ -58,6 +69,19 @@ impl ArtworkManager {
                 component: ArtworkInitComponent::Downloader,
                 message: e.to_string(),
             })?;
+        let imgdb: Option<Box<dyn ArtworkUploader>> = match ImgdbUploader::new() {
+            Ok(uploader) => Some(Box::new(uploader)),
+            Err(e) => {
+                crate::discord::log_discord(&format!(
+                    "[Artwork] {}: {e}",
+                    ArtworkError::InitializationFailed {
+                        component: ArtworkInitComponent::ImgdbUploader,
+                        message: e.to_string(),
+                    }
+                ));
+                None
+            }
+        };
         let catbox = CatboxUploader::new().map_err(|e| ArtworkError::InitializationFailed {
             component: ArtworkInitComponent::CatboxUploader,
             message: e.to_string(),
@@ -68,17 +92,36 @@ impl ArtworkManager {
                 message: e.to_string(),
             }
         })?;
-        Ok(Self {
+        Ok(Self::from_parts(
             cache,
             downloader,
+            imgdb,
+            Box::new(catbox),
+            Box::new(litterbox),
+            config,
+        ))
+    }
+
+    pub(crate) fn from_parts(
+        cache: ArtworkCache,
+        downloader: ArtworkDownloader,
+        imgdb: Option<Box<dyn ArtworkUploader>>,
+        catbox: Box<dyn ArtworkUploader>,
+        litterbox: Box<dyn ArtworkUploader>,
+        config: DiscordArtworkConfig,
+    ) -> Self {
+        Self {
+            cache,
+            downloader,
+            imgdb,
             catbox,
             litterbox,
             config,
             failure_cooldowns: HashMap::new(),
             failure_cooldown_duration: DEFAULT_FAILURE_COOLDOWN,
-            catbox_failure: None,
+            provider_cooldowns: HashMap::new(),
             catbox_cooldown_duration: DEFAULT_CATBOX_COOLDOWN,
-        })
+        }
     }
 
     /// Access configuration.
@@ -108,22 +151,55 @@ impl ArtworkManager {
         }
     }
 
-    /// Check if Catbox uploads are cooling down after a failure.
-    #[must_use]
-    pub fn is_catbox_cooling_down(&self) -> bool {
-        if let Some(last_fail) = self.catbox_failure {
-            last_fail.elapsed() < self.catbox_cooldown_duration
-        } else {
-            false
+    fn default_cooldown_for_provider(&self, provider: HostingProvider) -> Duration {
+        match provider {
+            HostingProvider::Imgdb | HostingProvider::Litterbox => DEFAULT_PROVIDER_COOLDOWN,
+            HostingProvider::Catbox => self.catbox_cooldown_duration,
         }
     }
 
-    fn record_catbox_failure(&mut self) {
-        self.catbox_failure = Some(Instant::now());
+    /// Check if a hosting provider is cooling down after a failure or rate limit.
+    #[must_use]
+    pub fn is_provider_cooling_down(&self, provider: HostingProvider) -> bool {
+        self.provider_cooldowns
+            .get(&provider)
+            .is_some_and(|until| Instant::now() < *until)
     }
 
+    fn record_provider_failure(
+        &mut self,
+        provider: HostingProvider,
+        retry_after_secs: Option<u64>,
+    ) {
+        let duration = match retry_after_secs {
+            Some(0) => return,
+            Some(secs) => Duration::from_secs(secs).min(MAX_RETRY_AFTER_COOLDOWN),
+            None => self.default_cooldown_for_provider(provider),
+        };
+        if !duration.is_zero() {
+            self.provider_cooldowns
+                .insert(provider, Instant::now() + duration);
+        }
+    }
+
+    fn clear_provider_failure(&mut self, provider: HostingProvider) {
+        self.provider_cooldowns.remove(&provider);
+    }
+
+    /// Check if Catbox uploads are cooling down after a failure.
+    #[must_use]
+    pub fn is_catbox_cooling_down(&self) -> bool {
+        self.is_provider_cooling_down(HostingProvider::Catbox)
+    }
+
+    #[cfg(test)]
+    fn record_catbox_failure(&mut self) {
+        self.record_provider_failure(HostingProvider::Catbox, None);
+    }
+
+    #[cfg(test)]
     fn clear_catbox_failure(&mut self) {
-        self.catbox_failure = None;
+        self.clear_provider_failure(HostingProvider::Catbox);
     }
 
     fn record_failure(&mut self, identity: &str) {
@@ -135,22 +211,27 @@ impl ArtworkManager {
         self.failure_cooldowns.remove(identity);
     }
 
-    /// Resolves artwork executing the full 9-step workflow:
+    /// Resolves artwork executing the full workflow:
     /// 1. Check cache.
     /// 2. Download original artwork.
     /// 3. Normalize image.
     /// 4. Calculate content hash.
     /// 5. Check for duplicate content (content-hash index).
-    /// 6. Upload to Catbox.
-    /// 7. Fall back to Litterbox.
-    /// 8. Persist cache entry.
-    /// 9. Return hosted artwork.
+    /// 6. Upload to Imgdb (primary, 24h TTL).
+    /// 7. Fall back to Catbox.
+    /// 8. Fall back to Litterbox.
+    /// 9. Persist cache entry.
+    /// 10. Return hosted artwork.
     pub fn resolve(&mut self, request: ArtworkRequest) -> Result<ArtworkResult, ArtworkError> {
         let identity = artwork_identity(&request);
         let now = current_unix_timestamp();
 
         // Check cache
         if let Some(hit) = self.cache.lookup(&request, now) {
+            crate::discord::log_discord(&format!(
+                "[Artwork] Reusing cached artwork ({})",
+                hit.hosted_url
+            ));
             self.clear_failure(&identity);
             return Ok(hit);
         }
@@ -171,27 +252,86 @@ impl ArtworkManager {
         outcome
     }
 
+    fn resolve_provider_chain(&self) -> Result<Vec<HostingProvider>, ArtworkError> {
+        let primary = HostConfig::parse(&self.config.primary_host)?
+            .as_provider()
+            .ok_or_else(|| {
+                ArtworkError::UploadFailed("Primary artwork host is disabled".to_string())
+            })?;
+        let fallback_cfg = HostConfig::parse(&self.config.fallback_host).map_err(|fb_err| {
+            ArtworkError::UploadFailed(format!("Invalid fallback host configuration ({fb_err})"))
+        })?;
+
+        let mut chain = Vec::with_capacity(3);
+        match primary {
+            HostingProvider::Imgdb => {
+                chain.push(HostingProvider::Imgdb);
+                // Preserve Catbox -> Litterbox fallback chain unless fallbacks are explicitly disabled.
+                // Do not let a legacy/configured `fallback_host = "litterbox"` skip Catbox.
+                if !matches!(fallback_cfg, HostConfig::Disabled) {
+                    chain.push(HostingProvider::Catbox);
+                    chain.push(HostingProvider::Litterbox);
+                }
+            }
+            HostingProvider::Catbox => {
+                chain.push(HostingProvider::Catbox);
+                if !matches!(fallback_cfg, HostConfig::Disabled) {
+                    let fallback = match fallback_cfg {
+                        HostConfig::Provider(p) if p != HostingProvider::Catbox => p,
+                        _ => HostingProvider::Litterbox,
+                    };
+                    chain.push(fallback);
+                }
+            }
+            HostingProvider::Litterbox => {
+                chain.push(HostingProvider::Litterbox);
+                if let HostConfig::Provider(fallback) = fallback_cfg
+                    && fallback != HostingProvider::Litterbox
+                {
+                    chain.push(fallback);
+                }
+            }
+        }
+        Ok(chain)
+    }
+
     fn upload_to_host(
         &mut self,
         host: HostingProvider,
         bytes: &[u8],
     ) -> Result<(String, HostingProvider, Option<u64>), ArtworkError> {
-        let uploaded = match host {
-            HostingProvider::Catbox => {
-                if self.is_catbox_cooling_down() {
-                    return Err(ArtworkError::CooldownActive);
-                }
-                let result = ArtworkUploader::upload(&self.catbox, bytes, "art.jpg");
-                match &result {
-                    Ok(_) => self.clear_catbox_failure(),
-                    Err(_) => self.record_catbox_failure(),
-                }
-                result?
+        if self.is_provider_cooling_down(host) {
+            return Err(ArtworkError::CooldownActive);
+        }
+
+        let uploader: &dyn ArtworkUploader = match host {
+            HostingProvider::Imgdb => {
+                self.imgdb
+                    .as_deref()
+                    .ok_or_else(|| ArtworkError::InitializationFailed {
+                        component: ArtworkInitComponent::ImgdbUploader,
+                        message: "Imgdb uploader unavailable".to_string(),
+                    })?
             }
-            HostingProvider::Litterbox => {
-                ArtworkUploader::upload(&self.litterbox, bytes, "art.jpg")?
-            }
+            HostingProvider::Catbox => self.catbox.as_ref(),
+            HostingProvider::Litterbox => self.litterbox.as_ref(),
         };
+
+        let result = uploader.upload(bytes, "art.jpg");
+        match &result {
+            Ok(_) => self.clear_provider_failure(host),
+            Err(err) => {
+                let retry_after = match err {
+                    ArtworkError::RateLimited {
+                        retry_after_secs, ..
+                    } => *retry_after_secs,
+                    _ => None,
+                };
+                self.record_provider_failure(host, retry_after);
+            }
+        }
+
+        let uploaded = result?;
         Ok((uploaded.url, uploaded.provider, uploaded.expires_at))
     }
 
@@ -219,42 +359,63 @@ impl ArtworkManager {
             .cache
             .find_reusable_upload(&downloaded.content_hash, now)
         {
+            crate::discord::log_discord(&format!(
+                "[Artwork] Reusing cached artwork (shared content hash via {})",
+                existing.host
+            ));
             (
                 existing.hosted_url.clone(),
                 existing.host,
                 existing.expires_at,
             )
         } else {
-            let primary = HostConfig::parse(&self.config.primary_host)?
-                .as_provider()
-                .ok_or_else(|| {
-                    ArtworkError::UploadFailed("Primary artwork host is disabled".to_string())
-                })?;
-            let fallback_cfg = HostConfig::parse(&self.config.fallback_host);
+            let chain = self.resolve_provider_chain()?;
+            let mut provider_errors = Vec::with_capacity(chain.len());
+            let mut upload_success = None;
 
-            match self.upload_to_host(primary, &downloaded.bytes) {
-                Ok(res) => res,
-                Err(primary_err) => match fallback_cfg {
-                    Ok(HostConfig::Provider(fallback)) if fallback != primary => {
+            for (idx, provider) in chain.iter().copied().enumerate() {
+                if idx > 0 {
+                    crate::discord::log_discord(&format!(
+                        "[Artwork] Falling back to {}",
+                        provider_display_title(provider)
+                    ));
+                }
+                if provider == HostingProvider::Imgdb && !self.is_provider_cooling_down(provider) {
+                    crate::discord::log_discord("[Artwork] Imgdb upload started");
+                }
+
+                match self.upload_to_host(provider, &downloaded.bytes) {
+                    Ok(res) => {
                         crate::discord::log_discord(&format!(
-                            "Warning: {primary} upload failed ({primary_err}), falling back to {fallback}"
+                            "[Artwork] {} upload succeeded ({})",
+                            provider_display_title(provider),
+                            res.0
                         ));
-                        self.upload_to_host(fallback, &downloaded.bytes).map_err(
-                            |fb_err| {
-                                ArtworkError::UploadFailed(format!(
-                                    "Both {primary} ({primary_err}) and {fallback} ({fb_err}) uploads failed"
-                                ))
-                            },
-                        )?
+                        upload_success = Some(res);
+                        break;
                     }
-                    Ok(_) => return Err(primary_err),
-                    Err(fb_err) => {
-                        return Err(ArtworkError::UploadFailed(format!(
-                            "Primary {primary} failed ({primary_err}); invalid fallback host ({fb_err})"
-                        )));
+                    Err(err) => {
+                        crate::discord::log_discord(&format!(
+                            "[Artwork] {} upload failed: {err}",
+                            provider_display_title(provider)
+                        ));
+                        provider_errors.push((provider, err));
                     }
-                },
+                }
             }
+
+            let Some(res) = upload_success else {
+                let combined = provider_errors
+                    .iter()
+                    .map(|(provider, err)| format!("{provider}: {err}"))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                crate::discord::log_discord(&format!("[Artwork] All providers failed: {combined}"));
+                return Err(ArtworkError::UploadFailed(format!(
+                    "All artwork hosting providers failed ({combined})"
+                )));
+            };
+            res
         };
 
         // Persist cache entry atomically without failing artwork publication if index save errors
@@ -309,9 +470,10 @@ impl ArtworkManager {
 
     /// Resolves an asset key for Discord Rich Presence according to fallback policy:
     ///
-    /// 1. Catbox hosted URL if successful.
-    /// 2. Litterbox (72h) hosted URL if Catbox failed.
-    /// 3. Configured ANSImuz default asset ("logo") if both uploads fail or artwork is unavailable.
+    /// 1. Imgdb (24h TTL) hosted URL if successful.
+    /// 2. Catbox hosted URL if Imgdb failed.
+    /// 3. Litterbox (configurable TTL) hosted URL if Catbox failed.
+    /// 4. Configured ANSImuz default asset ("logo") if all uploads fail or artwork is unavailable.
     #[must_use]
     pub fn resolve_asset_key(&mut self, request: Option<&ArtworkRequest>) -> String {
         let Some(req) = request else {
@@ -383,6 +545,10 @@ mod tests {
 
     #[test]
     fn manager_host_config_parsing() {
+        assert_eq!(
+            HostConfig::parse(" ImgDb "),
+            Ok(HostConfig::Provider(HostingProvider::Imgdb))
+        );
         assert_eq!(
             HostConfig::parse(" CatBox "),
             Ok(HostConfig::Provider(HostingProvider::Catbox))

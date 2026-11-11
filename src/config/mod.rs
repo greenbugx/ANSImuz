@@ -50,11 +50,11 @@ fn default_image_size() -> u32 {
 }
 
 fn default_primary_host() -> String {
-    "catbox".to_string()
+    "imgdb".to_string()
 }
 
 fn default_fallback_host() -> String {
-    "litterbox".to_string()
+    "catbox".to_string()
 }
 
 /// Supported Litterbox temporary-hosting retention durations.
@@ -608,8 +608,8 @@ litterbox_expiry = "72h"
         let defaults = DiscordConfig::default();
         assert!(!defaults.enabled);
         assert!(defaults.artwork_enabled);
-        assert_eq!(defaults.artwork.primary_host, "catbox");
-        assert_eq!(defaults.artwork.fallback_host, "litterbox");
+        assert_eq!(defaults.artwork.primary_host, "imgdb");
+        assert_eq!(defaults.artwork.fallback_host, "catbox");
         assert_eq!(
             defaults.artwork.litterbox_expiry,
             LitterboxExpiry::SeventyTwoHours

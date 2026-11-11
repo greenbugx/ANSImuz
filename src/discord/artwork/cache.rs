@@ -48,7 +48,8 @@ pub fn make_url_key(source_url: &str) -> String {
 
 /// Validates whether a cache record is locally valid according to its known metadata.
 ///
-/// Litterbox entries always carry an explicit expiration timestamp (`expires_at`).
+/// Imgdb and Litterbox entries always carry an explicit expiration timestamp (`expires_at`)
+/// and are invalid once `expires_at <= now_secs`.
 /// Catbox entries have no known expiry (`expires_at: None`) in the local cache model,
 /// though anonymous uploads can still expire remotely after prolonged inactivity.
 /// Callers should use [`ArtworkCache::invalidate`] or [`ArtworkCache::invalidate_hosted_url`]
@@ -56,8 +57,8 @@ pub fn make_url_key(source_url: &str) -> String {
 #[must_use]
 pub fn is_record_valid(record: &CacheRecord, now_secs: u64) -> bool {
     match record.host {
-        HostingProvider::Litterbox => {
-            // For Litterbox entries, an explicit expires_at timestamp is mandatory.
+        HostingProvider::Imgdb | HostingProvider::Litterbox => {
+            // Imgdb and Litterbox entries require an explicit future expiration timestamp.
             match record.expires_at {
                 Some(expires) => expires > now_secs,
                 None => false,
@@ -327,9 +328,14 @@ impl ArtworkCache {
                 continue;
             }
 
-            // Check expiry timestamps for Litterbox
-            // retain Catbox entries with no known expiry
+            // Check expiry timestamps for Imgdb and Litterbox;
+            // retain Catbox entries with no known expiry.
             if !is_record_valid(&record, now_secs) {
+                if record.host == HostingProvider::Imgdb {
+                    crate::discord::log_discord(&format!(
+                        "[Artwork] Cached Imgdb URL expired (key: {key})"
+                    ));
+                }
                 expired_rel_files.push(Self::normalize_rel(&record.local_file));
                 removed += 1;
                 continue;
@@ -520,6 +526,18 @@ impl ArtworkCache {
 
         // 4. Check whether the hosted URL is locally valid according to its known metadata
         if !is_record_valid(&record, now_secs) {
+            if record.host == HostingProvider::Imgdb {
+                crate::discord::log_discord(&format!(
+                    "[Artwork] Cached Imgdb URL expired (key: {key})"
+                ));
+            }
+            self.invalidate_expired_remote_record(
+                &key,
+                pkey.as_deref(),
+                &ukey,
+                &record.hosted_url,
+                now_secs,
+            );
             return None;
         }
 
@@ -556,6 +574,33 @@ impl ArtworkCache {
             local_path: full_local_path,
             content_hash: record.content_hash,
         })
+    }
+
+    /// Removes stale remote metadata for an expired cache entry without deleting its local image.
+    fn invalidate_expired_remote_record(
+        &mut self,
+        matched_key: &str,
+        pkey: Option<&str>,
+        ukey: &str,
+        hosted_url: &str,
+        now_secs: u64,
+    ) {
+        let mut removed_any = false;
+        self.index.entries.retain(|k, r| {
+            let matches_key = k == matched_key || pkey == Some(k.as_str()) || k == ukey;
+            let matches_hosted = r.hosted_url == hosted_url;
+            if matches_hosted || (matches_key && !is_record_valid(r, now_secs)) {
+                removed_any = true;
+                false
+            } else {
+                true
+            }
+        });
+
+        if removed_any {
+            self.rebuild_content_hash_index_at(now_secs);
+            self.index_dirty = true;
+        }
     }
 
     /// Persists any deferred in-memory index updates (such as hit recency timestamps) to disk.
