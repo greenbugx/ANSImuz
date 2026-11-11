@@ -267,6 +267,15 @@ impl ArtworkCache {
     ///
     /// Current layout uses flat `images/<sha256>.jpg` files, with recursive traversal to handle nested layouts.
     fn clean_orphaned_images(&self, include_part_files: bool) -> u64 {
+        let preserved = HashSet::new();
+        self.clean_orphaned_images_excluding(include_part_files, &preserved)
+    }
+
+    fn clean_orphaned_images_excluding(
+        &self,
+        include_part_files: bool,
+        preserved: &HashSet<String>,
+    ) -> u64 {
         if !self.images_dir.exists() {
             return 0;
         }
@@ -290,7 +299,7 @@ impl ArtworkCache {
                 continue;
             };
             let rel_str = rel.to_string_lossy().replace('\\', "/");
-            if !referenced.contains(&rel_str) {
+            if !referenced.contains(&rel_str) && !preserved.contains(&rel_str) {
                 let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                 if fs::remove_file(&path).is_ok() {
                     pruned_bytes += size;
@@ -310,7 +319,8 @@ impl ArtworkCache {
     /// 1. Read index.json (already deserialized in `load`).
     /// 2. Check that referenced local files exist.
     /// 3. Remove invalid local entries.
-    /// 4. Check local expiry metadata (purge expired Litterbox entries without deleting shared files).
+    /// 4. Check local expiry metadata (remove expired Imgdb remote metadata while preserving local images
+    ///    and purge expired Litterbox entries unless shared).
     /// 5. Retain Catbox mappings with no known expiry.
     /// 6. Rebuild in-memory lookup maps (content_hash index) deterministically and remove orphaned files.
     pub fn validate_and_rebuild_indexes(&mut self, now_secs: u64) -> usize {
@@ -318,6 +328,7 @@ impl ArtworkCache {
         let mut dirty = false;
         let mut valid_entries = HashMap::new();
         let mut expired_rel_files = Vec::new();
+        let mut preserved_rel_files = HashSet::new();
 
         for (key, mut record) in self.index.entries.drain() {
             let local_path = self.base_dir.join(&record.local_file);
@@ -331,12 +342,17 @@ impl ArtworkCache {
             // Check expiry timestamps for Imgdb and Litterbox;
             // retain Catbox entries with no known expiry.
             if !is_record_valid(&record, now_secs) {
+                let rel = Self::normalize_rel(&record.local_file);
                 if record.host == HostingProvider::Imgdb {
                     crate::discord::log_discord(&format!(
                         "[Artwork] Cached Imgdb URL expired (key: {key})"
                     ));
+                    // Preserve the normalized local artwork for expired Imgdb entries,
+                    // matching runtime invalidation in `invalidate_expired_remote_record`.
+                    preserved_rel_files.insert(rel);
+                } else {
+                    expired_rel_files.push(rel);
                 }
-                expired_rel_files.push(Self::normalize_rel(&record.local_file));
                 removed += 1;
                 continue;
             }
@@ -359,15 +375,15 @@ impl ArtworkCache {
             .map(|r| Self::normalize_rel(&r.local_file))
             .collect();
 
-        // Only delete expired image files if no remaining valid entry still references them
+        // Only delete expired non-Imgdb image files if no valid or preserved entry still references them
         for rel in expired_rel_files {
-            if !referenced_files.contains(&rel) {
+            if !referenced_files.contains(&rel) && !preserved_rel_files.contains(&rel) {
                 let _ = fs::remove_file(self.base_dir.join(&rel));
             }
         }
 
-        // Clean any leftover orphaned files (including stale .part files) at startup
-        self.clean_orphaned_images(true);
+        // Clean any leftover genuinely orphaned files (including stale .part files) at startup
+        self.clean_orphaned_images_excluding(true, &preserved_rel_files);
 
         if removed > 0 || dirty || self.index_dirty {
             if let Err(err) = self.save_index() {
