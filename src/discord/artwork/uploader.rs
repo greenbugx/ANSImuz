@@ -1,5 +1,5 @@
 use super::cache::current_unix_timestamp;
-use super::types::{ArtworkError, HostingProvider, UploadedArtwork};
+use super::types::{ArtworkError, ArtworkInitComponent, HostingProvider, UploadedArtwork};
 use crate::config::LitterboxExpiry;
 use reqwest::StatusCode;
 use reqwest::blocking::multipart::{Form, Part};
@@ -100,6 +100,17 @@ fn is_accepted_image_mime(mime: &str) -> bool {
     ACCEPTED_IMAGE_MIME_TYPES.contains(&essence.as_str())
 }
 
+/// Parses an HTTP `Retry-After` header as integer delta-seconds.
+///
+/// Limitation: This crate has no date/time dependency, so only integer delta-seconds values
+/// are supported. HTTP-date `Retry-After` values (as well as non-numeric or negative values)
+/// return `None` and fall back to the artwork manager's default provider cooldown.
+fn parse_retry_after_secs(header: Option<&reqwest::header::HeaderValue>) -> Option<u64> {
+    header
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+}
+
 fn detect_image_mime_and_filename(
     image_bytes: &[u8],
     filename: &str,
@@ -175,56 +186,42 @@ fn is_disallowed_ipv6(ip: Ipv6Addr) -> bool {
         || is_unicast_link_local
 }
 
-fn validate_public_host(authority: &str) -> Result<(), ArtworkError> {
+fn validate_public_host(authority: &str, label: &str) -> Result<(), String> {
     if authority.is_empty() || authority.contains('@') {
-        return Err(ArtworkError::InvalidResponse(
-            "Imgdb returned URL with invalid authority".to_string(),
-        ));
+        return Err(format!("{label} has an invalid authority"));
     }
 
     let host = if let Some(after_open) = authority.strip_prefix('[') {
         let Some((ipv6_str, remainder)) = after_open.split_once(']') else {
-            return Err(ArtworkError::InvalidResponse(
-                "Imgdb returned URL with malformed IPv6 host".to_string(),
-            ));
+            return Err(format!("{label} has a malformed IPv6 host"));
         };
         if !remainder.is_empty() {
             let Some(port_str) = remainder.strip_prefix(':') else {
-                return Err(ArtworkError::InvalidResponse(
-                    "Imgdb returned URL with malformed host port".to_string(),
-                ));
+                return Err(format!("{label} has a malformed host port"));
             };
-            let port: u16 = port_str.parse().map_err(|_| {
-                ArtworkError::InvalidResponse("Imgdb returned URL with invalid port".to_string())
-            })?;
+            let port: u16 = port_str
+                .parse()
+                .map_err(|_| format!("{label} has an invalid port"))?;
             if port == 0 {
-                return Err(ArtworkError::InvalidResponse(
-                    "Imgdb returned URL with port 0".to_string(),
-                ));
+                return Err(format!("{label} cannot use port 0"));
             }
         }
-        let ipv6: Ipv6Addr = ipv6_str.parse().map_err(|_| {
-            ArtworkError::InvalidResponse("Imgdb returned URL with invalid IPv6 host".to_string())
-        })?;
+        let ipv6: Ipv6Addr = ipv6_str
+            .parse()
+            .map_err(|_| format!("{label} has an invalid IPv6 host"))?;
         if is_disallowed_ipv6(ipv6) {
-            return Err(ArtworkError::InvalidResponse(
-                "Imgdb returned URL pointing to non-public IPv6 destination".to_string(),
-            ));
+            return Err(format!("{label} points to a non-public IPv6 destination"));
         }
         return Ok(());
     } else if let Some((h, port_str)) = authority.split_once(':') {
         if h.is_empty() || port_str.contains(':') {
-            return Err(ArtworkError::InvalidResponse(
-                "Imgdb returned URL with malformed host or port".to_string(),
-            ));
+            return Err(format!("{label} has a malformed host or port"));
         }
-        let port: u16 = port_str.parse().map_err(|_| {
-            ArtworkError::InvalidResponse("Imgdb returned URL with invalid port".to_string())
-        })?;
+        let port: u16 = port_str
+            .parse()
+            .map_err(|_| format!("{label} has an invalid port"))?;
         if port == 0 {
-            return Err(ArtworkError::InvalidResponse(
-                "Imgdb returned URL with port 0".to_string(),
-            ));
+            return Err(format!("{label} cannot use port 0"));
         }
         h
     } else {
@@ -241,16 +238,12 @@ fn validate_public_host(authority: &str) -> Result<(), ArtworkError> {
         || lower.ends_with(".lan")
         || lower.ends_with(".home")
     {
-        return Err(ArtworkError::InvalidResponse(format!(
-            "Imgdb returned URL with local/private host: {host}"
-        )));
+        return Err(format!("{label} has a local/private host: {host}"));
     }
 
     if let Ok(ipv4) = lower.parse::<Ipv4Addr>() {
         if is_disallowed_ipv4(ipv4) {
-            return Err(ArtworkError::InvalidResponse(format!(
-                "Imgdb returned URL pointing to private/non-public IP: {host}"
-            )));
+            return Err(format!("{label} points to a private/non-public IP: {host}"));
         }
         return Ok(());
     }
@@ -265,81 +258,125 @@ fn validate_public_host(authority: &str) -> Result<(), ArtworkError> {
                 || !l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
         })
     {
-        return Err(ArtworkError::InvalidResponse(format!(
-            "Imgdb returned URL with malformed host: {host}"
-        )));
+        return Err(format!("{label} has a malformed host: {host}"));
     }
 
     let tld = labels.last().copied().unwrap_or("");
     if tld.len() < 2 || !tld.bytes().all(|b| b.is_ascii_alphabetic()) {
-        return Err(ArtworkError::InvalidResponse(format!(
-            "Imgdb returned URL with invalid TLD: {host}"
-        )));
+        return Err(format!("{label} has an invalid TLD: {host}"));
     }
 
     Ok(())
 }
 
-fn validate_imgdb_returned_url(raw_url: &str) -> Result<(), ArtworkError> {
+fn parse_bounded_url_no_credentials(raw_url: &str, label: &str) -> Result<reqwest::Url, String> {
     let url = raw_url.trim();
     if url.is_empty() {
-        return Err(ArtworkError::InvalidResponse(
-            "Imgdb returned an empty URL".to_string(),
-        ));
+        return Err(format!("{label} is empty"));
     }
     if url.len() > 2048 || url.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        return Err(ArtworkError::InvalidResponse(
-            "Imgdb returned malformed URL characters".to_string(),
-        ));
+        return Err(format!("{label} has malformed URL characters: {url}"));
     }
 
-    let Some(rest) = url.strip_prefix("https://") else {
-        return Err(ArtworkError::InvalidResponse(format!(
-            "Imgdb URL must use HTTPS: {url}"
-        )));
+    let parsed =
+        reqwest::Url::parse(url).map_err(|e| format!("{label} is invalid ({e}): {url}"))?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(format!("{label} must not embed credentials: {url}"));
+    }
+    if parsed.path().trim_end_matches('/').is_empty() {
+        return Err(format!("{label} is missing a resource path: {url}"));
+    }
+
+    Ok(parsed)
+}
+
+fn parse_and_validate_https_public_url(raw_url: &str, label: &str) -> Result<reqwest::Url, String> {
+    let parsed = parse_bounded_url_no_credentials(raw_url, label)?;
+    if parsed.scheme() != "https" {
+        return Err(format!("{label} must use HTTPS: {}", raw_url.trim()));
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| format!("{label} is missing a host: {}", raw_url.trim()))?;
+    let authority = match parsed.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
     };
+    validate_public_host(&authority, label)?;
 
-    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let authority = &rest[..authority_end];
-    validate_public_host(authority)?;
+    Ok(parsed)
+}
 
-    let tail = &rest[authority_end..];
-    let path_only = tail.split(['?', '#']).next().unwrap_or("");
-    let trimmed_path = path_only.trim_end_matches('/');
-    if trimmed_path.is_empty() {
-        return Err(ArtworkError::InvalidResponse(format!(
-            "Imgdb URL is missing an image resource path: {url}"
+fn validate_imgdb_upload_url(raw_url: &str) -> Result<reqwest::Url, ArtworkError> {
+    let parsed = parse_and_validate_https_public_url(raw_url, "Imgdb upload URL")
+        .map_err(ArtworkError::InvalidUrl)?;
+    if parsed.fragment().is_some() {
+        return Err(ArtworkError::InvalidUrl(format!(
+            "Imgdb upload URL must not contain a fragment: {parsed}"
         )));
     }
+    Ok(parsed)
+}
 
-    let lower_path = trimmed_path.to_ascii_lowercase();
+#[cfg(test)]
+#[allow(dead_code)]
+fn validate_local_mock_upload_url(raw_url: &str) -> Result<reqwest::Url, ArtworkError> {
+    let parsed = parse_bounded_url_no_credentials(raw_url, "Imgdb test upload URL")
+        .map_err(ArtworkError::InvalidUrl)?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(ArtworkError::InvalidUrl(format!(
+            "Imgdb test upload URL must use HTTP/HTTPS: {}",
+            raw_url.trim()
+        )));
+    }
+    if !matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "[::1]")) {
+        return Err(ArtworkError::InvalidUrl(format!(
+            "Imgdb test upload URL must target a local loopback host: {}",
+            raw_url.trim()
+        )));
+    }
+    if parsed.port() == Some(0) || parsed.fragment().is_some() {
+        return Err(ArtworkError::InvalidUrl(format!(
+            "Imgdb test upload URL has invalid port or fragment: {}",
+            raw_url.trim()
+        )));
+    }
+    Ok(parsed)
+}
+
+fn validate_imgdb_returned_url(raw_url: &str) -> Result<reqwest::Url, ArtworkError> {
+    let parsed = parse_and_validate_https_public_url(raw_url, "Imgdb URL")
+        .map_err(ArtworkError::InvalidResponse)?;
+
+    let lower_path = parsed.path().trim_end_matches('/').to_ascii_lowercase();
     if lower_path == "/api" || lower_path.starts_with("/api/") {
         return Err(ArtworkError::InvalidResponse(format!(
-            "Imgdb returned metadata/API endpoint instead of direct image URL: {url}"
+            "Imgdb returned metadata/API endpoint instead of direct image URL: {raw_url}"
         )));
     }
 
     let last_segment = lower_path.rsplit('/').next().unwrap_or("");
     if last_segment.is_empty() {
         return Err(ArtworkError::InvalidResponse(format!(
-            "Imgdb URL does not point to an image resource: {url}"
+            "Imgdb URL does not point to an image resource: {raw_url}"
         )));
     }
     if let Some((_, ext)) = last_segment.rsplit_once('.')
         && NON_IMAGE_EXTENSIONS.contains(&ext)
     {
         return Err(ArtworkError::InvalidResponse(format!(
-            "Imgdb URL points to a non-image page/resource (.{ext}): {url}"
+            "Imgdb URL points to a non-image page/resource (.{ext}): {raw_url}"
         )));
     }
 
-    Ok(())
+    Ok(parsed)
 }
 
 /// Imgdb image uploader implementing anonymous 24-hour TTL uploads (`https://imgdb.io/api/v1/upload?ttl=86400`).
 pub struct ImgdbUploader {
     client: reqwest::blocking::Client,
-    upload_url: String,
+    upload_url: reqwest::Url,
     verify_returned_url: bool,
 }
 
@@ -349,15 +386,47 @@ impl ImgdbUploader {
     /// Upload response fields (`url`, `kind`, `type`, `size`, `expires`) are always validated.
     /// Extra remote URL HEAD/GET verification is disabled by default to avoid extra round trips
     /// and false fallback on transient CDN failures; use [`Self::with_verify_returned_url`] to opt in.
-    pub fn new() -> Result<Self, reqwest::Error> {
+    pub fn new() -> Result<Self, ArtworkError> {
+        let upload_url = validate_imgdb_upload_url(IMGDB_API_URL).map_err(|e| {
+            ArtworkError::InitializationFailed {
+                component: ArtworkInitComponent::ImgdbUploader,
+                message: e.to_string(),
+            }
+        })?;
         let client = super::build_http_client(
             Duration::from_secs(10),
             Duration::from_secs(30),
             Some(reqwest::redirect::Policy::none()),
-        )?;
+        )
+        .map_err(|e| ArtworkError::InitializationFailed {
+            component: ArtworkInitComponent::ImgdbUploader,
+            message: e.to_string(),
+        })?;
         Ok(Self {
             client,
-            upload_url: IMGDB_API_URL.to_string(),
+            upload_url,
+            verify_returned_url: false,
+        })
+    }
+
+    /// Private test constructor accepting only validated local loopback mock server URLs.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(super) fn with_test_upload_url(upload_url: &str) -> Result<Self, ArtworkError> {
+        let upload_url = validate_local_mock_upload_url(upload_url)?;
+        let client = super::build_http_client_with_https(
+            Duration::from_secs(10),
+            Duration::from_secs(30),
+            Some(reqwest::redirect::Policy::none()),
+            false,
+        )
+        .map_err(|e| ArtworkError::InitializationFailed {
+            component: ArtworkInitComponent::ImgdbUploader,
+            message: e.to_string(),
+        })?;
+        Ok(Self {
+            client,
+            upload_url,
             verify_returned_url: false,
         })
     }
@@ -369,8 +438,8 @@ impl ImgdbUploader {
         self
     }
 
-    fn verify_returned_image_url(&self, url: &str) -> Result<(), ArtworkError> {
-        let response = match self.client.head(url).send() {
+    fn verify_returned_image_url(&self, url: &reqwest::Url) -> Result<(), ArtworkError> {
+        let response = match self.client.head(url.clone()).send() {
             Ok(resp)
                 if matches!(
                     resp.status(),
@@ -379,7 +448,7 @@ impl ImgdbUploader {
                         | StatusCode::NOT_IMPLEMENTED
                 ) =>
             {
-                self.client.get(url).send()
+                self.client.get(url.clone()).send()
             }
             other => other,
         }
@@ -432,7 +501,7 @@ impl ImgdbUploader {
 
         let response = self
             .client
-            .post(&self.upload_url)
+            .post(self.upload_url.clone())
             .multipart(form)
             .send()
             .map_err(|e| {
@@ -445,14 +514,24 @@ impl ImgdbUploader {
 
         let status = response.status();
         if status == StatusCode::TOO_MANY_REQUESTS {
-            let retry_after_secs = response
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
+            let retry_after_header = response.headers().get(reqwest::header::RETRY_AFTER);
+            let retry_after_secs = parse_retry_after_secs(retry_after_header);
+            let suffix = if let Some(secs) = retry_after_secs {
+                format!(" (Retry-After: {secs}s)")
+            } else if let Some(raw) = retry_after_header
                 .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.trim().parse::<u64>().ok());
-            let suffix = retry_after_secs
-                .map(|secs| format!(" (Retry-After: {secs}s)"))
-                .unwrap_or_default();
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                let sanitized: String = raw
+                    .chars()
+                    .take(64)
+                    .map(|c| if c.is_control() { ' ' } else { c })
+                    .collect();
+                format!(" (unparsed Retry-After: '{sanitized}'; using default cooldown)")
+            } else {
+                String::new()
+            };
             return Err(ArtworkError::RateLimited {
                 provider: HostingProvider::Imgdb,
                 retry_after_secs,
@@ -491,7 +570,7 @@ impl ImgdbUploader {
             })?
             .to_string();
 
-        validate_imgdb_returned_url(&url)?;
+        let validated_url = validate_imgdb_returned_url(&url)?;
 
         if let Some(kind) = parsed.kind.as_deref()
             && !kind.trim().eq_ignore_ascii_case("image")
@@ -531,7 +610,7 @@ impl ImgdbUploader {
         };
 
         if self.verify_returned_url {
-            self.verify_returned_image_url(&url)?;
+            self.verify_returned_image_url(&validated_url)?;
         }
 
         Ok(UploadedArtwork {

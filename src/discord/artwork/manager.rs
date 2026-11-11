@@ -72,13 +72,7 @@ impl ArtworkManager {
         let imgdb: Option<Box<dyn ArtworkUploader>> = match ImgdbUploader::new() {
             Ok(uploader) => Some(Box::new(uploader)),
             Err(e) => {
-                crate::discord::log_discord(&format!(
-                    "[Artwork] {}: {e}",
-                    ArtworkError::InitializationFailed {
-                        component: ArtworkInitComponent::ImgdbUploader,
-                        message: e.to_string(),
-                    }
-                ));
+                crate::discord::log_discord(&format!("[Artwork] {e}"));
                 None
             }
         };
@@ -171,6 +165,8 @@ impl ArtworkManager {
         provider: HostingProvider,
         retry_after_secs: Option<u64>,
     ) {
+        // Note: `retry_after_secs` only captures integer delta-seconds `Retry-After` headers
+        // HTTP-date `Retry-After` values produce `None` and intentionally use the default cooldown.
         let duration = match retry_after_secs {
             Some(0) => return,
             Some(secs) => Duration::from_secs(secs).min(MAX_RETRY_AFTER_COOLDOWN),

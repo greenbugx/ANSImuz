@@ -182,6 +182,10 @@ pub enum ArtworkError {
     NormalizationFailed(String),
     UploadFailed(String),
     InvalidResponse(String),
+    /// Provider rejected the upload with HTTP 429 Too Many Requests.
+    ///
+    /// `retry_after_secs` is populated only when the server supplies an integer delta-seconds
+    /// `Retry-After` header (HTTP-date values are unsupported and yield `None`).
     RateLimited {
         provider: HostingProvider,
         retry_after_secs: Option<u64>,
