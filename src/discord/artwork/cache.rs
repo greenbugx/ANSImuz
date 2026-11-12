@@ -1590,7 +1590,6 @@ mod tests {
         let img2 = cache.base_dir().join("images/art2.jpg");
         fs::create_dir_all(cache.images_dir()).unwrap();
         fs::write(&img1, b"art1-bytes").unwrap();
-        fs::write(&img2, b"art2-bytes").unwrap();
 
         cache
             .insert_and_save(
@@ -1607,6 +1606,8 @@ mod tests {
                 },
             )
             .unwrap();
+
+        fs::write(&img2, b"art2-bytes").unwrap();
 
         cache
             .insert_and_save(
