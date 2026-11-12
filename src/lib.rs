@@ -1,6 +1,7 @@
 pub mod app;
 pub mod artwork;
 pub mod config;
+pub mod discord;
 pub mod music;
 pub mod paths;
 pub mod playback;

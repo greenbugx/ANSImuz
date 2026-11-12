@@ -118,7 +118,7 @@ pub fn handle_key(
     if app.settings_open {
         match key.code {
             KeyCode::Up => app.settings_cursor = app.settings_cursor.saturating_sub(1),
-            KeyCode::Down => app.settings_cursor = (app.settings_cursor + 1).min(4),
+            KeyCode::Down => app.settings_cursor = (app.settings_cursor + 1).min(5),
             KeyCode::Char(' ') | KeyCode::Enter => {
                 let old_provider = app.settings.provider;
                 app.apply_setting();

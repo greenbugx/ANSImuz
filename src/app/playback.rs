@@ -1,4 +1,5 @@
 use std::sync::mpsc::Sender;
+use std::time::Duration;
 
 use super::state::App;
 use crate::music::{PlaybackSource, ResolveResponse, Track};
@@ -49,7 +50,7 @@ pub fn play_queue_item(
         }
     }
 
-    if entry.track.stream_url.is_empty() {
+    if !entry.track.has_stream_url() {
         play_track(
             app,
             player,
@@ -182,6 +183,7 @@ pub fn recover_queue_failure(
         app.push_history(current);
     }
     app.set_stopped();
+    clear_discord_presence(app);
     false
 }
 
@@ -203,16 +205,30 @@ pub fn handle_player_event(
             if generation != current {
                 return false;
             }
+            let pos_dur = Duration::from_secs_f64(elapsed);
+            let dur_opt = duration.filter(|&d| d > 0.0).map(Duration::from_secs_f64);
+            if let Some(track) = app.current_track_mut()
+                && track.duration_ms.is_none()
+                && let Some(dur_sec) = duration
+                && dur_sec > 0.0
+            {
+                track.duration_ms = Some((dur_sec * 1000.0) as u64);
+            }
+            app.current_position = Some(pos_dur);
             *playback = Some((elapsed, duration));
+            if let Some(worker) = &app.discord_worker {
+                worker.playback_progress(pos_dur, dur_opt);
+            }
             true
         }
         PlayerEvent::Ended { generation } => {
             if generation != current {
                 return false;
             }
+            app.current_position = None;
             *playback = None;
             if app.is_resolving() {
-                app.finish_active_track_while_resolving();
+                retire_active_track_while_resolving(app);
             } else {
                 handle_playback_ended(app, player, player_tx.clone(), resolve_tx.clone());
             }
@@ -225,10 +241,11 @@ pub fn handle_player_event(
             if generation != current {
                 return false;
             }
+            app.current_position = None;
             *playback = None;
             if app.is_resolving() {
                 player.record_error(message.to_string());
-                app.finish_active_track_while_resolving();
+                retire_active_track_while_resolving(app);
             } else {
                 handle_playback_failed(
                     app,
@@ -243,6 +260,19 @@ pub fn handle_player_event(
     }
 }
 
+fn clear_discord_presence(app: &App) {
+    if let Some(worker) = &app.discord_worker {
+        worker.clear();
+    }
+}
+
+fn retire_active_track_while_resolving(app: &mut App) {
+    if app.current_track().is_some() {
+        clear_discord_presence(app);
+    }
+    app.finish_active_track_while_resolving();
+}
+
 pub fn handle_playback_ended(
     app: &mut App,
     player: &mut AudioPlayer,
@@ -250,7 +280,7 @@ pub fn handle_playback_ended(
     resolve_tx: Sender<ResolveResponse>,
 ) -> bool {
     if app.is_resolving() {
-        app.finish_active_track_while_resolving();
+        retire_active_track_while_resolving(app);
         return true;
     }
 
@@ -277,6 +307,7 @@ pub fn handle_playback_ended(
     }
     app.set_stopped();
     app.set_status("PLAYBACK ENDED");
+    clear_discord_presence(app);
     false
 }
 
@@ -289,7 +320,7 @@ pub fn handle_playback_failed(
 ) -> bool {
     player.record_error(message.to_string());
     if app.is_resolving() {
-        app.finish_active_track_while_resolving();
+        retire_active_track_while_resolving(app);
         return true;
     }
     app.set_status(format!("PLAYER ERROR: {}", message));
@@ -301,6 +332,7 @@ pub fn handle_playback_failed(
     if !app.queue.is_empty() {
         play_queue_item(app, player, player_tx, resolve_tx, 0)
     } else {
+        clear_discord_presence(app);
         false
     }
 }
@@ -312,7 +344,7 @@ pub fn advance_playback(
     resolve_tx: Sender<ResolveResponse>,
 ) -> bool {
     if app.is_resolving() {
-        app.finish_active_track_while_resolving();
+        retire_active_track_while_resolving(app);
         return true;
     }
 
@@ -341,7 +373,7 @@ pub fn play_track(
         }
     }
 
-    if track.stream_url.is_empty() {
+    if !track.has_stream_url() {
         app.cancel_pending_resolution();
         let generation = app.resolve_generation;
         app.set_resolving(track.clone(), source);
@@ -383,9 +415,10 @@ pub fn start_playback(
     track: Track,
     source: PlaybackSource,
 ) -> Result<(), String> {
-    let audio_source = AudioPlayer::cached_audio(&track.stream_url)
+    let raw_stream = track.stream_url.as_deref().unwrap_or_default();
+    let audio_source = AudioPlayer::cached_audio(raw_stream)
         .map(|path| path.to_string_lossy().into_owned())
-        .unwrap_or_else(|| track.stream_url.clone());
+        .unwrap_or_else(|| raw_stream.to_string());
 
     match player.play(&audio_source, app.volume, events) {
         Ok(()) => {
@@ -410,14 +443,26 @@ pub fn start_playback(
             }
 
             if let Some(next_queue) = app.queue.first() {
-                if app.settings.audio_cache {
-                    player.prefetch_later(&next_queue.track.stream_url, 25);
+                if app.settings.audio_cache
+                    && let Some(stream_url) = &next_queue.track.stream_url
+                {
+                    player.prefetch_later(stream_url, 25);
                 }
-                let _ = crate::artwork::prefetch(&next_queue.track.art_url);
+                if let Some(art_url) = &next_queue.track.art_url {
+                    let _ = crate::artwork::prefetch(art_url);
+                }
             }
 
-            if app.settings.audio_cache {
-                player.prefetch_later(&track.stream_url, 15);
+            if app.settings.audio_cache
+                && let Some(stream_url) = &track.stream_url
+            {
+                player.prefetch_later(stream_url, 15);
+            }
+
+            if let Some(worker) = &app.discord_worker {
+                let info = crate::discord::PlaybackInfo::from(&track);
+                let artwork = crate::discord::artwork::ArtworkRequest::from_track(&track);
+                worker.track_changed(info, artwork);
             }
             Ok(())
         }
@@ -429,6 +474,9 @@ pub fn start_playback(
             }
             app.set_stopped();
             app.set_status(format!("PLAYER ERROR: {}", error));
+            if let Some(worker) = &app.discord_worker {
+                worker.clear();
+            }
             Err(error)
         }
     }
@@ -548,5 +596,390 @@ pub fn handle_resolve_response(
 
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
+
+    use super::*;
+    use crate::discord::worker::{DiscordCommand, DiscordWorker};
+
+    struct TestHarness {
+        app: App,
+        player: AudioPlayer,
+        player_tx: Sender<PlayerEvent>,
+        _player_rx: Receiver<PlayerEvent>,
+        resolve_tx: Sender<ResolveResponse>,
+        _resolve_rx: Receiver<ResolveResponse>,
+        discord_rx: Receiver<DiscordCommand>,
+        playback: Option<(f64, Option<f64>)>,
+    }
+
+    impl TestHarness {
+        fn new_with_active_and_resolving() -> (Self, u64) {
+            let mut app = App::new();
+            let mut player = AudioPlayer::new_mock();
+            let (player_tx, player_rx) = channel();
+            let (resolve_tx, resolve_rx) = channel();
+            let (discord_worker, discord_rx) = DiscordWorker::spawn_test_recorder();
+            app.discord_worker = Some(discord_worker);
+
+            let track_a = Track::new("Song A", "Artist A")
+                .with_provider("ytmusic")
+                .with_stream_url("https://example.com/a")
+                .with_duration_ms(180_000);
+            let track_b = Track::new("Song B", "Artist B")
+                .with_provider("spotify")
+                .with_spotify_id("sp_b");
+            app.tracks = vec![track_a.clone(), track_b.clone()];
+
+            play_track(
+                &mut app,
+                &mut player,
+                player_tx.clone(),
+                resolve_tx.clone(),
+                track_a,
+                PlaybackSource::SearchResult { index: 0 },
+            );
+            assert!(
+                matches!(
+                    discord_rx.try_recv(),
+                    Ok(DiscordCommand::TrackChanged { .. })
+                ),
+                "starting Track A must publish Discord presence"
+            );
+
+            let active_gen = player.generation();
+            app.set_resolving(track_b, PlaybackSource::SearchResult { index: 1 });
+            assert!(app.is_resolving());
+            assert_eq!(
+                app.current_track().map(|t| t.title.as_str()),
+                Some("Song A")
+            );
+
+            (
+                Self {
+                    app,
+                    player,
+                    player_tx,
+                    _player_rx: player_rx,
+                    resolve_tx,
+                    _resolve_rx: resolve_rx,
+                    discord_rx,
+                    playback: Some((42.0, Some(180.0))),
+                },
+                active_gen,
+            )
+        }
+    }
+
+    #[test]
+    fn test_player_ended_while_resolving_clears_discord_and_resolve_failure_stays_stopped() {
+        let (mut h, active_gen) = TestHarness::new_with_active_and_resolving();
+
+        let handled = handle_player_event(
+            &mut h.app,
+            &mut h.player,
+            &h.player_tx,
+            &h.resolve_tx,
+            PlayerEvent::Ended {
+                generation: active_gen,
+            },
+            &mut h.playback,
+        );
+        assert!(handled);
+        assert!(h.playback.is_none());
+        assert!(h.app.is_resolving());
+        assert!(h.app.current_track().is_none());
+        assert!(h.app.playing.is_none());
+        assert_eq!(h.app.history.len(), 1);
+        assert_eq!(h.app.history[0].title, "Song A");
+        assert!(
+            matches!(h.discord_rx.try_recv(), Ok(DiscordCommand::Clear)),
+            "retiring active playback during resolution must clear Discord presence"
+        );
+        assert!(matches!(h.discord_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        let response = ResolveResponse {
+            generation: h.app.resolve_generation,
+            source: PlaybackSource::SearchResult { index: 1 },
+            spotify_id: Some("sp_b".into()),
+            title: "Song B".into(),
+            artist: "Artist B".into(),
+            result: Err("resolve failed".into()),
+        };
+        assert!(!handle_resolve_response(
+            &mut h.app,
+            &mut h.player,
+            &h.player_tx,
+            &h.resolve_tx,
+            response,
+        ));
+        assert!(h.app.playback_state.is_stopped());
+        assert!(h.app.current_track().is_none());
+        assert!(matches!(h.discord_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn test_player_failed_while_resolving_clears_discord_and_cancel_leaves_stopped() {
+        let (mut h, active_gen) = TestHarness::new_with_active_and_resolving();
+
+        let handled = handle_player_event(
+            &mut h.app,
+            &mut h.player,
+            &h.player_tx,
+            &h.resolve_tx,
+            PlayerEvent::Failed {
+                generation: active_gen,
+                message: "stream error".into(),
+            },
+            &mut h.playback,
+        );
+        assert!(handled);
+        assert!(h.playback.is_none());
+        assert!(h.app.is_resolving());
+        assert!(h.app.current_track().is_none());
+        assert_eq!(h.player.error(), Some("stream error"));
+        assert!(
+            matches!(h.discord_rx.try_recv(), Ok(DiscordCommand::Clear)),
+            "failing active playback during resolution must clear Discord presence"
+        );
+        assert!(matches!(h.discord_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        // Calling again after active track already retired must not spam duplicate clears.
+        assert!(advance_playback(
+            &mut h.app,
+            &mut h.player,
+            h.player_tx.clone(),
+            h.resolve_tx.clone(),
+        ));
+        assert!(matches!(h.discord_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        h.app.cancel_pending_resolution();
+        assert!(h.app.playback_state.is_stopped());
+        assert!(h.app.current_track().is_none());
+        assert!(matches!(h.discord_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn test_direct_playback_retirement_helpers_clear_discord_while_resolving() {
+        let (mut h_end, _) = TestHarness::new_with_active_and_resolving();
+        assert!(handle_playback_ended(
+            &mut h_end.app,
+            &mut h_end.player,
+            h_end.player_tx.clone(),
+            h_end.resolve_tx.clone(),
+        ));
+        assert!(h_end.app.current_track().is_none());
+        assert!(matches!(
+            h_end.discord_rx.try_recv(),
+            Ok(DiscordCommand::Clear)
+        ));
+
+        let (mut h_fail, _) = TestHarness::new_with_active_and_resolving();
+        assert!(handle_playback_failed(
+            &mut h_fail.app,
+            &mut h_fail.player,
+            h_fail.player_tx.clone(),
+            h_fail.resolve_tx.clone(),
+            "fatal err",
+        ));
+        assert!(h_fail.app.current_track().is_none());
+        assert_eq!(h_fail.player.error(), Some("fatal err"));
+        assert!(matches!(
+            h_fail.discord_rx.try_recv(),
+            Ok(DiscordCommand::Clear)
+        ));
+
+        let (mut h_adv, _) = TestHarness::new_with_active_and_resolving();
+        assert!(advance_playback(
+            &mut h_adv.app,
+            &mut h_adv.player,
+            h_adv.player_tx.clone(),
+            h_adv.resolve_tx.clone(),
+        ));
+        assert!(h_adv.app.current_track().is_none());
+        assert!(matches!(
+            h_adv.discord_rx.try_recv(),
+            Ok(DiscordCommand::Clear)
+        ));
+    }
+
+    #[test]
+    fn test_resolve_failure_with_active_track_still_playing_keeps_discord_presence() {
+        let (mut h, _) = TestHarness::new_with_active_and_resolving();
+
+        let response = ResolveResponse {
+            generation: h.app.resolve_generation,
+            source: PlaybackSource::SearchResult { index: 1 },
+            spotify_id: Some("sp_b".into()),
+            title: "Song B".into(),
+            artist: "Artist B".into(),
+            result: Err("resolve failed".into()),
+        };
+        assert!(!handle_resolve_response(
+            &mut h.app,
+            &mut h.player,
+            &h.player_tx,
+            &h.resolve_tx,
+            response,
+        ));
+        assert!(!h.app.is_resolving());
+        assert!(h.app.is_playing());
+        assert_eq!(
+            h.app.current_track().map(|t| t.title.as_str()),
+            Some("Song A")
+        );
+        assert!(
+            matches!(h.discord_rx.try_recv(), Err(TryRecvError::Empty)),
+            "Discord presence must not be cleared when Track A keeps playing"
+        );
+    }
+
+    #[test]
+    fn test_discord_playback_lifecycle_position_switching_and_stale_rejection() {
+        let mut app = App::new();
+        let mut player = AudioPlayer::new_mock();
+        let (player_tx, _player_rx) = channel();
+        let (resolve_tx, _resolve_rx) = channel();
+        let (discord_worker, discord_rx) = DiscordWorker::spawn_test_recorder();
+        app.discord_worker = Some(discord_worker);
+
+        let t1 = Track::new("Song 1", "Artist 1")
+            .with_provider("ytmusic")
+            .with_stream_url("https://example.com/1")
+            .with_duration_ms(200_000);
+        let t2 = Track::new("Song 2", "Artist 2")
+            .with_provider("ytmusic")
+            .with_stream_url("https://example.com/2")
+            .with_duration_ms(200_000);
+        app.tracks = vec![t1.clone(), t2.clone()];
+
+        // Starting a track sends Discord activity
+        play_track(
+            &mut app,
+            &mut player,
+            player_tx.clone(),
+            resolve_tx.clone(),
+            t1,
+            PlaybackSource::SearchResult { index: 0 },
+        );
+        let gen1 = player.generation();
+        assert!(matches!(
+            discord_rx.try_recv(),
+            Ok(DiscordCommand::TrackChanged { .. })
+        ));
+
+        // Playback progress reaches Discord worker
+        let mut playback_pos = None;
+        let handled_pos = handle_player_event(
+            &mut app,
+            &mut player,
+            &player_tx,
+            &resolve_tx,
+            PlayerEvent::Position {
+                generation: gen1,
+                elapsed: 15.0,
+                duration: Some(200.0),
+            },
+            &mut playback_pos,
+        );
+        assert!(handled_pos);
+        assert!(matches!(
+            discord_rx.try_recv(),
+            Ok(DiscordCommand::PositionChanged { .. })
+        ));
+
+        // Stale playback events cannot update Discord presence
+        let handled_stale = handle_player_event(
+            &mut app,
+            &mut player,
+            &player_tx,
+            &resolve_tx,
+            PlayerEvent::Position {
+                generation: gen1 - 1, // Stale generation
+                elapsed: 30.0,
+                duration: Some(200.0),
+            },
+            &mut playback_pos,
+        );
+        assert!(!handled_stale);
+        assert!(matches!(discord_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        // Switching tracks updates Discord activity
+        play_track(
+            &mut app,
+            &mut player,
+            player_tx.clone(),
+            resolve_tx.clone(),
+            t2,
+            PlaybackSource::SearchResult { index: 1 },
+        );
+        assert!(matches!(
+            discord_rx.try_recv(),
+            Ok(DiscordCommand::TrackChanged { .. })
+        ));
+
+        // Track completion clears Discord activity
+        assert!(!handle_playback_ended(
+            &mut app,
+            &mut player,
+            player_tx.clone(),
+            resolve_tx.clone(),
+        ));
+        assert!(matches!(discord_rx.try_recv(), Ok(DiscordCommand::Clear)));
+
+        // Recover queue failure clears Discord activity
+        recover_queue_failure(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+        assert!(matches!(discord_rx.try_recv(), Ok(DiscordCommand::Clear)));
+    }
+
+    #[test]
+    fn test_playback_continues_smoothly_when_discord_worker_absent() {
+        let mut app = App::new();
+        let mut player = AudioPlayer::new_mock();
+        let (player_tx, _player_rx) = channel();
+        let (resolve_tx, _resolve_rx) = channel();
+        app.discord_worker = None; // Worker disconnected or disabled
+
+        let track = Track::new("Song", "Artist")
+            .with_provider("ytmusic")
+            .with_stream_url("https://example.com/audio");
+
+        // Discord disconnection does not interrupt playback operations
+        assert!(play_track(
+            &mut app,
+            &mut player,
+            player_tx.clone(),
+            resolve_tx.clone(),
+            track,
+            PlaybackSource::SearchResult { index: 0 },
+        ));
+        assert!(app.is_playing());
+
+        let mut playback = None;
+        let current_gen = player.generation();
+        assert!(handle_player_event(
+            &mut app,
+            &mut player,
+            &player_tx,
+            &resolve_tx,
+            PlayerEvent::Position {
+                generation: current_gen,
+                elapsed: 10.0,
+                duration: Some(180.0),
+            },
+            &mut playback,
+        ));
+
+        assert!(!handle_playback_ended(
+            &mut app,
+            &mut player,
+            player_tx.clone(),
+            resolve_tx.clone(),
+        ));
+        assert!(app.playback_state.is_stopped());
     }
 }

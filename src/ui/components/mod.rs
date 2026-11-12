@@ -1,4 +1,5 @@
 pub mod controls;
+pub mod discord_indicator;
 pub mod logo;
 pub mod progress;
 pub mod queue_list;

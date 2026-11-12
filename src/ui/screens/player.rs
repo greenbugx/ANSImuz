@@ -381,6 +381,24 @@ pub fn render_player(
         theme.dim,
     );
 
+    if layout.search_box_area.width >= 30 {
+        let indicator_w: u16 = 2;
+        let indicator_h: u16 = 1;
+        let indicator_x =
+            layout.search_box_area.x + layout.search_box_area.width.saturating_sub(indicator_w + 1);
+        let indicator_y = layout.search_box_area.y + 1;
+        let indicator_area = Rect {
+            x: indicator_x,
+            y: indicator_y,
+            width: indicator_w,
+            height: indicator_h,
+        };
+        crate::ui::components::discord_indicator::render_discord_indicator(
+            frame,
+            indicator_area,
+            app.is_discord_connected(),
+        );
+    }
     frame.render_widget(
         Paragraph::new(app.visible_status())
             .style(theme.dim)
@@ -391,7 +409,9 @@ pub fn render_player(
     crate::artwork::render_art(
         frame,
         layout.art_area,
-        current.map(|track| track.art_url.as_str()).unwrap_or(""),
+        current
+            .and_then(|track| track.art_url.as_deref())
+            .unwrap_or(""),
         current.map(|track| track.title.as_str()).unwrap_or(""),
         current.map(|track| track.artist.as_str()).unwrap_or(""),
         app.settings.art_hq,
@@ -786,36 +806,13 @@ mod tests {
 
         let mut app = App::new();
         let theme = Theme::new(None);
-        app.enqueue(Track {
-            title: "First Queue Song".into(),
-            artist: "Queue Artist".into(),
-            stream_url: "http://stream/1".into(),
-            art_url: "".into(),
-            spotify_id: None,
-            artists: vec!["Queue Artist".into()],
-            album: None,
-            duration_ms: None,
-        });
-        app.enqueue(Track {
-            title: "Second Queue Song".into(),
-            artist: "Queue Artist 2".into(),
-            stream_url: "http://stream/2".into(),
-            art_url: "".into(),
-            spotify_id: None,
-            artists: vec!["Queue Artist 2".into()],
-            album: None,
-            duration_ms: None,
-        });
-        app.tracks = vec![Track {
-            title: "Search Track".into(),
-            artist: "Search Artist".into(),
-            stream_url: "".into(),
-            art_url: "".into(),
-            spotify_id: None,
-            artists: vec![],
-            album: None,
-            duration_ms: None,
-        }];
+        app.enqueue(
+            Track::new("First Queue Song", "Queue Artist").with_stream_url("http://stream/1"),
+        );
+        app.enqueue(
+            Track::new("Second Queue Song", "Queue Artist 2").with_stream_url("http://stream/2"),
+        );
+        app.tracks = vec![Track::new("Search Track", "Search Artist")];
         app.selected = 0;
         app.list_focus = ListFocus::Queue;
         let area = Rect::new(0, 0, 140, 30);
@@ -890,16 +887,7 @@ mod tests {
 
         let mut app = App::new();
         let theme = Theme::new(None);
-        app.enqueue(Track {
-            title: "Queued Item".into(),
-            artist: "Artist".into(),
-            stream_url: "http://stream/q".into(),
-            art_url: "".into(),
-            spotify_id: None,
-            artists: vec!["Artist".into()],
-            album: None,
-            duration_ms: None,
-        });
+        app.enqueue(Track::new("Queued Item", "Artist").with_stream_url("http://stream/q"));
 
         let area = Rect::new(0, 0, 85, 30);
         let layout = layout_player(area);
@@ -950,16 +938,7 @@ mod tests {
 
         let mut app = App::new();
         let theme = Theme::new(None);
-        app.enqueue(Track {
-            title: "Compact Queue Song".into(),
-            artist: "Artist".into(),
-            stream_url: "http://stream/cq".into(),
-            art_url: "".into(),
-            spotify_id: None,
-            artists: vec!["Artist".into()],
-            album: None,
-            duration_ms: None,
-        });
+        app.enqueue(Track::new("Compact Queue Song", "Artist").with_stream_url("http://stream/cq"));
 
         let area = Rect::new(0, 0, 50, 24);
         let layout = layout_player(area);
