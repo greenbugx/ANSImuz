@@ -283,8 +283,33 @@ mod tests {
     fn non_https_url_rejected() {
         let temp_dir = std::env::temp_dir();
         let downloader = ArtworkDownloader::new().expect("downloader init");
-        let res = downloader.download_and_normalize("http://example.com/art.jpg", &temp_dir);
-        assert!(res.is_err());
-        assert!(res.unwrap_err().contains("HTTPS"));
+        for invalid_url in [
+            "http://example.com/art.jpg",
+            "ftp://example.com/art.jpg",
+            "file:///tmp/art.jpg",
+            "",
+            "javascript:alert(1)",
+        ] {
+            let res = downloader.download_and_normalize(invalid_url, &temp_dir);
+            assert!(res.is_err());
+            assert!(res.unwrap_err().contains("HTTPS"));
+        }
+    }
+
+    #[test]
+    fn test_normalize_image_rejects_out_of_bound_dimensions() {
+        // Under MIN_DIMENSION (10x10)
+        let too_narrow = DynamicImage::ImageRgba8(image::RgbaImage::new(5, 50));
+        assert!(normalize_image(too_narrow).is_err());
+
+        let too_short = DynamicImage::ImageRgba8(image::RgbaImage::new(50, 8));
+        assert!(normalize_image(too_short).is_err());
+
+        // Over MAX_DIMENSION (4096x4096)
+        let too_wide = DynamicImage::ImageRgba8(image::RgbaImage::new(4097, 100));
+        assert!(normalize_image(too_wide).is_err());
+
+        let too_tall = DynamicImage::ImageRgba8(image::RgbaImage::new(100, 4097));
+        assert!(normalize_image(too_tall).is_err());
     }
 }

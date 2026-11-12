@@ -577,4 +577,91 @@ mod tests {
 
         worker.shutdown();
     }
+
+    #[test]
+    fn test_worker_reconnect_exponential_backoff_and_reset() {
+        let mut client = DiscordClient::new("dummy");
+        let mut connected = true;
+        let flag = Arc::new(AtomicBool::new(true));
+        let mut next_at = None;
+        let mut backoff = INITIAL_RECONNECT_INTERVAL;
+
+        // Successive disconnections double backoff interval up to MAX_RECONNECT_INTERVAL (60s)
+        mark_disconnected(
+            &mut client,
+            &mut connected,
+            &flag,
+            &mut next_at,
+            &mut backoff,
+        );
+        assert_eq!(backoff, Duration::from_secs(10));
+        assert!(!connected);
+        assert!(!flag.load(Ordering::Relaxed));
+        assert!(next_at.is_some());
+
+        mark_disconnected(
+            &mut client,
+            &mut connected,
+            &flag,
+            &mut next_at,
+            &mut backoff,
+        );
+        assert_eq!(backoff, Duration::from_secs(20));
+
+        mark_disconnected(
+            &mut client,
+            &mut connected,
+            &flag,
+            &mut next_at,
+            &mut backoff,
+        );
+        assert_eq!(backoff, Duration::from_secs(40));
+
+        mark_disconnected(
+            &mut client,
+            &mut connected,
+            &flag,
+            &mut next_at,
+            &mut backoff,
+        );
+        assert_eq!(backoff, Duration::from_secs(60));
+
+        // Clamped at MAX_RECONNECT_INTERVAL (60s)
+        mark_disconnected(
+            &mut client,
+            &mut connected,
+            &flag,
+            &mut next_at,
+            &mut backoff,
+        );
+        assert_eq!(backoff, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_worker_shutdown_is_idempotent() {
+        let mut worker = DiscordWorker::spawn("dummy_id").expect("spawn worker");
+        assert!(!worker.is_connected());
+        worker.shutdown();
+        // Second shutdown must be a safe no-op
+        worker.shutdown();
+        drop(worker);
+    }
+
+    #[test]
+    fn test_worker_test_recorder_and_channel_drain() {
+        let (worker, rx) = DiscordWorker::spawn_test_recorder();
+        let track = PlaybackInfo::new("Track 1", "Artist 1");
+        worker.track_changed(track, None);
+        worker.paused();
+        worker.resumed(Duration::from_secs(10));
+        worker.clear();
+
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(DiscordCommand::TrackChanged { .. })
+        ));
+        assert!(matches!(rx.try_recv(), Ok(DiscordCommand::Paused)));
+        assert!(matches!(rx.try_recv(), Ok(DiscordCommand::Resumed(_))));
+        assert!(matches!(rx.try_recv(), Ok(DiscordCommand::Clear)));
+    }
 }

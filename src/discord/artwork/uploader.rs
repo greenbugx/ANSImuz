@@ -976,4 +976,68 @@ mod tests {
         println!("Result: {:?}", res);
         assert!(res.is_ok());
     }
+
+    #[test]
+    fn test_retry_after_header_parsing() {
+        let make_hdr = |s: &str| reqwest::header::HeaderValue::from_str(s).ok();
+
+        assert_eq!(parse_retry_after_secs(make_hdr("120").as_ref()), Some(120));
+        assert_eq!(parse_retry_after_secs(make_hdr("0").as_ref()), Some(0));
+        assert_eq!(
+            parse_retry_after_secs(make_hdr("86400").as_ref()),
+            Some(86400)
+        );
+        assert_eq!(parse_retry_after_secs(make_hdr("invalid").as_ref()), None);
+        assert_eq!(parse_retry_after_secs(make_hdr("-5").as_ref()), None);
+        assert_eq!(
+            parse_retry_after_secs(make_hdr("Wed, 21 Oct 2026 07:28:00 GMT").as_ref()),
+            None
+        );
+        assert_eq!(parse_retry_after_secs(None), None);
+    }
+
+    #[test]
+    fn test_imgdb_url_validation_and_rejected_destinations() {
+        // Valid HTTPS public image URL
+        assert!(validate_imgdb_returned_url("https://i.imgdb.io/images/art123.jpg").is_ok());
+
+        // Disallowed / private / non-HTTPS destinations
+        assert!(validate_imgdb_returned_url("http://i.imgdb.io/images/art123.jpg").is_err());
+        assert!(validate_imgdb_returned_url("https://localhost/art.jpg").is_err());
+        assert!(validate_imgdb_returned_url("https://127.0.0.1/art.jpg").is_err());
+        assert!(validate_imgdb_returned_url("https://192.168.1.1/art.jpg").is_err());
+        assert!(validate_imgdb_returned_url("https://10.0.0.1/art.jpg").is_err());
+        assert!(validate_imgdb_returned_url("https://169.254.169.254/art.jpg").is_err());
+        assert!(validate_imgdb_returned_url("https://user:pass@imgdb.io/art.jpg").is_err());
+
+        // API or non-image resources
+        assert!(validate_imgdb_returned_url("https://imgdb.io/api/v1/upload").is_err());
+        assert!(validate_imgdb_returned_url("https://imgdb.io/images/index.html").is_err());
+        assert!(validate_imgdb_returned_url("https://imgdb.io/upload.php").is_err());
+    }
+
+    #[test]
+    fn test_multipart_build_and_empty_image_rejection() {
+        // Empty bytes rejected as UnsupportedInput
+        let empty_res = build_multipart_image_part(
+            "Catbox",
+            MultipartImage {
+                bytes: b"",
+                format: NormalizedImageFormat::Jpeg,
+                filename: "cover.jpg",
+            },
+        );
+        assert!(matches!(empty_res, Err(ArtworkError::UnsupportedInput(_))));
+
+        // Valid image part built with correct format and canonical filename extension
+        let part_res = build_multipart_image_part(
+            "Catbox",
+            MultipartImage {
+                bytes: b"valid-bytes",
+                format: NormalizedImageFormat::Png,
+                filename: "original.jpg",
+            },
+        );
+        assert!(part_res.is_ok());
+    }
 }

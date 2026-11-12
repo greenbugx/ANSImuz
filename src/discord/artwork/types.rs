@@ -325,3 +325,146 @@ impl fmt::Display for ArtworkError {
 }
 
 impl std::error::Error for ArtworkError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::discord::artwork::cache::sha256_hex;
+
+    #[test]
+    fn test_detect_all_supported_image_formats_from_bytes() {
+        // Minimal valid JPEG bytes
+        let mut jpeg = Vec::new();
+        image::DynamicImage::new_rgb8(10, 10)
+            .write_to(
+                &mut std::io::Cursor::new(&mut jpeg),
+                image::ImageFormat::Jpeg,
+            )
+            .expect("encode jpeg");
+        assert_eq!(
+            NormalizedImageFormat::from_bytes(&jpeg).unwrap(),
+            NormalizedImageFormat::Jpeg
+        );
+
+        // Minimal valid PNG bytes
+        let mut png = Vec::new();
+        image::DynamicImage::new_rgba8(10, 10)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("encode png");
+        assert_eq!(
+            NormalizedImageFormat::from_bytes(&png).unwrap(),
+            NormalizedImageFormat::Png
+        );
+
+        // Minimal valid WebP bytes
+        let mut webp = Vec::new();
+        image::DynamicImage::new_rgba8(10, 10)
+            .write_to(
+                &mut std::io::Cursor::new(&mut webp),
+                image::ImageFormat::WebP,
+            )
+            .expect("encode webp");
+        assert_eq!(
+            NormalizedImageFormat::from_bytes(&webp).unwrap(),
+            NormalizedImageFormat::Webp
+        );
+
+        // Minimal valid GIF bytes
+        let mut gif = Vec::new();
+        image::DynamicImage::new_rgba8(10, 10)
+            .write_to(&mut std::io::Cursor::new(&mut gif), image::ImageFormat::Gif)
+            .expect("encode gif");
+        assert_eq!(
+            NormalizedImageFormat::from_bytes(&gif).unwrap(),
+            NormalizedImageFormat::Gif
+        );
+
+        // Minimal valid AVIF magic bytes
+        let avif_bytes =
+            b"\x00\x00\x00\x20ftypavif\x00\x00\x00\x00avifmif1miafMA1B\x00\x00\x00\x00";
+        assert_eq!(
+            NormalizedImageFormat::from_bytes(avif_bytes).unwrap(),
+            NormalizedImageFormat::Avif
+        );
+    }
+
+    #[test]
+    fn test_reject_unsupported_corrupted_and_empty_image_data() {
+        // Empty bytes
+        assert!(matches!(
+            NormalizedImageFormat::from_bytes(&[]),
+            Err(ArtworkError::UnsupportedInput(_))
+        ));
+
+        // Corrupted / random garbage data
+        assert!(matches!(
+            NormalizedImageFormat::from_bytes(b"not an image at all"),
+            Err(ArtworkError::UnsupportedInput(_))
+        ));
+
+        // Unsupported format: BMP
+        let mut bmp = Vec::new();
+        image::DynamicImage::new_rgb8(10, 10)
+            .write_to(&mut std::io::Cursor::new(&mut bmp), image::ImageFormat::Bmp)
+            .expect("encode bmp");
+        assert!(matches!(
+            NormalizedImageFormat::from_bytes(&bmp),
+            Err(ArtworkError::UnsupportedInput(_))
+        ));
+
+        // Format detection strictly uses bytes: extension/filename parameter never overrides bytes
+        let fake_png_bytes = b"<?xml version=\"1.0\"?><svg></svg>";
+        assert!(NormalizedImageFormat::from_bytes(fake_png_bytes).is_err());
+    }
+
+    #[test]
+    fn test_mime_types_extensions_and_sha256_content_hash() {
+        let expected = [
+            (NormalizedImageFormat::Jpeg, "image/jpeg", "jpg"),
+            (NormalizedImageFormat::Png, "image/png", "png"),
+            (NormalizedImageFormat::Webp, "image/webp", "webp"),
+            (NormalizedImageFormat::Gif, "image/gif", "gif"),
+            (NormalizedImageFormat::Avif, "image/avif", "avif"),
+        ];
+
+        for (fmt, mime, ext) in expected {
+            assert_eq!(fmt.mime_type(), mime);
+            assert_eq!(fmt.extension(), ext);
+            assert!(NormalizedImageFormat::is_accepted_mime(mime));
+            assert!(NormalizedImageFormat::is_accepted_mime(&format!(
+                "{mime}; charset=utf-8"
+            )));
+            assert_eq!(
+                fmt.multipart_filename("custom_cover.png"),
+                format!("custom_cover.{ext}")
+            );
+            assert_eq!(fmt.multipart_filename(""), format!("artwork.{ext}"));
+        }
+
+        assert!(!NormalizedImageFormat::is_accepted_mime("image/bmp"));
+        assert!(!NormalizedImageFormat::is_accepted_mime("text/html"));
+
+        // SHA-256 content hashes
+        let data1 = b"artwork-pixel-data-1";
+        let data2 = b"artwork-pixel-data-1";
+        let data3 = b"artwork-pixel-data-2";
+
+        let hash1 = sha256_hex(data1);
+        let hash2 = sha256_hex(data2);
+        let hash3 = sha256_hex(data3);
+
+        assert_eq!(hash1.len(), 64);
+        assert_eq!(
+            hash1, hash2,
+            "Identical bytes must produce identical hashes"
+        );
+        assert_ne!(
+            hash1, hash3,
+            "Different bytes must produce different hashes"
+        );
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+}

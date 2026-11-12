@@ -837,4 +837,149 @@ mod tests {
             "Discord presence must not be cleared when Track A keeps playing"
         );
     }
+
+    #[test]
+    fn test_discord_playback_lifecycle_position_switching_and_stale_rejection() {
+        let mut app = App::new();
+        let mut player = AudioPlayer::new_mock();
+        let (player_tx, _player_rx) = channel();
+        let (resolve_tx, _resolve_rx) = channel();
+        let (discord_worker, discord_rx) = DiscordWorker::spawn_test_recorder();
+        app.discord_worker = Some(discord_worker);
+
+        let t1 = Track::new("Song 1", "Artist 1")
+            .with_provider("ytmusic")
+            .with_stream_url("https://example.com/1")
+            .with_duration_ms(200_000);
+        let t2 = Track::new("Song 2", "Artist 2")
+            .with_provider("ytmusic")
+            .with_stream_url("https://example.com/2")
+            .with_duration_ms(200_000);
+        app.tracks = vec![t1.clone(), t2.clone()];
+
+        // Starting a track sends Discord activity
+        play_track(
+            &mut app,
+            &mut player,
+            player_tx.clone(),
+            resolve_tx.clone(),
+            t1,
+            PlaybackSource::SearchResult { index: 0 },
+        );
+        let gen1 = player.generation();
+        assert!(matches!(
+            discord_rx.try_recv(),
+            Ok(DiscordCommand::TrackChanged { .. })
+        ));
+
+        // Playback progress reaches Discord worker
+        let mut playback_pos = None;
+        let handled_pos = handle_player_event(
+            &mut app,
+            &mut player,
+            &player_tx,
+            &resolve_tx,
+            PlayerEvent::Position {
+                generation: gen1,
+                elapsed: 15.0,
+                duration: Some(200.0),
+            },
+            &mut playback_pos,
+        );
+        assert!(handled_pos);
+        assert!(matches!(
+            discord_rx.try_recv(),
+            Ok(DiscordCommand::PositionChanged { .. })
+        ));
+
+        // Stale playback events cannot update Discord presence
+        let handled_stale = handle_player_event(
+            &mut app,
+            &mut player,
+            &player_tx,
+            &resolve_tx,
+            PlayerEvent::Position {
+                generation: gen1 - 1, // Stale generation
+                elapsed: 30.0,
+                duration: Some(200.0),
+            },
+            &mut playback_pos,
+        );
+        assert!(!handled_stale);
+        assert!(matches!(discord_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        // Switching tracks updates Discord activity
+        play_track(
+            &mut app,
+            &mut player,
+            player_tx.clone(),
+            resolve_tx.clone(),
+            t2,
+            PlaybackSource::SearchResult { index: 1 },
+        );
+        assert!(matches!(
+            discord_rx.try_recv(),
+            Ok(DiscordCommand::TrackChanged { .. })
+        ));
+
+        // Track completion clears Discord activity
+        assert!(!handle_playback_ended(
+            &mut app,
+            &mut player,
+            player_tx.clone(),
+            resolve_tx.clone(),
+        ));
+        assert!(matches!(discord_rx.try_recv(), Ok(DiscordCommand::Clear)));
+
+        // Recover queue failure clears Discord activity
+        recover_queue_failure(&mut app, &mut player, player_tx.clone(), resolve_tx.clone());
+        assert!(matches!(discord_rx.try_recv(), Ok(DiscordCommand::Clear)));
+    }
+
+    #[test]
+    fn test_playback_continues_smoothly_when_discord_worker_absent() {
+        let mut app = App::new();
+        let mut player = AudioPlayer::new_mock();
+        let (player_tx, _player_rx) = channel();
+        let (resolve_tx, _resolve_rx) = channel();
+        app.discord_worker = None; // Worker disconnected or disabled
+
+        let track = Track::new("Song", "Artist")
+            .with_provider("ytmusic")
+            .with_stream_url("https://example.com/audio");
+
+        // Discord disconnection does not interrupt playback operations
+        assert!(play_track(
+            &mut app,
+            &mut player,
+            player_tx.clone(),
+            resolve_tx.clone(),
+            track,
+            PlaybackSource::SearchResult { index: 0 },
+        ));
+        assert!(app.is_playing());
+
+        let mut playback = None;
+        let current_gen = player.generation();
+        assert!(handle_player_event(
+            &mut app,
+            &mut player,
+            &player_tx,
+            &resolve_tx,
+            PlayerEvent::Position {
+                generation: current_gen,
+                elapsed: 10.0,
+                duration: Some(180.0),
+            },
+            &mut playback,
+        ));
+
+        assert!(!handle_playback_ended(
+            &mut app,
+            &mut player,
+            player_tx.clone(),
+            resolve_tx.clone(),
+        ));
+        assert!(app.playback_state.is_stopped());
+    }
 }

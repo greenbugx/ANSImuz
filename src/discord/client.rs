@@ -87,3 +87,51 @@ impl Drop for DiscordClient {
         self.disconnect();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use presenceforge::ActivityBuilder;
+
+    #[test]
+    fn test_client_offline_contract_and_safe_lifecycle() {
+        let mut client = DiscordClient::new("1569455150546817146");
+        assert_eq!(client.client_id(), "1569455150546817146");
+        assert!(!client.is_connected());
+
+        // Attempting to set activity when disconnected must fail with NotConnected
+        let activity = ActivityBuilder::new().details("Track").build();
+        assert!(matches!(
+            client.set_activity(&activity),
+            Err(DiscordError::NotConnected)
+        ));
+
+        // clear_activity when not connected must safely return Ok(()) without error
+        assert!(client.clear_activity().is_ok());
+
+        // disconnect when not connected must be safe and idempotent
+        client.disconnect();
+        client.disconnect();
+        assert!(!client.is_connected());
+    }
+
+    #[test]
+    fn test_discord_error_formatting_and_traits() {
+        let err_not_connected = DiscordError::NotConnected;
+        assert_eq!(
+            format!("{err_not_connected}"),
+            "Discord client is not connected"
+        );
+
+        let ipc_err = DiscordIpcError::ConnectionFailed(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "pipe not found",
+        ));
+        let err_from_ipc: DiscordError = ipc_err.into();
+        assert!(format!("{err_from_ipc}").contains("Discord IPC error:"));
+
+        // Verify std::error::Error implementation
+        let boxed: Box<dyn std::error::Error> = Box::new(err_not_connected);
+        assert_eq!(boxed.to_string(), "Discord client is not connected");
+    }
+}

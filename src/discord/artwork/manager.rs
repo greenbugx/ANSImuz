@@ -618,4 +618,108 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn test_manager_provider_cooldown_classification_matrix() {
+        let mut manager = ArtworkManager::new(None).expect("artwork manager init");
+
+        // RateLimited with retry_after_secs (HTTP 429) respects Retry-After
+        assert!(!manager.is_provider_cooling_down(HostingProvider::Imgdb));
+        manager.record_provider_error(
+            HostingProvider::Imgdb,
+            &ArtworkError::RateLimited {
+                provider: HostingProvider::Imgdb,
+                retry_after_secs: Some(120),
+                message: "Too Many Requests".into(),
+            },
+        );
+        assert!(manager.is_provider_cooling_down(HostingProvider::Imgdb));
+        manager.clear_provider_failure(HostingProvider::Imgdb);
+        assert!(!manager.is_provider_cooling_down(HostingProvider::Imgdb));
+
+        // UploadFailed (HTTP 5xx, timeout) applies default provider cooldown
+        assert!(!manager.is_provider_cooling_down(HostingProvider::Catbox));
+        manager.record_provider_error(
+            HostingProvider::Catbox,
+            &ArtworkError::UploadFailed("Server error 500".into()),
+        );
+        assert!(manager.is_provider_cooling_down(HostingProvider::Catbox));
+        manager.clear_provider_failure(HostingProvider::Catbox);
+
+        // InvalidResponse (malformed response) applies short cooldown
+        assert!(!manager.is_provider_cooling_down(HostingProvider::Litterbox));
+        manager.record_provider_error(
+            HostingProvider::Litterbox,
+            &ArtworkError::InvalidResponse("Bad response body".into()),
+        );
+        assert!(manager.is_provider_cooling_down(HostingProvider::Litterbox));
+        manager.clear_provider_failure(HostingProvider::Litterbox);
+
+        // UnsupportedInput (client-side rejection) must NOT penalize provider cooldown
+        assert!(!manager.is_provider_cooling_down(HostingProvider::Imgdb));
+        manager.record_provider_error(
+            HostingProvider::Imgdb,
+            &ArtworkError::UnsupportedInput("unsupported format".into()),
+        );
+        assert!(
+            !manager.is_provider_cooling_down(HostingProvider::Imgdb),
+            "UnsupportedInput must not trigger provider cooldown"
+        );
+    }
+
+    #[test]
+    fn test_manager_resolve_fallback_order_and_content_hash_reuse() {
+        let temp_dir = std::env::temp_dir().join("ansimuz_test_mgr_fallback_order");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        let config = DiscordArtworkConfig {
+            primary_host: "imgdb".into(),
+            fallback_host: "catbox".into(),
+            ..Default::default()
+        };
+
+        let mut manager = ArtworkManager::with_config(Some(temp_dir.clone()), config)
+            .expect("init manager with config");
+
+        // Verify default fallback chain: Imgdb -> Catbox -> Litterbox
+        let chain = manager.resolve_provider_chain().expect("resolve chain");
+        assert_eq!(
+            chain,
+            vec![
+                HostingProvider::Imgdb,
+                HostingProvider::Catbox,
+                HostingProvider::Litterbox
+            ]
+        );
+
+        // Verify duplicate content hash reuse:
+        // When content hash is found in cache, find_reusable_upload returns existing record
+        let now = 100_000u64;
+        let req1 =
+            ArtworkRequest::new("spotify", Some("t1".into()), "https://example.com/art1.jpg");
+        let local_path = manager.cache.base_dir().join("images/art1.jpg");
+        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+        std::fs::write(&local_path, b"shared-art-bytes").unwrap();
+
+        let rec1 = CacheRecord {
+            source_url: req1.source_url.clone(),
+            local_file: "images/art1.jpg".into(),
+            hosted_url: "https://files.catbox.moe/shared.jpg".into(),
+            host: HostingProvider::Catbox,
+            content_hash: "shared_hash_abc".into(),
+            uploaded_at: now,
+            expires_at: None,
+            last_accessed: now,
+        };
+        manager.cache.insert_and_save(&req1, rec1).unwrap();
+
+        let reusable = manager.cache.find_reusable_upload("shared_hash_abc", now);
+        assert!(reusable.is_some());
+        assert_eq!(
+            reusable.unwrap().hosted_url,
+            "https://files.catbox.moe/shared.jpg"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 }

@@ -1570,4 +1570,111 @@ mod tests {
 
         let _ = fs::remove_dir_all(cache.base_dir());
     }
+
+    #[test]
+    fn test_cache_missing_index_and_distinct_entries() {
+        let temp_dir = std::env::temp_dir().join("ansimuz_test_cache_empty_and_distinct");
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        // Missing index initializes clean empty cache
+        let mut cache = ArtworkCache::load(Some(temp_dir.clone()));
+        assert!(cache.entries().is_empty());
+        assert!(cache.content_hash_index().is_empty());
+
+        let req1 =
+            ArtworkRequest::new("spotify", Some("t1".into()), "https://example.com/art1.jpg");
+        let req2 =
+            ArtworkRequest::new("ytmusic", Some("t2".into()), "https://example.com/art2.jpg");
+
+        let img1 = cache.base_dir().join("images/art1.jpg");
+        let img2 = cache.base_dir().join("images/art2.jpg");
+        fs::create_dir_all(cache.images_dir()).unwrap();
+        fs::write(&img1, b"art1-bytes").unwrap();
+        fs::write(&img2, b"art2-bytes").unwrap();
+
+        cache
+            .insert_and_save(
+                &req1,
+                CacheRecord {
+                    source_url: req1.source_url.clone(),
+                    local_file: "images/art1.jpg".into(),
+                    hosted_url: "https://files.catbox.moe/art1.jpg".into(),
+                    host: HostingProvider::Catbox,
+                    content_hash: "hash_art1".into(),
+                    uploaded_at: 1000,
+                    expires_at: None,
+                    last_accessed: 1000,
+                },
+            )
+            .unwrap();
+
+        cache
+            .insert_and_save(
+                &req2,
+                CacheRecord {
+                    source_url: req2.source_url.clone(),
+                    local_file: "images/art2.jpg".into(),
+                    hosted_url: "https://files.catbox.moe/art2.jpg".into(),
+                    host: HostingProvider::Catbox,
+                    content_hash: "hash_art2".into(),
+                    uploaded_at: 1000,
+                    expires_at: None,
+                    last_accessed: 1000,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(cache.entries().len(), 4); // Each track inserts both primary key and URL fallback key
+        assert!(cache.lookup(&req1, 1000).is_some());
+        assert!(cache.lookup(&req2, 1000).is_some());
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_imgdb_cache_lifecycle_expiration_and_file_preservation() {
+        let mut cache = create_test_cache("imgdb_lifecycle");
+        let now = 1_000_000u64;
+
+        let local_rel = "images/imgdb_cover.jpg";
+        let local_abs = cache.base_dir().join(local_rel);
+        fs::create_dir_all(local_abs.parent().unwrap()).unwrap();
+        fs::write(&local_abs, b"imgdb-cover-bytes").unwrap();
+
+        let req = ArtworkRequest::new(
+            "ytmusic",
+            Some("v_imgdb".into()),
+            "https://example.com/imgdb.jpg",
+        );
+        let record = CacheRecord {
+            source_url: req.source_url.clone(),
+            local_file: local_rel.to_string(),
+            hosted_url: "https://i.imgdb.io/images/imgdb_cover.jpg".to_string(),
+            host: HostingProvider::Imgdb,
+            content_hash: "hash_imgdb".to_string(),
+            uploaded_at: now,
+            expires_at: Some(now + 86400),
+            last_accessed: now,
+        };
+
+        cache.insert_and_save(&req, record).unwrap();
+
+        // Before expiry: cache hit returns hosted URL and local path
+        let hit = cache
+            .lookup(&req, now + 1000)
+            .expect("lookup before expiry must succeed");
+        assert_eq!(hit.hosted_url, "https://i.imgdb.io/images/imgdb_cover.jpg");
+        assert_eq!(hit.local_path, local_abs);
+
+        // After expiry: lookup returns None (triggering re-upload)
+        assert!(cache.lookup(&req, now + 86401).is_none());
+
+        // Crucial: expired Imgdb entry preserves the local image on disk for re-upload
+        assert!(
+            local_abs.exists(),
+            "Local image must be preserved after Imgdb record expiry"
+        );
+
+        let _ = fs::remove_dir_all(cache.base_dir());
+    }
 }

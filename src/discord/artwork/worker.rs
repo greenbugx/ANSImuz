@@ -362,4 +362,96 @@ mod tests {
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
         ));
     }
+
+    #[test]
+    fn test_artwork_worker_sequential_and_duplicate_requests_with_results_and_errors() {
+        use std::path::PathBuf;
+        use std::sync::atomic::AtomicU64;
+        use std::time::Duration;
+
+        let last_gen = Arc::new(AtomicU64::new(0));
+        let handler_gen = Arc::clone(&last_gen);
+        let (forward_tx, forward_rx) = channel();
+
+        let mut worker = ArtworkWorker::spawn_with_handler_and_forwarder(
+            move |req, is_refresh| {
+                let call_idx = handler_gen.fetch_add(1, Ordering::SeqCst);
+                if call_idx == 2 {
+                    return Err(ArtworkError::UploadFailed("simulated upload error".into()));
+                }
+                let suffix = if is_refresh { "refreshed" } else { "normal" };
+                Ok(ArtworkResult {
+                    source_url: req.source_url,
+                    hosted_url: format!("https://files.catbox.moe/{suffix}.jpg"),
+                    local_path: PathBuf::from(format!("images/{suffix}.jpg")),
+                    content_hash: format!("hash_{call_idx}"),
+                })
+            },
+            move |event| {
+                let _ = forward_tx.send(event);
+            },
+        )
+        .expect("spawn artwork worker");
+
+        let req = ArtworkRequest::new("spotify", Some("t1".into()), "https://example.com/1.jpg");
+
+        // Initial request (gen 1) -> Ok
+        worker.resolve(1, req.clone());
+
+        // Duplicate sequential request (gen 2) -> Ok
+        worker.resolve(2, req.clone());
+
+        // Failing request (gen 3) -> Err
+        worker.resolve(3, req.clone());
+
+        // Refresh request (gen 4) -> Ok with is_refresh
+        worker.refresh(4, req);
+
+        // Receive event 1
+        let ev1 = forward_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("event 1");
+        match ev1 {
+            ArtworkEvent::Resolved { generation, result } => {
+                assert_eq!(generation, 1);
+                assert!(result.is_ok());
+            }
+        }
+
+        // Receive event 2
+        let ev2 = forward_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("event 2");
+        match ev2 {
+            ArtworkEvent::Resolved { generation, result } => {
+                assert_eq!(generation, 2);
+                assert!(result.is_ok());
+            }
+        }
+
+        // Receive event 3 (error)
+        let ev3 = forward_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("event 3");
+        match ev3 {
+            ArtworkEvent::Resolved { generation, result } => {
+                assert_eq!(generation, 3);
+                assert!(matches!(result, Err(ArtworkError::UploadFailed(_))));
+            }
+        }
+
+        // Receive event 4 (refreshed)
+        let ev4 = forward_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("event 4");
+        match ev4 {
+            ArtworkEvent::Resolved { generation, result } => {
+                assert_eq!(generation, 4);
+                let res = result.expect("refreshed upload succeeded");
+                assert!(res.hosted_url.contains("refreshed"));
+            }
+        }
+
+        worker.shutdown();
+    }
 }
