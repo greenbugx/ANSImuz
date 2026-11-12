@@ -10,9 +10,7 @@ pub const DEFAULT_MAX_CACHE_BYTES: u64 = 250 * 1024 * 1024; // 250 MB ceiling
 /// Returns the default base directory for Discord artwork cache.
 #[must_use]
 pub fn default_cache_dir() -> PathBuf {
-    crate::config::cache_base_dir()
-        .join("discord")
-        .join("artwork")
+    crate::config::discord_artwork_cache_dir()
 }
 
 /// Compute hex-encoded SHA-256 hash of bytes.

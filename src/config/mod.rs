@@ -345,8 +345,14 @@ pub fn audio_cache_dir() -> PathBuf {
     cache_base_dir().join("audio")
 }
 
+pub fn discord_artwork_cache_dir() -> PathBuf {
+    cache_base_dir().join("discord").join("artwork")
+}
+
 pub fn cache_bytes() -> u64 {
-    dir_size(&artwork_cache_dir()) + dir_size(&audio_cache_dir())
+    dir_size(&artwork_cache_dir())
+        + dir_size(&audio_cache_dir())
+        + dir_size(&discord_artwork_cache_dir())
 }
 
 static CACHE_TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -387,6 +393,8 @@ pub fn clean_stale_part_files(dir: &std::path::Path) -> std::io::Result<usize> {
 pub fn clean_stale_caches() {
     let _ = clean_stale_part_files(&artwork_cache_dir());
     let _ = clean_stale_part_files(&audio_cache_dir());
+    let _ = clean_stale_part_files(&discord_artwork_cache_dir());
+    let _ = clean_stale_part_files(&discord_artwork_cache_dir().join("images"));
 }
 
 pub fn prune_cache_dir(dir: &std::path::Path, max_bytes: u64) -> std::io::Result<u64> {
@@ -488,6 +496,15 @@ pub fn clear_caches() -> std::io::Result<()> {
     {
         err = Some(e);
     }
+
+    let discord_art_dir = discord_artwork_cache_dir();
+    if discord_art_dir.exists()
+        && let Err(e) = fs::remove_dir_all(&discord_art_dir)
+    {
+        err = Some(e);
+    }
+    // Clean up empty parent discord/ cache directory if present
+    let _ = fs::remove_dir(cache_base_dir().join("discord"));
 
     crate::artwork::clear_memory_cache();
     crate::music::clear_resolved_cache();
@@ -691,6 +708,27 @@ litterbox_expiry = "72h"
         let _guard = crate::artwork::ARTWORK_TEST_LOCK.lock().unwrap();
         let result = clear_caches();
         assert!(result.is_ok(), "clear_caches must return Ok");
+    }
+
+    #[test]
+    fn test_clear_caches_includes_discord_artwork_and_updates_cache_bytes() {
+        let _guard = crate::artwork::ARTWORK_TEST_LOCK.lock().unwrap();
+        let discord_dir = discord_artwork_cache_dir();
+        let test_img_dir = discord_dir.join("images");
+        fs::create_dir_all(&test_img_dir).expect("create discord cache dir");
+        fs::write(discord_dir.join("index.json"), b"{\"entries\":{}}").expect("write index");
+        fs::write(test_img_dir.join("test.jpg"), b"image-payload-bytes").expect("write img");
+
+        // cache_bytes must count Discord artwork directory
+        assert!(cache_bytes() >= b"image-payload-bytes".len() as u64);
+
+        // clear_caches must successfully clear Discord artwork cache root
+        let result = clear_caches();
+        assert!(result.is_ok(), "clear_caches must return Ok");
+        assert!(
+            !discord_dir.exists(),
+            "discord artwork cache must be removed by clear_caches"
+        );
     }
     #[test]
     fn test_write_cache_atomic_overwrites_existing_file() {
