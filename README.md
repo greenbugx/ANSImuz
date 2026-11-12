@@ -46,7 +46,7 @@ ANSImuz can display your live playback activity on Discord:
 You can toggle Discord RPC on or off directly inside ANSImuz:
 - Press **`S`** to open the **Settings** screen and toggle **Discord RPC** (`ON` / `OFF`).
 
-For advanced options, configure the `[discord]` section in `.ansimuz-settings.toml`:
+For advanced options, configure the `[discord]` section in `~/.config/ansimuz/settings.toml` (or `.ansimuz-settings.toml` if `HOME` is unset):
 
 ```toml
 [discord]
