@@ -86,6 +86,17 @@ ANSImuz/
 │   │   └── mod.rs        # App module re-exports
 │   ├── artwork/      # Image decoding, bounded memory cache, resize cache, renderer
 │   ├── config/       # Settings persistence (TOML), platform cache dirs, atomic writes
+│   ├── discord/      # Discord Rich Presence subsystem
+│   │   ├── activity.rs   # Listening activity formatting, timestamps, buttons, UTF-8 truncation
+│   │   ├── client.rs     # Low-level Discord IPC transport client wrapper
+│   │   ├── worker.rs     # Background worker actor, connection lifecycle & exponential backoff
+│   │   └── artwork/      # Discord artwork resolution, normalization, and upload pipeline
+│   │       ├── types.rs      # ArtworkRequest/Result, byte-level format detection, MIME types
+│   │       ├── downloader.rs # Async HTTPS download, aspect ratio preserving resize & bounds check
+│   │       ├── uploader.rs   # Multipart uploaders (Imgdb, Catbox, Litterbox), SSRF validation
+│   │       ├── cache.rs      # Persistent disk cache (index.json, images/), LRU pruning
+│   │       ├── manager.rs    # Orchestrator, request coalescing, provider cooldown matrix
+│   │       └── worker.rs     # Async artwork worker thread & channel forwarder
 │   ├── music/        # Track model, identity policy, backend PyO3 bridge execution
 │   ├── playback/     # MPV IPC process supervision, cross-platform transport (ipc.rs), audio prefetch
 │   │   ├── events.rs     # PlayerEvent enum (Position, Ended, Failed)
@@ -109,13 +120,16 @@ ANSImuz/
 ├── packaging/
 │   ├── arch/         # PKGBUILD for Arch Linux
 │   └── rpm/          # RPM specs for Fedora (COPR)
+├── vendor/
+│   └── presenceforge/ # Vendored cross-platform Discord IPC crate (Unix domain sockets & Windows named pipes)
 ├── tests/            # Integration test suites:
-│   ├── queue.rs          # Queue manipulation and focus interactions
-│   ├── queue_playback.rs # Queue priority, repeat modes, failure continuation
-│   ├── resolution.rs     # Generation tracking, slot identity, cancellation
-│   ├── lifecycle.rs      # Explicit Ended/Failed events, shutdown, track switching
-│   ├── memory_session.rs # Long-session cache bounds, memory leakage, cache clearing
-│   └── artwork.rs        # Disk cache persistence, corruption handling
+│   ├── queue.rs              # Queue manipulation and focus interactions
+│   ├── queue_playback.rs     # Queue priority, repeat modes, failure continuation
+│   ├── resolution.rs         # Generation tracking, slot identity, cancellation
+│   ├── lifecycle.rs          # Explicit Ended/Failed events, shutdown, track switching
+│   ├── memory_session.rs     # Long-session cache bounds, memory leakage, cache clearing
+│   ├── artwork.rs            # Disk cache persistence, corruption handling
+│   └── discord_connection.rs # Discord client connection lifecycle and reconnect contracts
 └── .github/          # CI workflows
 ```
 
@@ -130,8 +144,44 @@ ANSImuz/
 - **Cross-Platform IPC**: MPV communication uses `IpcEndpoint` and `IpcStream` (`crate::playback::ipc`). On Unix, endpoints use filesystem paths (`.sock`); on Windows, endpoints use named pipes (`\\.\pipe\...`). Never invoke filesystem existence checks or deletions (`Path::exists()`, `fs::remove_file()`) on Windows named pipes.
 - **Observer Thread Concurrency & Reaping**: The observer decouples periodic query writing from continuous response reading to support platforms (such as Windows named pipes) that lack socket-level read timeouts. Background writer threads must always be wrapped in a RAII guard (`WriterThreadGuard`) and joined when the observer exits, and `AudioPlayer::stop()` must join the observer thread.
 - **Test Concurrency & State Isolation**: Tests that mutate shared global caches (such as `RESIZE_CACHE` or `art_cache()`) must acquire `crate::artwork::ARTWORK_TEST_LOCK` to prevent race conditions during parallel test execution. Self-contained data structure tests (like `ResizeCache`) must instantiate local, isolated instances.
+- **Discord Isolation**: Discord RPC must never block the main TUI rendering thread or audio playback loop. All Discord activity formatting and IPC transmission run in `DiscordWorker`, while network downloads, image resizing, and uploads run in `ArtworkWorker`.
+- **Discord Playback Synchronization & Stale Event Rejection**: Player generation counters ensure rapid track skipping, cancellations, or out-of-order player events never publish stale presence to Discord. Presence must be cleared immediately when playback finishes, halts on error, or is manually stopped.
+- **Artwork Security & Format Validation**: Never infer image format from file extensions or URLs. Use `NormalizedImageFormat::from_bytes` to validate magic bytes. Reject private IPs, localhost, and non-HTTPS destinations before initiating upload requests.
 - **Style & Consistency**: Keep code formatting consistent. Avoid unnecessary abstractions or dead code.
 - **Comments**: Keep comments minimal and focused strictly on explaining non-obvious requirements.
+
+---
+
+## Discord Rich Presence (RPC) Architecture
+
+The Discord Rich Presence subsystem (`src/discord/`) integrates real-time playback state with Discord's desktop client over local Inter-Process Communication (IPC).
+
+### Subsystem Structure
+
+1. **Activity Builder (`src/discord/activity.rs`)**:
+   - Constructs Discord `Activity` payloads (`ActivityType::Listening`).
+   - Details: Track title; State: Artist + Album (or ANSImuz fallback).
+   - Timestamps: Live start and end timestamps calculated for playing tracks; timestamps omitted when paused.
+   - Interactive Buttons: "Listen on YouTube Music" or "Listen on Spotify" (pointing to public canonical URLs) and "Get ANSImuz". Temporary streaming URLs are strictly rejected.
+   - Truncation: Safe UTF-8 grapheme truncation preventing multibyte panic or Discord API rejection.
+
+2. **IPC Client & Transport (`src/discord/client.rs` & `vendor/presenceforge/`)**:
+   - Thin wrapper around `presenceforge::DiscordIpcClient`.
+   - Cross-platform local IPC: Unix-domain sockets (`/run/user/.../discord-ipc-0`) on Linux; Windows Named Pipes (`\\.\pipe\discord-ipc-0`) on Windows.
+   - Offline safety: If Discord is closed or unreachable, calls return `DiscordError::NotConnected` safely without blocking the application.
+
+3. **Background Worker Actor (`src/discord/worker.rs`)**:
+   - Supervised background thread receiving `DiscordCommand` events (`TrackChanged`, `PositionChanged`, `Paused`, `Resumed`, `Clear`).
+   - Auto-reconnection with exponential backoff: 10s → 20s → 40s → capped at 60s. Backoff resets immediately upon successful handshake.
+   - Idempotent shutdown and graceful channel draining on application exit.
+
+4. **Artwork Pipeline (`src/discord/artwork/`)**:
+   - **Format Detection (`types.rs`)**: Magic byte inspection for JPEG, PNG, WebP, GIF, and AVIF. Rejects corrupted, empty, or unsupported formats (BMP, SVG).
+   - **Downloader (`downloader.rs`)**: Asynchronous HTTPS downloader with dimension bounds checks ($10\times 10$ to $4096\times 4096$) and aspect-ratio preserving downscaling.
+   - **Uploader (`uploader.rs`)**: Multi-host multipart uploaders for Imgdb, Catbox, and Litterbox. Validates returned URLs, enforces SSRF protections (blocking localhost, RFC-1918 private IPs, and credentialed URLs), and parses `Retry-After` headers.
+   - **Cache (`cache.rs`)**: Persistent disk cache (`index.json` + `images/` directory) with SHA-256 content deduplication, LRU pruning to `cache_max_size_mb`, and file preservation across expiration cycles.
+   - **Manager (`manager.rs`)**: Orchestrates in-flight request coalescing, fallback chains (`Imgdb` → `Catbox` → `Litterbox` → default logo), and provider error cooldown matrices (5xx, timeouts, malformed responses apply cooldowns; invalid inputs do not penalize hosts).
+   - **Worker (`worker.rs`)**: Decoupled async worker thread and response forwarder.
 
 ---
 
@@ -343,10 +393,28 @@ cargo test --test resolution        # Async track resolution, stale generation r
 cargo test --test lifecycle         # Explicit Ended/Failed lifecycle events, track switching
 cargo test --test memory_session    # Bounded cache capacities, long session memory stability
 cargo test --test artwork           # Disk caching, file format detection, corruption recovery
+cargo test --test discord_connection # Discord IPC client connection contracts
+cargo test --lib discord::          # Discord activity, worker, uploader, and cache unit tests
 
 # Check Python syntax and run backend tests
 python -m py_compile backend/bridge.py backend/exceptions.py backend/artwork/thumbnails.py backend/providers/spotify/spotify.py backend/providers/ytmusic/ytmusic.py
 python -m unittest discover -s backend/tests -p "test_*.py" -v
+```
+
+### Testing Discord Rich Presence (RPC) & IPC
+
+ANSImuz tests all 117 Discord RPC integration behaviors (activity formatting, worker reconnection backoff, byte format detection, SSRF protection, multi-provider fallbacks, cache invalidation, and playback lifecycle synchronization) offline using mock recorders and isolated temporary directories:
+
+```bash
+# Run all Discord-specific unit and integration tests:
+cargo test --lib discord::
+cargo test --test discord_connection
+
+# Run with an isolated cache directory if running in restricted environments:
+# Linux/macOS:
+XDG_CACHE_HOME=/tmp/ansimuz_test_cache cargo test --lib discord::
+# Windows (PowerShell):
+$env:XDG_CACHE_HOME='C:\Users\<user>\AppData\Local\Temp\ansimuz_test_cache'; cargo test --lib discord::
 ```
 
 ### Testing MPV Process Supervision & IPC
