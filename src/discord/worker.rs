@@ -290,29 +290,16 @@ fn run_worker_loop(
                     position: pos,
                     duration: maybe_dur,
                 } => {
-                    if let Some(info) = &mut current_playback {
-                        let old_pos = info.position.unwrap_or(Duration::ZERO);
-                        info.position = Some(pos);
-                        let duration_updated = if info.duration.is_none() && maybe_dur.is_some() {
-                            info.duration = maybe_dur;
-                            true
-                        } else {
-                            false
-                        };
-                        // Discord automatically client-side interpolates start/end timestamps.
-                        // Refresh activity if duration was newly discovered or if a seek caused a jump > 2s
-                        let seeked = pos.abs_diff(old_pos) > Duration::from_secs(2);
-                        if (duration_updated || seeked) && !info.is_paused {
-                            apply_playback(
-                                &mut client,
-                                &mut connected,
-                                &connected_flag,
-                                &mut next_reconnect_at,
-                                &mut current_backoff,
-                                info,
-                            );
-                        }
-                    }
+                    handle_position_changed(
+                        &mut client,
+                        &mut connected,
+                        &connected_flag,
+                        &mut next_reconnect_at,
+                        &mut current_backoff,
+                        &mut current_playback,
+                        pos,
+                        maybe_dur,
+                    );
                 }
                 DiscordCommand::Paused => {
                     if let Some(info) = &mut current_playback
@@ -394,6 +381,73 @@ fn run_worker_loop(
                 break;
             }
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_position_changed(
+    client: &mut DiscordClient,
+    connected: &mut bool,
+    connected_flag: &Arc<AtomicBool>,
+    next_reconnect_at: &mut Option<Instant>,
+    current_backoff: &mut Duration,
+    current_playback: &mut Option<PlaybackInfo>,
+    pos: Duration,
+    maybe_dur: Option<Duration>,
+) {
+    let mut reconnected = false;
+    if let Some(info) = current_playback {
+        let old_pos = info.position.unwrap_or(Duration::ZERO);
+        info.position = Some(pos);
+        let duration_updated = if info.duration.is_none() && maybe_dur.is_some() {
+            info.duration = maybe_dur;
+            true
+        } else {
+            false
+        };
+
+        // Check reconnect deadline while processing position updates to prevent
+        // rapid 250ms periodic updates from starving the reconnect timeout
+        if !*connected
+            && let Some(next_at) = *next_reconnect_at
+            && Instant::now() >= next_at
+        {
+            try_reconnect(
+                client,
+                connected,
+                connected_flag,
+                next_reconnect_at,
+                current_backoff,
+                Some(info),
+            );
+            reconnected = *connected;
+        }
+
+        // Discord automatically client-side interpolates start/end timestamps.
+        // Refresh activity if duration was newly discovered or if a seek caused a jump > 2s
+        let seeked = pos.abs_diff(old_pos) > Duration::from_secs(2);
+        if (duration_updated || seeked) && !info.is_paused && !reconnected {
+            apply_playback(
+                client,
+                connected,
+                connected_flag,
+                next_reconnect_at,
+                current_backoff,
+                info,
+            );
+        }
+    } else if !*connected
+        && let Some(next_at) = *next_reconnect_at
+        && Instant::now() >= next_at
+    {
+        try_reconnect(
+            client,
+            connected,
+            connected_flag,
+            next_reconnect_at,
+            current_backoff,
+            None,
+        );
     }
 }
 
@@ -663,5 +717,60 @@ mod tests {
         assert!(matches!(rx.try_recv(), Ok(DiscordCommand::Paused)));
         assert!(matches!(rx.try_recv(), Ok(DiscordCommand::Resumed(_))));
         assert!(matches!(rx.try_recv(), Ok(DiscordCommand::Clear)));
+    }
+
+    #[test]
+    fn test_position_changed_checks_reconnect_deadline_when_disconnected() {
+        let mut client = DiscordClient::new("dummy");
+        let mut connected = false;
+        let flag = Arc::new(AtomicBool::new(false));
+        let mut current_playback = Some(
+            PlaybackInfo::new("Song", "Artist")
+                .with_position(Duration::from_secs(10))
+                .with_duration(Duration::from_secs(200)),
+        );
+
+        // Case 1: Reconnect deadline has NOT yet arrived (in future)
+        let mut next_at = Some(Instant::now() + Duration::from_secs(30));
+        let mut backoff = Duration::from_secs(10);
+        handle_position_changed(
+            &mut client,
+            &mut connected,
+            &flag,
+            &mut next_at,
+            &mut backoff,
+            &mut current_playback,
+            Duration::from_secs(11),
+            Some(Duration::from_secs(200)),
+        );
+        // Should NOT attempt reconnect; backoff remains unchanged, position updated
+        assert!(!connected);
+        assert_eq!(backoff, Duration::from_secs(10));
+        assert_eq!(
+            current_playback.as_ref().unwrap().position,
+            Some(Duration::from_secs(11))
+        );
+
+        // Case 2: Reconnect deadline HAS arrived (in the past)
+        let mut next_at_past = Some(Instant::now() - Duration::from_secs(1));
+        handle_position_changed(
+            &mut client,
+            &mut connected,
+            &flag,
+            &mut next_at_past,
+            &mut backoff,
+            &mut current_playback,
+            Duration::from_secs(12),
+            Some(Duration::from_secs(200)),
+        );
+        // Attempted reconnection! Since dummy client cannot connect to real Discord,
+        // it fails and invokes mark_disconnected, doubling backoff from 10s to 20s
+        assert!(!connected);
+        assert_eq!(backoff, Duration::from_secs(20));
+        assert!(next_at_past.unwrap() > Instant::now());
+        assert_eq!(
+            current_playback.as_ref().unwrap().position,
+            Some(Duration::from_secs(12))
+        );
     }
 }
