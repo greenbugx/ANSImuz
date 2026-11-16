@@ -1,5 +1,6 @@
 pub mod model;
 pub mod provider;
+pub mod synchronizer;
 pub mod types;
 pub mod worker;
 
@@ -7,6 +8,7 @@ pub use model::{LyricLine, LyricSyllable, LyricWord, Lyrics};
 pub use provider::{
     LyricsResponse, classify_lyrics_error, fetch_lyrics, spawn_fetch_lyrics, track_to_py_dict,
 };
+pub use synchronizer::{LyricsSyncPoint, LyricsSynchronizer};
 pub use types::{LyricsError, LyricsStatus, SyncType, ValidationError};
 pub use worker::{LyricsCommand, LyricsEvent, LyricsState, LyricsWorker};
 
