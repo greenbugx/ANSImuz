@@ -30,6 +30,8 @@ pub fn run(
     let (player_tx, player_rx): (Sender<PlayerEvent>, Receiver<PlayerEvent>) = mpsc::channel();
     let (resolve_tx, resolve_rx): (Sender<ResolveResponse>, Receiver<ResolveResponse>) =
         mpsc::channel();
+    let (lyrics_worker, lyrics_rx) = crate::lyrics::LyricsWorker::spawn();
+    app.lyrics_worker = Some(lyrics_worker);
 
     let mut playback: Option<(f64, Option<f64>)> = None;
 
@@ -40,6 +42,10 @@ pub fn run(
 
         while let Ok(response) = resolve_rx.try_recv() {
             handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, response);
+        }
+
+        while let Ok(event) = lyrics_rx.try_recv() {
+            app.handle_lyrics_event(event);
         }
 
         while let Ok(event) = player_rx.try_recv() {
@@ -89,6 +95,10 @@ pub fn run(
     player.stop();
 
     if let Some(mut worker) = app.discord_worker.take() {
+        worker.shutdown();
+    }
+
+    if let Some(mut worker) = app.lyrics_worker.take() {
         worker.shutdown();
     }
 

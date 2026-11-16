@@ -155,6 +155,30 @@ pub fn handle_key(
             return;
         }
 
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
+                app.scroll_lyrics_up();
+                return;
+            }
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
+                app.scroll_lyrics_down();
+                return;
+            }
+            KeyCode::PageUp => {
+                app.scroll_lyrics_page_up();
+                return;
+            }
+            KeyCode::PageDown => {
+                app.scroll_lyrics_page_down();
+                return;
+            }
+            KeyCode::Char('c') | KeyCode::Char('C') => {
+                app.resume_lyrics_auto_scroll();
+                return;
+            }
+            _ => {}
+        }
+
         if let Some(action) = action_for_nav_key(key) {
             match action {
                 Action::PlayPause

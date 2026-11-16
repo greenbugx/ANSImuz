@@ -136,22 +136,57 @@ impl LyricLine {
 }
 
 /// Canonical representation of song lyrics in Rust.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
 pub struct Lyrics {
-    #[serde(default, alias = "provider")]
     pub source: Option<String>,
-    #[serde(default)]
     pub sync_type: SyncType,
-    #[serde(default, alias = "track_title")]
     pub title: Option<String>,
-    #[serde(default, alias = "artist_name")]
     pub artist: Option<String>,
-    #[serde(default)]
     pub isrc: Option<String>,
-    #[serde(default)]
     pub lines: Vec<LyricLine>,
-    #[serde(default)]
     pub unavailable_reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct LyricsRaw {
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    sync_type: SyncType,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    track_title: Option<String>,
+    #[serde(default)]
+    artist: Option<String>,
+    #[serde(default)]
+    artist_name: Option<String>,
+    #[serde(default)]
+    isrc: Option<String>,
+    #[serde(default)]
+    lines: Vec<LyricLine>,
+    #[serde(default)]
+    unavailable_reason: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for Lyrics {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = LyricsRaw::deserialize(deserializer)?;
+        Ok(Lyrics {
+            source: raw.source.or(raw.provider),
+            sync_type: raw.sync_type,
+            title: raw.title.or(raw.track_title),
+            artist: raw.artist.or(raw.artist_name),
+            isrc: raw.isrc,
+            lines: raw.lines,
+            unavailable_reason: raw.unavailable_reason,
+        })
+    }
 }
 
 impl Lyrics {

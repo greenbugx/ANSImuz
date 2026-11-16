@@ -220,7 +220,7 @@ impl LyricsSynchronizer {
 }
 
 /// Pure calculation of a `LyricsSyncPoint` given current playback position.
-fn compute_sync_point(
+pub fn compute_sync_point(
     position_ms: u64,
     duration_ms: Option<u64>,
     generation: u64,

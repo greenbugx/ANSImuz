@@ -8,7 +8,7 @@ pub use model::{LyricLine, LyricSyllable, LyricWord, Lyrics};
 pub use provider::{
     LyricsResponse, classify_lyrics_error, fetch_lyrics, spawn_fetch_lyrics, track_to_py_dict,
 };
-pub use synchronizer::{LyricsSyncPoint, LyricsSynchronizer};
+pub use synchronizer::{LyricsSyncPoint, LyricsSynchronizer, compute_sync_point};
 pub use types::{LyricsError, LyricsStatus, SyncType, ValidationError};
 pub use worker::{LyricsCommand, LyricsEvent, LyricsState, LyricsWorker};
 
@@ -203,6 +203,26 @@ mod tests {
             unavail.unavailable_reason.as_deref(),
             Some("Song is instrumental")
         );
+    }
+
+    #[test]
+    fn test_deserialize_handles_duplicate_alias_keys_gracefully() {
+        let json = r#"{
+            "source": "lrc.red",
+            "provider": "lrc.red",
+            "title": "Song Title",
+            "track_title": "Song Title",
+            "artist": "Artist Name",
+            "artist_name": "Artist Name",
+            "sync_type": "word",
+            "lines": []
+        }"#;
+
+        let lyrics: Lyrics =
+            serde_json::from_str(json).expect("Must handle duplicate aliases without error");
+        assert_eq!(lyrics.source.as_deref(), Some("lrc.red"));
+        assert_eq!(lyrics.title.as_deref(), Some("Song Title"));
+        assert_eq!(lyrics.artist.as_deref(), Some("Artist Name"));
     }
 
     #[test]

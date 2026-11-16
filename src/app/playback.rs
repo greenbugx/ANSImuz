@@ -219,6 +219,10 @@ pub fn handle_player_event(
             if let Some(worker) = &app.discord_worker {
                 worker.playback_progress(pos_dur, dur_opt);
             }
+            if let Some(lyrics) = &app.lyrics_state.lyrics {
+                app.lyrics_synchronizer
+                    .sync_position(generation, elapsed, duration, lyrics);
+            }
             true
         }
         PlayerEvent::Ended { generation } => {
@@ -227,6 +231,9 @@ pub fn handle_player_event(
             }
             app.current_position = None;
             *playback = None;
+            if let Some(lyrics) = &app.lyrics_state.lyrics {
+                app.lyrics_synchronizer.sync_ended(generation, lyrics);
+            }
             if app.is_resolving() {
                 retire_active_track_while_resolving(app);
             } else {
@@ -243,6 +250,9 @@ pub fn handle_player_event(
             }
             app.current_position = None;
             *playback = None;
+            if let Some(lyrics) = &app.lyrics_state.lyrics {
+                app.lyrics_synchronizer.sync_ended(generation, lyrics);
+            }
             if app.is_resolving() {
                 player.record_error(message.to_string());
                 retire_active_track_while_resolving(app);
@@ -262,6 +272,9 @@ pub fn handle_player_event(
 
 fn clear_discord_presence(app: &App) {
     if let Some(worker) = &app.discord_worker {
+        worker.clear();
+    }
+    if let Some(worker) = &app.lyrics_worker {
         worker.clear();
     }
 }
@@ -464,6 +477,12 @@ pub fn start_playback(
                 let artwork = crate::discord::artwork::ArtworkRequest::from_track(&track);
                 worker.track_changed(info, artwork);
             }
+            if let Some(worker) = &app.lyrics_worker {
+                worker.fetch(track.clone());
+            }
+            app.lyrics_synchronizer.reset();
+            app.lyrics_scroll_offset = 0;
+            app.lyrics_auto_scroll = true;
             Ok(())
         }
         Err(error) => {
@@ -475,6 +494,9 @@ pub fn start_playback(
             app.set_stopped();
             app.set_status(format!("PLAYER ERROR: {}", error));
             if let Some(worker) = &app.discord_worker {
+                worker.clear();
+            }
+            if let Some(worker) = &app.lyrics_worker {
                 worker.clear();
             }
             Err(error)

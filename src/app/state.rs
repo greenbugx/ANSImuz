@@ -142,6 +142,11 @@ pub struct App {
     pub playback_state: PlaybackState,
     pub current_position: Option<Duration>,
     pub discord_worker: Option<crate::discord::DiscordWorker>,
+    pub lyrics_state: crate::lyrics::LyricsState,
+    pub lyrics_synchronizer: crate::lyrics::LyricsSynchronizer,
+    pub lyrics_scroll_offset: usize,
+    pub lyrics_auto_scroll: bool,
+    pub lyrics_worker: Option<crate::lyrics::LyricsWorker>,
 }
 
 impl App {
@@ -186,6 +191,11 @@ impl App {
             playback_state: PlaybackState::Stopped,
             current_position: None,
             discord_worker: None,
+            lyrics_state: crate::lyrics::LyricsState::new(),
+            lyrics_synchronizer: crate::lyrics::LyricsSynchronizer::new(),
+            lyrics_scroll_offset: 0,
+            lyrics_auto_scroll: true,
+            lyrics_worker: None,
         }
     }
 
@@ -374,6 +384,12 @@ impl App {
             self.settings_open = false;
             self.command_palette_open = false;
             self.about_open = false;
+            if self.lyrics_state.status.is_idle()
+                && let Some(track) = self.current_track().cloned()
+                && let Some(worker) = &self.lyrics_worker
+            {
+                worker.fetch(track);
+            }
         }
     }
 
@@ -382,10 +398,54 @@ impl App {
         self.settings_open = false;
         self.command_palette_open = false;
         self.about_open = false;
+        if self.lyrics_state.status.is_idle()
+            && let Some(track) = self.current_track().cloned()
+            && let Some(worker) = &self.lyrics_worker
+        {
+            worker.fetch(track);
+        }
     }
 
     pub fn close_lyrics(&mut self) {
         self.lyrics_open = false;
+    }
+
+    pub fn scroll_lyrics_up(&mut self) {
+        self.lyrics_auto_scroll = false;
+        self.lyrics_scroll_offset = self.lyrics_scroll_offset.saturating_sub(1);
+    }
+
+    pub fn scroll_lyrics_down(&mut self) {
+        self.lyrics_auto_scroll = false;
+        self.lyrics_scroll_offset = self.lyrics_scroll_offset.saturating_add(1);
+    }
+
+    pub fn scroll_lyrics_page_up(&mut self) {
+        self.lyrics_auto_scroll = false;
+        self.lyrics_scroll_offset = self.lyrics_scroll_offset.saturating_sub(10);
+    }
+
+    pub fn scroll_lyrics_page_down(&mut self) {
+        self.lyrics_auto_scroll = false;
+        self.lyrics_scroll_offset = self.lyrics_scroll_offset.saturating_add(10);
+    }
+
+    pub fn resume_lyrics_auto_scroll(&mut self) {
+        self.lyrics_auto_scroll = true;
+    }
+
+    pub fn handle_lyrics_event(&mut self, event: crate::lyrics::LyricsEvent) {
+        if let crate::lyrics::LyricsEvent::Success { ref lyrics, .. } = event
+            && let Some(pos) = self.current_position
+        {
+            self.lyrics_synchronizer.sync_position(
+                self.resolve_generation,
+                pos.as_secs_f64(),
+                None,
+                lyrics,
+            );
+        }
+        self.lyrics_state.apply_event(event);
     }
 
     pub fn open_quit_dialog(&mut self) {

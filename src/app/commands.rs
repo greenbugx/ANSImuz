@@ -270,6 +270,7 @@ pub fn dispatch_action(
                     Ok(()) => {
                         let new_paused = !app.is_paused();
                         app.set_paused(new_paused);
+                        app.lyrics_synchronizer.set_paused(new_paused);
                         if let Some(worker) = &app.discord_worker {
                             if new_paused {
                                 worker.paused();

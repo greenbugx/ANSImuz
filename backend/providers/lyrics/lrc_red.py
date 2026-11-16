@@ -370,12 +370,8 @@ class LrcRedProvider(LyricsProvider):
             "artist": artist,
             "isrc": isrc,
             "lines": lines,
-            # Aliases & additional metadata
-            "provider": self.name,
-            "track_title": title,
-            "artist_name": artist,
+            # Additional metadata
             "album": album,
-            "album_name": album,
             "duration_seconds": duration,
             "language": language,
             "plain_lyrics": plain_lyrics,
