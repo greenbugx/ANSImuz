@@ -8,20 +8,15 @@ use ansimuz::music::{PlaybackSource, ResolveResponse, SearchResponse, Track};
 use ansimuz::playback::{AudioPlayer, PlayerEvent, Repeat};
 
 fn make_test_track(title: &str, artist: &str, stream: &str) -> Track {
-    Track {
-        title: title.to_string(),
-        artist: artist.to_string(),
-        stream_url: stream.to_string(),
-        art_url: String::new(),
-        spotify_id: if stream.is_empty() {
-            Some(format!("sp_{title}"))
-        } else {
-            None
-        },
-        artists: vec![artist.to_string()],
-        album: Some("Album".to_string()),
-        duration_ms: Some(180_000),
+    let mut track = Track::new(title, artist)
+        .with_album("Album")
+        .with_duration_ms(180_000);
+    if stream.is_empty() {
+        track = track.with_spotify_id(format!("sp_{title}"));
+    } else {
+        track = track.with_stream_url(stream);
     }
+    track
 }
 
 #[test]

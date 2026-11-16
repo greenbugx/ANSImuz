@@ -1,0 +1,87 @@
+[package]
+name = "presenceforge"
+version = "0.3.0"
+edition = "2021"
+authors = ["Sreehari Anil <sreehari7102008@gmail.com>"]
+description = "A library for Discord Rich Presence (IPC) integration"
+readme = "README.md"
+repository = "https://github.com/Sreehari425/presenceforge"
+license = "MIT OR Apache-2.0"
+keywords = ["discord", "rpc", "rich-presence", "ipc", "gaming"]
+categories = ["api-bindings", "games"]
+rust-version = "1.81.0"
+
+# Configuration for docs.rs to build documentation with all features
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+byteorder = "1"
+bytes = "1"
+uuid = { version = "1", features = ["v4"] }
+futures = { version = "0.3", optional = true }
+log = "0.4"
+
+# Async runtime dependencies
+tokio = { version = "1", features = ["net", "io-util", "fs", "rt", "rt-multi-thread", "time", "macros"], optional = true }
+async-std = { version = "1", features = ["attributes"], optional = true }
+smol = { version = "2", optional = true }
+blocking = { version = "1", optional = true }
+
+[dev-dependencies]
+clap = { version = "4", features = ["derive"] }
+dotenvy = "0.15"
+env_logger = "0.11"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[profile.dev.package."*"]
+opt-level = 3
+debug = false
+
+[features]
+default = []
+# Rich Presence features
+secrets = []
+# Async runtimes
+tokio-runtime = ["tokio", "futures"]
+async-std-runtime = ["async-std", "blocking", "futures"]
+smol-runtime = ["smol", "futures"]
+
+[[example]]
+name = "basic"
+doc-scrape-examples = true
+
+[[example]]
+name = "game_demo"
+
+[[example]]
+name = "coding_status"
+
+[[example]]
+name = "custom_activity"
+
+[[example]]
+name = "async_tokio"
+required-features = ["tokio-runtime"]
+
+
+[[example]]
+name = "async_std"
+required-features = ["async-std-runtime"]
+
+[[example]]
+name = "async_smol"
+required-features = ["smol-runtime"]
+
+[[example]]
+name = "async_tokio_reconnect"
+required-features = ["tokio-runtime"]
+
+[[example]]
+name = "event_listener"
+required-features = ["secrets"]

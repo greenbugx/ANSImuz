@@ -7,16 +7,10 @@ use ansimuz::playback::{AudioPlayer, PlayerEvent};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
 fn test_track(title: &str, artist: &str) -> Track {
-    Track {
-        title: title.to_string(),
-        artist: artist.to_string(),
-        stream_url: format!("https://example.com/{title}.mp3"),
-        art_url: String::new(),
-        spotify_id: None,
-        artists: vec![artist.to_string()],
-        album: Some("Test Album".to_string()),
-        duration_ms: Some(180_000),
-    }
+    Track::new(title, artist)
+        .with_stream_url(format!("https://example.com/{title}.mp3"))
+        .with_album("Test Album")
+        .with_duration_ms(180_000)
 }
 
 #[test]

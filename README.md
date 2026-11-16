@@ -26,6 +26,41 @@ ANSImuz is built with Rust, Ratatui, Python, [`ytmusicapi`](https://github.com/s
 - Shuffle and repeat modes (Repeat One / Repeat All)
 - Full playback controls with keyboard shortcuts
 - Quick command palette
+- Discord Rich Presence (RPC) showing current track, real-time progress, and album artwork
+
+## Discord Rich Presence (RPC)
+
+> [!WARNING]
+> **Discord Rich Presence** is currently *experimental* and may not fully meet user expectations. It may behave unexpectedly, fail to work in certain situations, or contain bugs. Features and behavior are subject to change as development continues.
+
+ANSImuz can display your live playback activity on Discord:
+
+- **Rich Status**: Shows the track title, artist name, and album with live elapsed and total progress bar.
+- **Album Artwork**: Automatically fetches, normalizes, and uploads track artwork to an external image host (Imgdb, Catbox, or Litterbox) so high-resolution covers display on Discord, with fallback to the retro ANSImuz logo.
+- **Interactive Buttons**: Clickable "Listen on YouTube Music" or "Listen on Spotify" buttons linking to public track pages, along with a "Get ANSImuz" button.
+- **State Synchronization**: Accurately tracks playing, paused (omitting timestamps), resumed (recalculated timestamps), and stopped/completed states (clearing presence).
+- **Seamless & Non-Blocking**: Runs completely in background worker threads. If Discord is closed or reconnecting, playback continues with zero interruptions or latency.
+
+### Enabling & Configuration
+
+You can toggle Discord RPC on or off directly inside ANSImuz:
+- Press **`S`** to open the **Settings** screen and toggle **Discord RPC** (`ON` / `OFF`).
+
+For advanced options, configure the `[discord]` section in `~/.config/ansimuz/settings.toml` (or `.ansimuz-settings.toml` if `HOME` is unset):
+
+```toml
+[discord]
+enabled = false          # Enable Discord Rich Presence (default: false)
+artwork_enabled = true   # Upload and display album covers on Discord (default: true)
+
+[discord.artwork]
+primary_host = "imgdb"   # Primary image host: "imgdb", "catbox", or "litterbox" (default: "imgdb")
+fallback_host = "catbox" # Fallback provider if primary host fails (default: "catbox")
+cache_max_size_mb = 250  # Maximum disk cache for hosted artwork (default: 250 MB)
+max_download_size_mb = 8 # Maximum download size for raw artwork (default: 8 MB)
+image_size = 1024        # Normalized artwork dimensions in pixels (default: 1024)
+litterbox_expiry = "72h" # Retention period when using Litterbox: "1h", "12h", "24h", "72h" (default: "72h")
+```
 
 ## Supported Operating Systems
 
@@ -187,11 +222,12 @@ ANSImuz locates its embedded Python bridge (`backend/`) and visual assets (`asse
 Runtime cache directories are stored under `$XDG_CACHE_HOME/ansimuz` (or `~/.cache/ansimuz`):
 - `audio/`: Cached audio streams and prefetch dumps.
 - `artwork/`: Cached album artwork thumbnails (`.img`).
+- `discord/artwork/`: Cached Discord artwork images and upload index (`index.json`).
 
 **Cache Safeguards:**
 - **Atomic Writes**: Writes use temporary `.part` files renamed atomically upon completion.
 - **Stale Cleanup**: Any incomplete `.part` files leftover from unexpected process kills or crashes are automatically cleaned up on application startup.
-- **Bounded Disk Quota**: Cache directories are automatically pruned to a maximum threshold (512 MB per cache type) on a least-recently-modified basis.
+- **Bounded Disk Quota**: Cache directories are automatically pruned to a maximum threshold (512 MB for playback caches, configurable up to 250 MB for Discord artwork) on a least-recently-accessed / least-recently-modified basis.
 - **Epoch Invalidation**: Triggering **Clear Caches** in Settings (`S` → Clear Caches) atomically increments a cache epoch, guaranteeing in-flight downloads discard their results rather than repopulating cleared storage.
 
 ### Network Requirements
@@ -201,11 +237,13 @@ Runtime cache directories are stored under `$XDG_CACHE_HOME/ansimuz` (or `~/.cac
   - Spotify track resolution (finding YouTube Music stream equivalents).
   - Audio streaming and background prefetch (`yt-dlp` stream resolution and `mpv` network playback).
   - Album artwork fetching (`reqwest` streaming image downloads).
+  - Discord album artwork uploading (background uploads to Imgdb / Catbox / Litterbox when Discord RPC artwork is enabled).
 - **Offline Capabilities**:
   - Playing previously cached audio streams (`audio_cache = true` in Settings).
   - Viewing cached album artwork.
   - Viewing the animated fallback visualizer (uses bundled local frames).
   - Navigating the local queue and session history.
+  - Local Discord Rich Presence communication (IPC over local named pipe or domain socket without external network dependency).
   - Running offline unit tests and mock-based integration suites.
 
 ## Controls

@@ -20,7 +20,12 @@ fn current_palette_color(app: &App) -> Option<(u8, u8, u8)> {
         .or(app.pending_track())
         .or_else(|| app.tracks.get(app.selected));
 
-    current.and_then(|track| crate::artwork::dominant_color(&track.art_url))
+    current.and_then(|track| {
+        track
+            .art_url
+            .as_deref()
+            .and_then(crate::artwork::dominant_color)
+    })
 }
 
 pub fn render(app: &App, frame: &mut Frame, playback: Option<(f64, Option<f64>)>) {

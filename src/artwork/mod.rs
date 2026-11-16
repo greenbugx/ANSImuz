@@ -15,7 +15,7 @@ pub use cache::{
 pub use palette::dominant_color;
 pub use render::{
     CachedRender, RESIZE_CACHE_CAPACITY, ResizeKey, artwork_id_for_url, clear_resize_cache,
-    get_cached_resize, get_or_create_resized, init_picker, loading_moons, render_art,
+    get_cached_resize, get_or_create_resized, init_picker, loading_moons, render_art, render_hq,
     render_static_image,
 };
 

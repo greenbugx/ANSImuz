@@ -1,0 +1,753 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (c) 2025-2026 Sreehari Anil and project contributors
+
+#![allow(clippy::collapsible_if)]
+
+use serde::{Deserialize, Serialize};
+use std::fmt;
+
+/// Typed validation failures for `Activity`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ActivityValidationError {
+    StateTooLong {
+        max: usize,
+        actual: usize,
+    },
+    DetailsTooLong {
+        max: usize,
+        actual: usize,
+    },
+    TooManyButtons {
+        max: usize,
+        actual: usize,
+    },
+    ButtonLabelTooLong {
+        max: usize,
+        actual: usize,
+    },
+    ButtonUrlTooLong {
+        max: usize,
+        actual: usize,
+    },
+    ButtonUrlMissingScheme,
+    #[cfg(feature = "secrets")]
+    ButtonsAndSecretsConflict,
+    LargeImageKeyTooLong {
+        max: usize,
+        actual: usize,
+    },
+    SmallImageKeyTooLong {
+        max: usize,
+        actual: usize,
+    },
+    LargeTextTooLong {
+        max: usize,
+        actual: usize,
+    },
+    SmallTextTooLong {
+        max: usize,
+        actual: usize,
+    },
+    PartySizeExceedsMax {
+        current: u32,
+        max: u32,
+    },
+}
+
+impl fmt::Display for ActivityValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StateTooLong { max, actual } => {
+                write!(f, "State must be {max} characters or less (got {actual})")
+            }
+            Self::DetailsTooLong { max, actual } => {
+                write!(f, "Details must be {max} characters or less (got {actual})")
+            }
+            Self::TooManyButtons { max, actual } => {
+                write!(
+                    f,
+                    "Discord allows a maximum of {max} buttons (got {actual})"
+                )
+            }
+            Self::ButtonLabelTooLong { max, actual } => {
+                write!(
+                    f,
+                    "Button label must be {max} characters or less (got {actual})"
+                )
+            }
+            Self::ButtonUrlTooLong { max, actual } => {
+                write!(
+                    f,
+                    "Button URL must be {max} characters or less (got {actual})"
+                )
+            }
+            Self::ButtonUrlMissingScheme => {
+                write!(f, "Button URL must start with http:// or https://")
+            }
+            #[cfg(feature = "secrets")]
+            Self::ButtonsAndSecretsConflict => {
+                write!(f, "Buttons and secrets cannot coexist in the same Activity")
+            }
+            Self::LargeImageKeyTooLong { max, actual } => {
+                write!(
+                    f,
+                    "Large image key must be {max} characters or less (got {actual})"
+                )
+            }
+            Self::SmallImageKeyTooLong { max, actual } => {
+                write!(
+                    f,
+                    "Small image key must be {max} characters or less (got {actual})"
+                )
+            }
+            Self::LargeTextTooLong { max, actual } => {
+                write!(
+                    f,
+                    "Large text must be {max} characters or less (got {actual})"
+                )
+            }
+            Self::SmallTextTooLong { max, actual } => {
+                write!(
+                    f,
+                    "Small text must be {max} characters or less (got {actual})"
+                )
+            }
+            Self::PartySizeExceedsMax { current, max } => write!(
+                f,
+                "Current party size cannot be greater than max party size ({current}/{max})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ActivityValidationError {}
+
+/// Discord Rich Presence activity types.
+///
+/// Supported by Discord's SET_ACTIVITY RPC command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(into = "u32", try_from = "u32")]
+#[repr(u32)]
+pub enum ActivityType {
+    #[default]
+    Playing = 0,
+    Listening = 2,
+    Watching = 3,
+    Competing = 5,
+}
+
+impl ActivityType {
+    /// Returns the integer representation expected by Discord IPC.
+    #[must_use]
+    pub const fn as_u32(self) -> u32 {
+        self as u32
+    }
+
+    /// Try to construct an `ActivityType` from a raw u32 integer.
+    #[must_use]
+    pub const fn from_u32(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Playing),
+            2 => Some(Self::Listening),
+            3 => Some(Self::Watching),
+            5 => Some(Self::Competing),
+            _ => None,
+        }
+    }
+
+    /// Returns the integer representation as a u8.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Try to construct an `ActivityType` from a raw u8 integer.
+    #[must_use]
+    pub const fn from_u8(value: u8) -> Option<Self> {
+        Self::from_u32(value as u32)
+    }
+}
+
+impl From<ActivityType> for u32 {
+    fn from(activity_type: ActivityType) -> Self {
+        activity_type as u32
+    }
+}
+
+impl TryFrom<u32> for ActivityType {
+    type Error = &'static str;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        Self::from_u32(value).ok_or("invalid Discord activity type")
+    }
+}
+
+impl From<ActivityType> for u8 {
+    fn from(activity_type: ActivityType) -> Self {
+        activity_type as u8
+    }
+}
+
+impl TryFrom<u8> for ActivityType {
+    type Error = &'static str;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Self::from_u8(value).ok_or("invalid Discord activity type")
+    }
+}
+
+impl fmt::Display for ActivityType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Playing => write!(f, "Playing"),
+            Self::Listening => write!(f, "Listening"),
+            Self::Watching => write!(f, "Watching"),
+            Self::Competing => write!(f, "Competing"),
+        }
+    }
+}
+
+/// Controls which field Discord displays in the user's status text.
+///
+/// Supported by Discord's SET_ACTIVITY RPC command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(into = "u32", try_from = "u32")]
+#[repr(u32)]
+pub enum StatusDisplayType {
+    /// Displays the application/activity name (default).
+    #[default]
+    Name = 0,
+    /// Displays the activity's `state` field.
+    State = 1,
+    /// Displays the activity's `details` field.
+    Details = 2,
+}
+
+impl StatusDisplayType {
+    /// Returns the integer representation expected by Discord IPC.
+    #[must_use]
+    pub const fn as_u32(self) -> u32 {
+        self as u32
+    }
+
+    /// Try to construct a `StatusDisplayType` from a raw u32 integer.
+    #[must_use]
+    pub const fn from_u32(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Name),
+            1 => Some(Self::State),
+            2 => Some(Self::Details),
+            _ => None,
+        }
+    }
+}
+
+impl From<StatusDisplayType> for u32 {
+    fn from(display_type: StatusDisplayType) -> Self {
+        display_type as u32
+    }
+}
+
+impl TryFrom<u32> for StatusDisplayType {
+    type Error = &'static str;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        Self::from_u32(value).ok_or("invalid Discord status display type")
+    }
+}
+
+impl fmt::Display for StatusDisplayType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Name => write!(f, "Name"),
+            Self::State => write!(f, "State"),
+            Self::Details => write!(f, "Details"),
+        }
+    }
+}
+
+/// Rich Presence Activity
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Activity {
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<ActivityType>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_display_type: Option<StatusDisplayType>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamps: Option<ActivityTimestamps>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assets: Option<ActivityAssets>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub party: Option<ActivityParty>,
+
+    #[cfg(feature = "secrets")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secrets: Option<ActivitySecrets>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub buttons: Option<Vec<ActivityButton>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance: Option<bool>,
+}
+
+impl Activity {
+    /// Validate the activity according to Discord's requirements
+    ///
+    /// # Returns
+    ///
+    /// Ok(()) if valid, or Err(ActivityValidationError) with the reason if invalid
+    pub fn validate(&self) -> Result<(), ActivityValidationError> {
+        // Check text field lengths
+        if let Some(state) = &self.state {
+            if state.len() > 128 {
+                return Err(ActivityValidationError::StateTooLong {
+                    max: 128,
+                    actual: state.len(),
+                });
+            }
+        }
+
+        if let Some(details) = &self.details {
+            if details.len() > 128 {
+                return Err(ActivityValidationError::DetailsTooLong {
+                    max: 128,
+                    actual: details.len(),
+                });
+            }
+        }
+
+        // Validate buttons
+        if let Some(buttons) = &self.buttons {
+            // Discord allows a maximum of 2 buttons
+            if buttons.len() > 2 {
+                return Err(ActivityValidationError::TooManyButtons {
+                    max: 2,
+                    actual: buttons.len(),
+                });
+            }
+
+            for button in buttons {
+                if button.label.len() > 32 {
+                    return Err(ActivityValidationError::ButtonLabelTooLong {
+                        max: 32,
+                        actual: button.label.len(),
+                    });
+                }
+
+                if button.url.len() > 512 {
+                    return Err(ActivityValidationError::ButtonUrlTooLong {
+                        max: 512,
+                        actual: button.url.len(),
+                    });
+                }
+
+                // Validate URL format (simple check)
+                if !button.url.starts_with("http://") && !button.url.starts_with("https://") {
+                    return Err(ActivityValidationError::ButtonUrlMissingScheme);
+                }
+            }
+        }
+
+        // Buttons and secrets are mutually exclusive. If any secret field is set,
+        // the activity MUST NOT contain interactive buttons. We only consider
+        // secrets "present" when at least one of the inner secret fields is
+        // Some(...). An Option<ActivitySecrets> that exists but contains no
+        // secrets is considered empty and does not conflict with buttons.
+        #[cfg(feature = "secrets")]
+        {
+            if self.buttons.is_some()
+                && self
+                    .secrets
+                    .as_ref()
+                    .map(|s| s.join.is_some() || s.spectate.is_some() || s.match_secret.is_some())
+                    .unwrap_or(false)
+            {
+                return Err(ActivityValidationError::ButtonsAndSecretsConflict);
+            }
+        }
+
+        // Validate asset keys
+        if let Some(assets) = &self.assets {
+            if let Some(large_image) = &assets.large_image {
+                if large_image.len() > 256 {
+                    return Err(ActivityValidationError::LargeImageKeyTooLong {
+                        max: 256,
+                        actual: large_image.len(),
+                    });
+                }
+            }
+
+            if let Some(small_image) = &assets.small_image {
+                if small_image.len() > 256 {
+                    return Err(ActivityValidationError::SmallImageKeyTooLong {
+                        max: 256,
+                        actual: small_image.len(),
+                    });
+                }
+            }
+
+            if let Some(large_text) = &assets.large_text {
+                if large_text.len() > 128 {
+                    return Err(ActivityValidationError::LargeTextTooLong {
+                        max: 128,
+                        actual: large_text.len(),
+                    });
+                }
+            }
+
+            if let Some(small_text) = &assets.small_text {
+                if small_text.len() > 128 {
+                    return Err(ActivityValidationError::SmallTextTooLong {
+                        max: 128,
+                        actual: small_text.len(),
+                    });
+                }
+            }
+        }
+
+        // Validate party size
+        if let Some(size) = self.party.as_ref().and_then(|n| n.size) {
+            if size[0] > size[1] {
+                return Err(ActivityValidationError::PartySizeExceedsMax {
+                    current: size[0],
+                    max: size[1],
+                });
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Activity timestamps
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ActivityTimestamps {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end: Option<i64>,
+}
+
+/// Activity assets (images)
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ActivityAssets {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub large_image: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub large_text: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub small_image: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub small_text: Option<String>,
+}
+
+/// Activity party information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityParty {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<[u32; 2]>, // [current, max]
+}
+
+/// Activity secrets for join/spectate
+#[cfg(feature = "secrets")]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ActivitySecrets {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub join: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spectate: Option<String>,
+
+    #[serde(rename = "match", skip_serializing_if = "Option::is_none")]
+    pub match_secret: Option<String>,
+}
+
+/// Activity button
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityButton {
+    pub label: String,
+    pub url: String,
+}
+
+/// Request to resolve and host album artwork for Discord Rich Presence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtworkRequest {
+    pub provider: String,
+    pub track_id: Option<String>,
+    pub source_url: String,
+}
+
+/// Result of resolving and hosting album artwork.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtworkResult {
+    pub source_url: String,
+    pub hosted_url: String,
+    pub local_path: std::path::PathBuf,
+    pub content_hash: String,
+}
+
+/// Hosting provider used for Discord Rich Presence artwork.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HostingProvider {
+    Catbox,
+    Litterbox,
+}
+
+impl fmt::Display for HostingProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Catbox => write!(f, "catbox"),
+            Self::Litterbox => write!(f, "litterbox"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn activity_with_button(label: &str, url: &str) -> Activity {
+        Activity {
+            buttons: Some(vec![ActivityButton {
+                label: label.to_string(),
+                url: url.to_string(),
+            }]),
+            ..Activity::default()
+        }
+    }
+
+    #[test]
+    fn valid_activity_passes_validation() {
+        let activity = Activity {
+            state: Some("Exploring".to_string()),
+            details: Some("Testing".to_string()),
+            assets: Some(ActivityAssets {
+                large_image: Some("logo".to_string()),
+                large_text: Some("Logo".to_string()),
+                small_image: Some("icon".to_string()),
+                small_text: Some("Icon".to_string()),
+            }),
+            party: Some(ActivityParty {
+                id: Some("party".to_string()),
+                size: Some([1, 4]),
+            }),
+            buttons: Some(vec![
+                ActivityButton {
+                    label: "Join".to_string(),
+                    url: "https://example.com/join".to_string(),
+                },
+                ActivityButton {
+                    label: "Watch".to_string(),
+                    url: "https://example.com/watch".to_string(),
+                },
+            ]),
+            ..Default::default()
+        };
+
+        assert!(activity.validate().is_ok());
+    }
+
+    #[test]
+    fn state_over_character_limit_fails() {
+        let activity = Activity {
+            state: Some("a".repeat(129)),
+            ..Default::default()
+        };
+        assert!(matches!(
+            activity.validate().unwrap_err(),
+            ActivityValidationError::StateTooLong { .. }
+        ));
+    }
+
+    #[test]
+    fn button_label_too_long_fails() {
+        let activity = activity_with_button(&"x".repeat(33), "https://example.com");
+        assert!(matches!(
+            activity.validate().unwrap_err(),
+            ActivityValidationError::ButtonLabelTooLong { .. }
+        ));
+    }
+
+    #[test]
+    fn button_url_without_scheme_fails() {
+        let activity = activity_with_button("Join", "example.com");
+        assert!(matches!(
+            activity.validate().unwrap_err(),
+            ActivityValidationError::ButtonUrlMissingScheme
+        ));
+    }
+
+    #[test]
+    fn asset_key_too_long_fails() {
+        let activity = Activity {
+            assets: Some(ActivityAssets {
+                large_image: Some("y".repeat(257)),
+                ..ActivityAssets::default()
+            }),
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            activity.validate().unwrap_err(),
+            ActivityValidationError::LargeImageKeyTooLong { .. }
+        ));
+    }
+
+    #[test]
+    fn party_size_greater_than_max_fails() {
+        let activity = Activity {
+            party: Some(ActivityParty {
+                id: Some("party".to_string()),
+                size: Some([5, 4]),
+            }),
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            activity.validate().unwrap_err(),
+            ActivityValidationError::PartySizeExceedsMax { .. }
+        ));
+    }
+
+    #[test]
+    #[cfg(feature = "secrets")]
+    fn buttons_and_secrets_cannot_coexist() {
+        // Build an activity that contains both a button and a secret and
+        // ensure validate() rejects it.
+        let activity = Activity {
+            buttons: Some(vec![ActivityButton {
+                label: "Join".to_string(),
+                url: "https://example.com/join".to_string(),
+            }]),
+            secrets: Some(ActivitySecrets {
+                join: Some("secret".to_string()),
+                ..ActivitySecrets::default()
+            }),
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            activity.validate().unwrap_err(),
+            ActivityValidationError::ButtonsAndSecretsConflict
+        ));
+    }
+
+    #[test]
+    fn activity_type_conversions_and_display() {
+        assert_eq!(ActivityType::default(), ActivityType::Playing);
+        assert_eq!(ActivityType::Playing.as_u32(), 0);
+        assert_eq!(ActivityType::Listening.as_u32(), 2);
+        assert_eq!(ActivityType::Watching.as_u32(), 3);
+        assert_eq!(ActivityType::Competing.as_u32(), 5);
+
+        assert_eq!(ActivityType::from_u32(0), Some(ActivityType::Playing));
+        assert_eq!(ActivityType::from_u32(2), Some(ActivityType::Listening));
+        assert_eq!(ActivityType::from_u32(3), Some(ActivityType::Watching));
+        assert_eq!(ActivityType::from_u32(5), Some(ActivityType::Competing));
+        assert_eq!(ActivityType::from_u32(1), None);
+        assert_eq!(ActivityType::from_u32(99), None);
+
+        assert_eq!(u32::from(ActivityType::Listening), 2);
+        assert_eq!(ActivityType::try_from(2u32), Ok(ActivityType::Listening));
+        assert!(ActivityType::try_from(4u32).is_err());
+
+        // u8 conversions backward compatibility
+        assert_eq!(ActivityType::Listening.as_u8(), 2);
+        assert_eq!(ActivityType::from_u8(2), Some(ActivityType::Listening));
+        assert_eq!(u8::from(ActivityType::Listening), 2);
+        assert_eq!(ActivityType::try_from(2u8), Ok(ActivityType::Listening));
+
+        assert_eq!(ActivityType::Playing.to_string(), "Playing");
+        assert_eq!(ActivityType::Listening.to_string(), "Listening");
+        assert_eq!(ActivityType::Watching.to_string(), "Watching");
+        assert_eq!(ActivityType::Competing.to_string(), "Competing");
+    }
+
+    #[test]
+    fn activity_type_serde_roundtrip() {
+        let serialized = serde_json::to_string(&ActivityType::Listening).unwrap();
+        assert_eq!(serialized, "2");
+        let deserialized: ActivityType = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, ActivityType::Listening);
+    }
+
+    #[test]
+    fn activity_type_deserializes_from_json() {
+        let activity: Activity =
+            serde_json::from_str(r#"{"type": 2}"#).unwrap();
+
+        assert_eq!(activity.r#type, Some(ActivityType::Listening));
+    }
+
+    #[test]
+    fn status_display_type_conversions_and_serde() {
+        assert_eq!(StatusDisplayType::default(), StatusDisplayType::Name);
+        assert_eq!(StatusDisplayType::Name.as_u32(), 0);
+        assert_eq!(StatusDisplayType::State.as_u32(), 1);
+        assert_eq!(StatusDisplayType::Details.as_u32(), 2);
+
+        assert_eq!(StatusDisplayType::from_u32(0), Some(StatusDisplayType::Name));
+        assert_eq!(StatusDisplayType::from_u32(1), Some(StatusDisplayType::State));
+        assert_eq!(
+            StatusDisplayType::from_u32(2),
+            Some(StatusDisplayType::Details)
+        );
+        assert_eq!(StatusDisplayType::from_u32(3), None);
+
+        assert_eq!(
+            StatusDisplayType::try_from(2u32),
+            Ok(StatusDisplayType::Details)
+        );
+        assert!(StatusDisplayType::try_from(9u32).is_err());
+
+        let json = serde_json::to_string(&StatusDisplayType::Details).unwrap();
+        assert_eq!(json, "2");
+        let parsed: StatusDisplayType = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, StatusDisplayType::Details);
+    }
+
+    #[test]
+    fn artwork_types_serde_roundtrip() {
+        let req = ArtworkRequest {
+            provider: "ytmusic".to_string(),
+            track_id: Some("123".to_string()),
+            source_url: "https://example.com/art.jpg".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let decoded: ArtworkRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, req);
+
+        let res = ArtworkResult {
+            source_url: "https://example.com/art.jpg".to_string(),
+            hosted_url: "https://files.catbox.moe/art.webp".to_string(),
+            local_path: std::path::PathBuf::from("images/art.webp"),
+            content_hash: "0a4f".to_string(),
+        };
+        let json_res = serde_json::to_string(&res).unwrap();
+        let decoded_res: ArtworkResult = serde_json::from_str(&json_res).unwrap();
+        assert_eq!(decoded_res, res);
+
+        assert_eq!(serde_json::to_string(&HostingProvider::Catbox).unwrap(), "\"catbox\"");
+        assert_eq!(serde_json::to_string(&HostingProvider::Litterbox).unwrap(), "\"litterbox\"");
+    }
+}

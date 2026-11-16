@@ -54,6 +54,16 @@ impl PlaybackState {
         }
     }
 
+    pub fn current_track_mut(&mut self) -> Option<&mut Track> {
+        match self {
+            PlaybackState::Playing { track } | PlaybackState::Paused { track } => Some(track),
+            PlaybackState::Resolving { active, .. } => {
+                active.as_mut().and_then(|a| a.current_track_mut())
+            }
+            PlaybackState::Stopped => None,
+        }
+    }
+
     pub fn pending_track(&self) -> Option<&Track> {
         match self {
             PlaybackState::Resolving { track, .. } => Some(track),
@@ -129,6 +139,8 @@ pub struct App {
     pub pending_queue_entry_id: Option<u64>,
     pub history: VecDeque<Track>,
     pub playback_state: PlaybackState,
+    pub current_position: Option<Duration>,
+    pub discord_worker: Option<crate::discord::DiscordWorker>,
 }
 
 impl App {
@@ -170,6 +182,64 @@ impl App {
             history: VecDeque::new(),
             pending_queue_entry_id: None,
             playback_state: PlaybackState::Stopped,
+            current_position: None,
+            discord_worker: None,
+        }
+    }
+
+    pub fn init_discord(&mut self) {
+        if self.settings.discord.enabled && self.discord_worker.is_none() {
+            match crate::discord::DiscordWorker::spawn_with_config(
+                crate::discord::DEFAULT_CLIENT_ID,
+                self.settings.discord.clone(),
+            ) {
+                Ok(worker) => self.discord_worker = Some(worker),
+                Err(err) => self.set_status(format!("DISCORD RPC ERROR: {err}")),
+            }
+        }
+    }
+
+    pub fn is_discord_connected(&self) -> bool {
+        self.settings.discord.enabled
+            && self
+                .discord_worker
+                .as_ref()
+                .is_some_and(|w| w.is_connected())
+    }
+
+    pub fn toggle_discord_rpc(&mut self) {
+        self.settings.discord.enabled = !self.settings.discord.enabled;
+        if let Err(error) = self.settings.save() {
+            self.set_status(format!("SETTINGS ERROR: {error}"));
+        }
+
+        if self.settings.discord.enabled {
+            if self.discord_worker.is_none() {
+                match crate::discord::DiscordWorker::spawn_with_config(
+                    crate::discord::DEFAULT_CLIENT_ID,
+                    self.settings.discord.clone(),
+                ) {
+                    Ok(worker) => {
+                        if let Some(track) = self.current_track() {
+                            let mut info = crate::discord::PlaybackInfo::from(track)
+                                .with_paused(self.is_paused());
+                            if let Some(pos) = self.current_position {
+                                info = info.with_position(pos);
+                            }
+                            let artwork =
+                                crate::discord::artwork::ArtworkRequest::from_track(track);
+                            worker.track_changed(info, artwork);
+                        }
+                        self.discord_worker = Some(worker);
+                    }
+                    Err(err) => {
+                        self.set_status(format!("DISCORD RPC ERROR: {err}"));
+                    }
+                }
+            }
+        } else if let Some(mut worker) = self.discord_worker.take() {
+            worker.clear();
+            worker.shutdown();
         }
     }
 
@@ -188,6 +258,10 @@ impl App {
 
     pub fn current_track(&self) -> Option<&Track> {
         self.playback_state.current_track()
+    }
+
+    pub fn current_track_mut(&mut self) -> Option<&mut Track> {
+        self.playback_state.current_track_mut()
     }
 
     pub fn now_playing(&self) -> Option<&Track> {
@@ -216,6 +290,7 @@ impl App {
 
     pub fn set_stopped(&mut self) {
         self.playback_state = PlaybackState::Stopped;
+        self.current_position = None;
         self.pending_queue_entry_id = None;
         self.playing = None;
     }
@@ -271,6 +346,7 @@ impl App {
 
     pub fn set_playing(&mut self, track: Track) {
         self.playback_state = PlaybackState::Playing { track };
+        self.current_position = Some(Duration::ZERO);
         self.pending_queue_entry_id = None;
     }
 
@@ -308,6 +384,7 @@ impl App {
             1 => self.settings.audio_cache = !self.settings.audio_cache,
             2 => self.settings.art_hq = !self.settings.art_hq,
             3 => self.settings.art_palette = !self.settings.art_palette,
+            4 => self.toggle_discord_rpc(),
             _ => {
                 match crate::config::clear_caches() {
                     Ok(()) => self.set_status("CACHES CLEARED"),
@@ -536,13 +613,15 @@ mod tests {
         assert_eq!(*app.playback_state(), PlaybackState::Stopped);
 
         let track = Track {
+            provider: "ytmusic".into(),
+            track_id: None,
             title: "Test Track".into(),
             artist: "Test Artist".into(),
-            stream_url: "".into(),
-            art_url: "".into(),
+            album: None,
+            stream_url: None,
+            art_url: None,
             spotify_id: None,
             artists: vec![],
-            album: None,
             duration_ms: None,
         };
 
@@ -568,7 +647,7 @@ mod tests {
 
         // Playing
         let mut resolved = track.clone();
-        resolved.stream_url = "http://stream/test".into();
+        resolved.stream_url = Some("http://stream/test".into());
         app.set_playing(resolved.clone());
         assert_eq!(
             *app.playback_state(),
@@ -585,13 +664,15 @@ mod tests {
 
         // Resolving a second track while first is playing preserves active
         let track2 = Track {
+            provider: "ytmusic".into(),
+            track_id: None,
             title: "Second Track".into(),
             artist: "Second Artist".into(),
-            stream_url: "".into(),
-            art_url: "".into(),
+            album: None,
+            stream_url: None,
+            art_url: None,
             spotify_id: None,
             artists: vec![],
-            album: None,
             duration_ms: None,
         };
         app.set_resolving(track2.clone(), PlaybackSource::SearchResult { index: 1 });
@@ -658,13 +739,15 @@ mod tests {
 
         app.set_resolving(
             Track {
+                provider: "spotify".into(),
+                track_id: Some("spotify123".into()),
                 title: "Test Track".into(),
                 artist: "Test Artist".into(),
-                stream_url: String::new(),
-                art_url: String::new(),
+                album: Some("Test Album".into()),
+                stream_url: None,
+                art_url: None,
                 spotify_id: Some("spotify123".into()),
                 artists: vec!["Test Artist".into()],
-                album: Some("Test Album".into()),
                 duration_ms: Some(180_000),
             },
             PlaybackSource::SearchResult { index: 0 },
@@ -682,13 +765,15 @@ mod tests {
 
     fn sample_track(title: &str) -> Track {
         Track {
+            provider: "ytmusic".into(),
+            track_id: None,
             title: title.into(),
             artist: "Sample Artist".into(),
-            stream_url: format!("https://example.com/{title}.mp3"),
-            art_url: String::new(),
+            album: Some("Sample Album".into()),
+            stream_url: Some(format!("https://example.com/{title}.mp3")),
+            art_url: None,
             spotify_id: None,
             artists: vec!["Sample Artist".into()],
-            album: Some("Sample Album".into()),
             duration_ms: Some(210_000),
         }
     }

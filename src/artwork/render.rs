@@ -256,7 +256,7 @@ pub fn render_art(
     }
 }
 
-fn render_hq(frame: &mut Frame, area: Rect, image: &DynamicImage, artwork_id: &str) -> bool {
+pub fn render_hq(frame: &mut Frame, area: Rect, image: &DynamicImage, artwork_id: &str) -> bool {
     let Some(picker) = picker() else {
         return false;
     };

@@ -126,19 +126,23 @@ def search(query: str) -> list[dict[str, Any]]:
             f"https://open.spotify.com/track/{track_id}" if track_id else ""
         )
         duration_ms = _field(item, "duration_ms", 0) or 0
+        artwork = _get_artwork(item) or None
+        album = _get_album_name(item) or None
 
         tracks.append({
+            "provider": "spotify",
+            "track_id": track_id or None,
             "title": _field(item, "name", "") or "",
             "artist": ", ".join(artists) or "Unknown Artist",
             "artists": artists,
-            "album": _get_album_name(item),
+            "album": album,
             "duration_ms": duration_ms,
             "duration_seconds": _spotify_duration_seconds(item),
             "spotify_id": track_id,
             "spotify_url": track_url,
-            "stream_url": "",
+            "stream_url": None,
             "youtube_id": "",
-            "art_url": _get_artwork(item),
+            "art_url": artwork,
             "source": "spotify",
             "resolved": False,
         })
@@ -382,10 +386,14 @@ def resolve_playable(track: dict[str, Any]) -> dict[str, Any]:
             thumbnails,
             key=lambda image: (image.get("width") or 0) * (image.get("height") or 0),
         )
-        art_url = best_thumbnail.get("url", "")
+        art_url = best_thumbnail.get("url", "") or None
+    else:
+        art_url = art_url or track.get("art_url") or None
 
     # end result
     resolved = {
+        "provider": track.get("provider", "spotify"),
+        "track_id": track.get("track_id") or track.get("spotify_id"),
         "stream_url": f"https://music.youtube.com/watch?v={winner['video_id']}",
         "youtube_id": winner["video_id"],
         "youtube_title": winner["title"],

@@ -7,22 +7,18 @@ use ansimuz::music::{PlaybackSource, ResolveResponse, Track};
 use ansimuz::playback::{AudioPlayer, PlayerEvent, Repeat};
 
 fn make_spotify_track(id: &str, title: &str, artist: &str) -> Track {
-    Track {
-        title: title.to_string(),
-        artist: artist.to_string(),
-        stream_url: String::new(),
-        art_url: format!("https://i.scdn.co/image/{id}"),
-        spotify_id: Some(id.to_string()),
-        artists: vec![artist.to_string()],
-        album: Some("Test Album".to_string()),
-        duration_ms: Some(200_000),
-    }
+    Track::new(title, artist)
+        .with_provider("spotify")
+        .with_track_id(id)
+        .with_spotify_id(id)
+        .with_art_url(format!("https://i.scdn.co/image/{id}"))
+        .with_album("Test Album")
+        .with_duration_ms(200_000)
 }
 
 fn make_resolved_track(id: &str, title: &str, artist: &str, youtube_id: &str) -> Track {
-    let mut track = make_spotify_track(id, title, artist);
-    track.stream_url = format!("https://music.youtube.com/watch?v={youtube_id}");
-    track
+    make_spotify_track(id, title, artist)
+        .with_stream_url(format!("https://music.youtube.com/watch?v={youtube_id}"))
 }
 
 static RESOLUTION_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -107,7 +103,7 @@ fn test_rapid_track_switching_ignores_stale_responses() {
         Some("Track Two")
     );
     assert!(
-        app.tracks[0].stream_url.is_empty(),
+        !app.tracks[0].has_stream_url(),
         "Track 0 slot must not be touched"
     );
 
@@ -139,7 +135,7 @@ fn test_rapid_track_switching_ignores_stale_responses() {
     assert!(handled_2, "Fresh generation 3 response must be accepted");
     assert!(!app.is_resolving());
     assert!(app.pending_track().is_none());
-    assert!(!app.tracks[2].stream_url.is_empty());
+    assert!(app.tracks[2].has_stream_url());
     assert_eq!(
         app.now_playing().map(|t| t.title.as_str()),
         Some("Track Two")
@@ -408,8 +404,8 @@ fn test_queue_track_resolution_plays_directly_without_touching_search_results() 
     assert_eq!(app.tracks.len(), 1);
     assert_eq!(app.tracks[0].title, "Search Song");
     assert_eq!(
-        app.tracks[0].stream_url,
-        "https://music.youtube.com/watch?v=yt_search"
+        app.tracks[0].stream_url.as_deref(),
+        Some("https://music.youtube.com/watch?v=yt_search")
     );
 
     // Queue track is playing directly
@@ -458,10 +454,12 @@ def mock_search(query, provider="ytmusic"):
     if query == "deterministic_mock_query_for_concurrency":
         bridge.barrier.wait(timeout=3)
         return [{
+            "provider": provider,
+            "track_id": "mock_id",
             "title": f"Mock for {query}",
             "artist": "Mock Artist",
             "stream_url": "https://youtube.com/watch?v=mock_search",
-            "art_url": "",
+            "art_url": None,
             "source": provider,
         }]
     return bridge.orig_search(query, provider)
@@ -486,16 +484,12 @@ bridge.resolve_playable = mock_resolve
     })
     .expect("Failed to install mock bridge functions with barrier");
 
-    let sample = Track {
-        title: "Mock Title".to_string(),
-        artist: "Mock Artist".to_string(),
-        stream_url: String::new(),
-        art_url: String::new(),
-        spotify_id: Some("mock_spotify_id_barrier_test".to_string()),
-        artists: vec!["Mock Artist".to_string()],
-        album: Some("Mock Album".to_string()),
-        duration_ms: Some(180_000),
-    };
+    let sample = Track::new("Mock Title", "Mock Artist")
+        .with_provider("spotify")
+        .with_track_id("mock_spotify_id_barrier_test")
+        .with_spotify_id("mock_spotify_id_barrier_test")
+        .with_album("Mock Album")
+        .with_duration_ms(180_000);
 
     let t_search = std::thread::spawn(|| {
         search_music(
@@ -537,8 +531,8 @@ if hasattr(bridge, "orig_resolve"):
 
     let resolved = resolve_res.expect("Resolution must succeed concurrently");
     assert_eq!(
-        resolved.stream_url,
-        "https://music.youtube.com/watch?v=mock_resolved"
+        resolved.stream_url.as_deref(),
+        Some("https://music.youtube.com/watch?v=mock_resolved")
     );
 }
 
