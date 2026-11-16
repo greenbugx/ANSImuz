@@ -20,6 +20,7 @@ pub enum Action {
     VolumeDown,
     FocusSearch,
     OpenSettings,
+    ToggleLyrics,
     ToggleAbout,
     OpenCommandPalette,
     ToggleProvider,
@@ -105,6 +106,13 @@ pub const COMMANDS: &[CommandInfo] = &[
         category: "Navigation",
     },
     CommandInfo {
+        id: Action::ToggleLyrics,
+        name: "Lyrics",
+        description: "Show lyrics for the current track",
+        shortcut: "l",
+        category: "Navigation",
+    },
+    CommandInfo {
         id: Action::ToggleAbout,
         name: "About",
         description: "Show information about ANSImuz",
@@ -181,6 +189,7 @@ pub const PANEL_KEYBINDS: &[(&str, &str)] = &[
     ("ALT+↑↓", "REORDER"),
     ("X", "SHUFFLE"),
     ("R", "REPEAT"),
+    ("L", "LYRICS"),
     (":", "COMMANDS"),
     ("?", "ABOUT"),
     ("Q", "QUIT"),
@@ -230,6 +239,7 @@ pub fn action_for_nav_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('-') => Some(Action::VolumeDown),
         KeyCode::Char('/') => Some(Action::FocusSearch),
         KeyCode::Char('s') | KeyCode::Char('S') => Some(Action::OpenSettings),
+        KeyCode::Char('l') | KeyCode::Char('L') => Some(Action::ToggleLyrics),
         KeyCode::Char('?') => Some(Action::ToggleAbout),
         KeyCode::Char(':') => Some(Action::OpenCommandPalette),
         KeyCode::Tab | KeyCode::BackTab => Some(Action::ToggleFocus),
@@ -343,6 +353,7 @@ pub fn dispatch_action(
             app.close_command_palette();
             app.about_open = false;
             app.settings_open = false;
+            app.lyrics_open = false;
             app.mode = Mode::Type;
         }
 
@@ -350,6 +361,17 @@ pub fn dispatch_action(
             app.close_command_palette();
             app.about_open = false;
             app.settings_open = true;
+        }
+
+        Action::ToggleLyrics => {
+            app.close_command_palette();
+            app.about_open = false;
+            if app.settings_open {
+                app.settings_open = false;
+                app.open_lyrics();
+            } else {
+                app.toggle_lyrics();
+            }
         }
 
         Action::ToggleAbout => {

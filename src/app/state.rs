@@ -124,6 +124,7 @@ pub struct App {
     pub settings: Settings,
     pub settings_open: bool,
     pub settings_cursor: usize,
+    pub lyrics_open: bool,
     pub should_quit: bool,
     pub quit_dialog_open: bool,
     pub quit_dialog_choice: QuitChoice,
@@ -167,6 +168,7 @@ impl App {
             settings: Settings::load(),
             settings_open: false,
             settings_cursor: 0,
+            lyrics_open: false,
             quit_dialog_open: false,
             quit_dialog_choice: QuitChoice::Yes,
             should_quit: false,
@@ -366,12 +368,33 @@ impl App {
         }
     }
 
+    pub fn toggle_lyrics(&mut self) {
+        self.lyrics_open = !self.lyrics_open;
+        if self.lyrics_open {
+            self.settings_open = false;
+            self.command_palette_open = false;
+            self.about_open = false;
+        }
+    }
+
+    pub fn open_lyrics(&mut self) {
+        self.lyrics_open = true;
+        self.settings_open = false;
+        self.command_palette_open = false;
+        self.about_open = false;
+    }
+
+    pub fn close_lyrics(&mut self) {
+        self.lyrics_open = false;
+    }
+
     pub fn open_quit_dialog(&mut self) {
         self.quit_dialog_open = true;
         self.quit_dialog_choice = QuitChoice::Yes;
         self.command_palette_open = false;
         self.about_open = false;
         self.settings_open = false;
+        self.lyrics_open = false;
     }
 
     pub fn close_quit_dialog(&mut self) {

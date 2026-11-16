@@ -3,7 +3,7 @@ use std::sync::mpsc::Sender;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{
-    commands::{action_for_nav_key, dispatch_action, filtered_commands},
+    commands::{Action, action_for_nav_key, dispatch_action, filtered_commands},
     playback::{play_queue_item, play_search_result},
     search::refetch_if_needed,
     state::{App, ListFocus, Mode},
@@ -129,9 +129,10 @@ pub fn handle_key(
             }
             KeyCode::Char('/') => {
                 app.settings_open = false;
+                app.lyrics_open = false;
                 app.mode = Mode::Type;
             }
-            KeyCode::Esc => {
+            KeyCode::Esc | KeyCode::Char('s') | KeyCode::Char('S') => {
                 app.settings_open = false;
                 app.mode = Mode::Nav;
             }
@@ -142,6 +143,36 @@ pub fn handle_key(
                 app.open_command_palette();
             }
             _ => {}
+        }
+
+        return;
+    }
+
+    if app.lyrics_open {
+        if key.code == KeyCode::Esc {
+            app.lyrics_open = false;
+            app.mode = Mode::Nav;
+            return;
+        }
+
+        if let Some(action) = action_for_nav_key(key) {
+            match action {
+                Action::PlayPause
+                | Action::NextTrack
+                | Action::PreviousTrack
+                | Action::ToggleShuffle
+                | Action::CycleRepeat
+                | Action::VolumeUp
+                | Action::VolumeDown
+                | Action::OpenSettings
+                | Action::ToggleLyrics
+                | Action::ToggleAbout
+                | Action::OpenCommandPalette
+                | Action::Quit => {
+                    dispatch_action(action, app, player, player_tx, search_tx, resolve_tx);
+                }
+                _ => {}
+            }
         }
 
         return;
@@ -414,5 +445,236 @@ mod tests {
         );
         assert!(!app.quit_dialog_open);
         assert!(app.should_quit, "Must quit on confirming Yes");
+    }
+
+    #[test]
+    fn test_lyrics_open_toggle_and_close() {
+        let mut app = App::new();
+        let mut player = AudioPlayer::new_mock();
+        let (player_tx, _player_rx) = channel();
+        let (search_tx, _search_rx) = channel();
+        let (resolve_tx, _resolve_rx) = channel();
+
+        // Nav mode: 'l' opens lyrics
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Char('l')),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert!(app.lyrics_open, "Pressing 'l' in nav mode must open lyrics");
+
+        // While in lyrics: 'l' toggles lyrics closed
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Char('l')),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert!(
+            !app.lyrics_open,
+            "Pressing 'l' in lyrics screen must close lyrics"
+        );
+
+        // 'l' opens lyrics again
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Char('l')),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert!(app.lyrics_open);
+
+        // Esc closes lyrics
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Esc),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert!(!app.lyrics_open, "Esc must close lyrics screen");
+
+        // Command palette opening
+        app.open_command_palette();
+        app.command_palette_query = "lyr".to_string();
+        let filtered = filtered_commands(&app.command_palette_query);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, Action::ToggleLyrics);
+
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Enter),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert!(!app.command_palette_open);
+        assert!(app.lyrics_open, "Command palette must open lyrics");
+
+        // Pressing '/' while in lyrics screen does nothing (search functionality removed)
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Char('/')),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert!(
+            app.lyrics_open,
+            "Search key '/' must be ignored in lyrics screen"
+        );
+        assert_eq!(app.mode, Mode::Nav, "Mode must remain Nav in lyrics screen");
+
+        // Pressing 's' switches from lyrics to settings (preserving lyrics_open)
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Char('s')),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert!(
+            app.lyrics_open,
+            "lyrics_open must remain true while settings is open"
+        );
+        assert!(app.settings_open);
+
+        // Going back from settings (Esc) returns to lyrics screen
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Esc),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert!(!app.settings_open);
+        assert!(
+            app.lyrics_open,
+            "Must return to lyrics screen when exiting settings"
+        );
+
+        // Opening settings via command palette from lyrics screen
+        app.open_command_palette();
+        app.command_palette_query = "settings".to_string();
+        let filtered = filtered_commands(&app.command_palette_query);
+        assert_eq!(filtered[0].id, Action::OpenSettings);
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Enter),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert!(app.settings_open);
+        assert!(app.lyrics_open);
+
+        // Going back from settings using 's' returns to lyrics screen
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Char('s')),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert!(!app.settings_open);
+        assert!(
+            app.lyrics_open,
+            "Must return to lyrics screen using 's' keybind"
+        );
+
+        // Now from home screen (close lyrics first)
+        app.lyrics_open = false;
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Char('s')),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert!(app.settings_open);
+        assert!(app.lyrics_open, "lyrics_open must remain true while settings is open");
+        assert!(app.settings_open);
+
+        // Going back from settings (Esc) returns to lyrics screen
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Esc),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert!(!app.settings_open);
+        assert!(app.lyrics_open, "Must return to lyrics screen when exiting settings");
+
+        // Opening settings via command palette from lyrics screen
+        app.open_command_palette();
+        app.command_palette_query = "settings".to_string();
+        let filtered = filtered_commands(&app.command_palette_query);
+        assert_eq!(filtered[0].id, Action::OpenSettings);
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Enter),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert!(app.settings_open);
+        assert!(app.lyrics_open);
+
+        // Going back from settings using 's' returns to lyrics screen
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Char('s')),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert!(!app.settings_open);
+        assert!(app.lyrics_open, "Must return to lyrics screen using 's' keybind");
+
+        // Now from home screen (close lyrics first)
+        app.lyrics_open = false;
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Char('s')),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert!(app.settings_open);
+        assert!(!app.lyrics_open);
+
+        handle_key(
+            &mut app,
+            &mut player,
+            make_key(KeyCode::Esc),
+            &player_tx,
+            &search_tx,
+            &resolve_tx,
+        );
+        assert!(!app.settings_open);
+        assert!(
+            !app.lyrics_open,
+            "Must return to home screen when settings was opened from home screen"
+        );
     }
 }

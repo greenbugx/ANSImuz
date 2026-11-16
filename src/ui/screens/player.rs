@@ -18,6 +18,22 @@ use crate::ui::components::{
 use crate::ui::theme::{Theme, truncate};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlayerPanelLayout {
+    pub show_logo: bool,
+    pub logo_area: Rect,
+    pub logo_width: usize,
+    pub logo_px: usize,
+    pub show_search: bool,
+    pub search_box_area: Rect,
+    pub status_area: Rect,
+    pub art_area: Rect,
+    pub vol_timer_area: Rect,
+    pub bar_area: Rect,
+    pub bar_width: usize,
+    pub controls_slots: [Rect; 5],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlayerLayout {
     pub col_left: Rect,
     pub col_player: Rect,
@@ -35,6 +51,25 @@ pub struct PlayerLayout {
     pub bar_area: Rect,
     pub bar_width: usize,
     pub controls_slots: [Rect; 5],
+}
+
+impl PlayerLayout {
+    pub fn panel_layout(&self) -> PlayerPanelLayout {
+        PlayerPanelLayout {
+            show_logo: self.show_logo,
+            logo_area: self.logo_area,
+            logo_width: self.logo_width,
+            logo_px: self.logo_px,
+            show_search: true,
+            search_box_area: self.search_box_area,
+            status_area: self.status_area,
+            art_area: self.art_area,
+            vol_timer_area: self.vol_timer_area,
+            bar_area: self.bar_area,
+            bar_width: self.bar_width,
+            controls_slots: self.controls_slots,
+        }
+    }
 }
 
 pub fn layout_player(area: Rect) -> PlayerLayout {
@@ -102,6 +137,29 @@ pub fn layout_player(area: Rect) -> PlayerLayout {
     let search_area = left_sections[0];
     let keybinds_area = left_sections[1];
 
+    let panel = layout_player_panel(col_player, true);
+
+    PlayerLayout {
+        col_left,
+        col_player,
+        col_queue,
+        search_area,
+        keybinds_area,
+        show_logo: panel.show_logo,
+        logo_area: panel.logo_area,
+        logo_width: panel.logo_width,
+        logo_px: panel.logo_px,
+        search_box_area: panel.search_box_area,
+        status_area: panel.status_area,
+        art_area: panel.art_area,
+        vol_timer_area: panel.vol_timer_area,
+        bar_area: panel.bar_area,
+        bar_width: panel.bar_width,
+        controls_slots: panel.controls_slots,
+    }
+}
+
+pub fn layout_player_panel(col_player: Rect, show_search: bool) -> PlayerPanelLayout {
     let player_block = Block::default().borders(Borders::ALL);
     let player_inner = player_block.inner(col_player);
 
@@ -133,9 +191,9 @@ pub fn layout_player(area: Rect) -> PlayerLayout {
 
     let player_rows = Layout::vertical([
         Constraint::Length(if show_logo { logo_height } else { 0 }), // 0: Logo at top
-        Constraint::Length(3),                                       // 1: Search box
-        Constraint::Length(1),                                       // 2: Status
-        Constraint::Min(4),                                          // 3: Artwork + Title + Artist
+        Constraint::Length(3),          // 1: Search box / discord indicator row
+        Constraint::Length(1),          // 2: Status
+        Constraint::Min(4),             // 3: Artwork + Title + Artist
         Constraint::Length(1),          // 4: Volume (left) & Timer (right)
         Constraint::Length(spacer_gap), // 5: Spacer gap
         Constraint::Length(1),          // 6: Progress bar
@@ -189,16 +247,12 @@ pub fn layout_player(area: Rect) -> PlayerLayout {
         raw_slots[4],
     ];
 
-    PlayerLayout {
-        col_left,
-        col_player,
-        col_queue,
-        search_area,
-        keybinds_area,
+    PlayerPanelLayout {
         show_logo,
         logo_area,
         logo_width: target_width,
         logo_px: target_px,
+        show_search,
         search_box_area,
         status_area,
         art_area,
@@ -346,114 +400,8 @@ pub fn render_player(
     }
 
     // MIDDLE SECTION: Player
-    let player_block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(theme.primary)
-        .title(Line::from(vec![Span::styled(
-            " PLAYER ",
-            theme.bold_primary,
-        )]));
-    frame.render_widget(player_block, layout.col_player);
-
-    let current = app
-        .current_track()
-        .or(app.pending_track())
-        .or_else(|| app.tracks.get(app.selected));
-
-    if layout.show_logo {
-        let bitmap = logo_bitmap();
-        let scaled = scale_bitmap(bitmap, layout.logo_width, layout.logo_px);
-        frame.render_widget(
-            Paragraph::new(bitmap_lines(&scaled))
-                .style(theme.bold_primary)
-                .alignment(Alignment::Center),
-            layout.logo_area,
-        );
-    }
-
-    render_search_box(
-        frame,
-        layout.search_box_area,
-        &app.query,
-        app.mode == Mode::Type,
-        theme.primary,
-        theme.bold_primary,
-        theme.dim,
-    );
-
-    if layout.search_box_area.width >= 30 {
-        let indicator_w: u16 = 2;
-        let indicator_h: u16 = 1;
-        let indicator_x =
-            layout.search_box_area.x + layout.search_box_area.width.saturating_sub(indicator_w + 1);
-        let indicator_y = layout.search_box_area.y + 1;
-        let indicator_area = Rect {
-            x: indicator_x,
-            y: indicator_y,
-            width: indicator_w,
-            height: indicator_h,
-        };
-        crate::ui::components::discord_indicator::render_discord_indicator(
-            frame,
-            indicator_area,
-            app.is_discord_connected(),
-        );
-    }
-    frame.render_widget(
-        Paragraph::new(app.visible_status())
-            .style(theme.dim)
-            .alignment(Alignment::Center),
-        layout.status_area,
-    );
-
-    crate::artwork::render_art(
-        frame,
-        layout.art_area,
-        current
-            .and_then(|track| track.art_url.as_deref())
-            .unwrap_or(""),
-        current.map(|track| track.title.as_str()).unwrap_or(""),
-        current.map(|track| track.artist.as_str()).unwrap_or(""),
-        app.settings.art_hq,
-        Some(theme.accent),
-    );
-
-    let vol_timer_area = Rect {
-        x: layout.bar_area.x,
-        y: layout.vol_timer_area.y,
-        width: layout.bar_area.width,
-        height: 1,
-    };
-
-    render_volume_timer(
-        frame,
-        vol_timer_area,
-        app.volume,
-        playback,
-        theme.primary,
-        theme.bold_primary,
-    );
-
-    let song_loading = (app.current_track().is_some() || app.is_resolving()) && playback.is_none();
-    render_progress_bar(
-        frame,
-        layout.bar_area,
-        layout.bar_width,
-        song_loading,
-        playback,
-        theme.bold_primary,
-        theme.dim,
-    );
-
-    render_controls(
-        frame,
-        &layout.controls_slots,
-        app.shuffle,
-        app.is_paused(),
-        app.repeat,
-        theme.bold_primary,
-        theme.dim,
-    );
+    let panel = layout.panel_layout();
+    render_player_panel(frame, &panel, layout.col_player, app, playback, theme);
 
     // RIGHT SECTION: Queue
     // only rendered when wide enough for 3-panel layout
@@ -498,6 +446,126 @@ pub fn render_player(
             theme,
         );
     }
+}
+
+pub fn render_player_panel(
+    frame: &mut Frame,
+    panel: &PlayerPanelLayout,
+    col_player: Rect,
+    app: &App,
+    playback: Option<(f64, Option<f64>)>,
+    theme: &Theme,
+) {
+    let player_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.primary)
+        .title(Line::from(vec![Span::styled(
+            " PLAYER ",
+            theme.bold_primary,
+        )]));
+    frame.render_widget(player_block, col_player);
+
+    let current = app
+        .current_track()
+        .or(app.pending_track())
+        .or_else(|| app.tracks.get(app.selected));
+
+    if panel.show_logo {
+        let bitmap = logo_bitmap();
+        let scaled = scale_bitmap(bitmap, panel.logo_width, panel.logo_px);
+        frame.render_widget(
+            Paragraph::new(bitmap_lines(&scaled))
+                .style(theme.bold_primary)
+                .alignment(Alignment::Center),
+            panel.logo_area,
+        );
+    }
+
+    if panel.show_search {
+        render_search_box(
+            frame,
+            panel.search_box_area,
+            &app.query,
+            app.mode == Mode::Type,
+            theme.primary,
+            theme.bold_primary,
+            theme.dim,
+        );
+    }
+
+    if panel.search_box_area.width >= 30 {
+        let indicator_w: u16 = 2;
+        let indicator_h: u16 = 1;
+        let indicator_x =
+            panel.search_box_area.x + panel.search_box_area.width.saturating_sub(indicator_w + 1);
+        let indicator_y = panel.search_box_area.y + 1;
+        let indicator_area = Rect {
+            x: indicator_x,
+            y: indicator_y,
+            width: indicator_w,
+            height: indicator_h,
+        };
+        crate::ui::components::discord_indicator::render_discord_indicator(
+            frame,
+            indicator_area,
+            app.is_discord_connected(),
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(app.visible_status())
+            .style(theme.dim)
+            .alignment(Alignment::Center),
+        panel.status_area,
+    );
+
+    crate::artwork::render_art(
+        frame,
+        panel.art_area,
+        current
+            .and_then(|track| track.art_url.as_deref())
+            .unwrap_or(""),
+        current.map(|track| track.title.as_str()).unwrap_or(""),
+        current.map(|track| track.artist.as_str()).unwrap_or(""),
+        app.settings.art_hq,
+        Some(theme.accent),
+    );
+
+    let vol_timer_area = Rect {
+        x: panel.bar_area.x,
+        y: panel.vol_timer_area.y,
+        width: panel.bar_area.width,
+        height: 1,
+    };
+
+    render_volume_timer(
+        frame,
+        vol_timer_area,
+        app.volume,
+        playback,
+        theme.primary,
+        theme.bold_primary,
+    );
+
+    let song_loading = (app.current_track().is_some() || app.is_resolving()) && playback.is_none();
+    render_progress_bar(
+        frame,
+        panel.bar_area,
+        panel.bar_width,
+        song_loading,
+        playback,
+        theme.bold_primary,
+        theme.dim,
+    );
+
+    render_controls(
+        frame,
+        &panel.controls_slots,
+        app.shuffle,
+        app.is_paused(),
+        app.repeat,
+        theme.bold_primary,
+        theme.dim,
+    );
 }
 
 #[cfg(test)]
@@ -980,6 +1048,41 @@ mod tests {
         assert!(
             lower_title_row.contains("UP NEXT (1)"),
             "Lower panel must switch to UP NEXT (1) when focused in compact mode, got: {lower_title_row}"
+        );
+    }
+
+    #[test]
+    fn test_render_player_keybinds_panel_shows_lyrics() {
+        let app = App::new();
+        let theme = Theme::new(None);
+        let area = Rect::new(0, 0, 140, 30);
+        let layout = layout_player(area);
+
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_player(frame, area, &app, None, &theme);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+
+        let mut found_lyrics = false;
+        for y in
+            layout.keybinds_area.y + 1..layout.keybinds_area.y + layout.keybinds_area.height - 1
+        {
+            let row = (layout.keybinds_area.x + 1
+                ..layout.keybinds_area.x + layout.keybinds_area.width - 1)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>();
+            if row.contains("L") && row.contains("LYRICS") {
+                found_lyrics = true;
+                break;
+            }
+        }
+        assert!(
+            found_lyrics,
+            "Keybinds panel must display 'L' and 'LYRICS' on wide display"
         );
     }
 }
