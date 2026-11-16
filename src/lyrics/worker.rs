@@ -296,8 +296,7 @@ fn run_lyrics_worker<F>(
                 }
 
                 // If not forcing refresh, check cache first for immediate offline/instant loading
-                if !force
-                    && let Some(cached) = crate::lyrics::cache::get_lyrics_from_cache(&track)
+                if !force && let Some(cached) = crate::lyrics::cache::get_lyrics_from_cache(&track)
                 {
                     current_generation = current_generation.wrapping_add(1);
                     let generation = current_generation;

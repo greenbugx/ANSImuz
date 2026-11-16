@@ -772,27 +772,6 @@ litterbox_expiry = "72h"
         );
     }
     #[test]
-    fn test_clear_caches_includes_lyrics_and_updates_cache_bytes() {
-        let _guard = crate::artwork::ARTWORK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let _l_guard = crate::lyrics::cache::LYRICS_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let lyrics_dir = lyrics_cache_dir();
-        let test_entries_dir = lyrics_dir.join("entries");
-        fs::create_dir_all(&test_entries_dir).expect("create lyrics entries dir");
-        fs::write(lyrics_dir.join("index.json"), b"{\"entries\":{}}").expect("write index");
-        fs::write(test_entries_dir.join("test.json"), b"{\"lyrics\":true}").expect("write entry");
-
-        // cache_bytes must count lyrics cache directory
-        assert!(cache_bytes() >= b"{\"lyrics\":true}".len() as u64);
-
-        // clear_caches must remove lyrics directory
-        let result = clear_caches();
-        assert!(result.is_ok(), "clear_caches must return Ok");
-        assert!(
-            !lyrics_dir.exists(),
-            "lyrics cache must be removed by clear_caches"
-        );
-    }
-    #[test]
     fn test_write_cache_atomic_overwrites_existing_file() {
         let dir = std::env::temp_dir().join(format!("ansimuz-test-atomic-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);

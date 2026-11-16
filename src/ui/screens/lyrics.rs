@@ -193,9 +193,9 @@ fn render_lyrics_content(
 
     if is_timed {
         for (idx, line) in lyrics.lines.iter().enumerate() {
-            let is_current = sync_point.active_line_index == Some(idx) && !sync_point.is_in_gap;
+            let is_current = sync_point.active_line_index == Some(idx);
             let is_past = match sync_point.active_line_index {
-                Some(curr) => idx < curr || (idx == curr && sync_point.is_in_gap),
+                Some(curr) => idx < curr,
                 None => false,
             };
 
@@ -353,7 +353,8 @@ fn wrap_active_timed_line(
     max_width: usize,
     out: &mut Vec<Line<'static>>,
 ) {
-    if line.words.is_empty() || sync_point.active_word_index.is_none() {
+    let has_word_timing = line.words.iter().any(|w| w.start_ms.is_some());
+    if !has_word_timing {
         wrap_plain_line(
             line.display_text(),
             theme.bold_primary,
@@ -364,7 +365,6 @@ fn wrap_active_timed_line(
         return;
     }
 
-    let active_w_idx = sync_point.active_word_index.unwrap_or(0);
     let upcoming_word_style = Style::default()
         .fg(Color::Gray)
         .add_modifier(Modifier::BOLD);
@@ -397,24 +397,31 @@ fn wrap_active_timed_line(
             cur_width += 1;
         }
 
-        if w_idx < active_w_idx {
-            cur_spans.push(Span::styled(word.text.clone(), theme.bold_primary));
-        } else if w_idx > active_w_idx {
+        let w_start = word
+            .start_ms
+            .or_else(|| {
+                line.words
+                    .get(w_idx.saturating_sub(1))
+                    .and_then(|prev| prev.end_ms)
+            })
+            .unwrap_or(line.start_ms.unwrap_or(0));
+        let has_word_started = sync_point.position_ms >= w_start;
+
+        if !has_word_started {
             cur_spans.push(Span::styled(word.text.clone(), upcoming_word_style));
-        } else {
-            if !word.syllables.is_empty() && sync_point.active_syllable_index.is_some() {
-                let active_s_idx = sync_point.active_syllable_index.unwrap_or(0);
-                for (s_idx, syl) in word.syllables.iter().enumerate() {
-                    let syl_style = if s_idx <= active_s_idx {
-                        theme.bold_primary
-                    } else {
-                        upcoming_word_style
-                    };
-                    cur_spans.push(Span::styled(syl.text.clone(), syl_style));
-                }
-            } else {
-                cur_spans.push(Span::styled(word.text.clone(), theme.bold_primary));
+        } else if !word.syllables.is_empty() && word.syllables.iter().any(|s| s.start_ms.is_some())
+        {
+            for syl in &word.syllables {
+                let s_start = syl.start_ms.unwrap_or(w_start);
+                let syl_style = if sync_point.position_ms >= s_start {
+                    theme.bold_primary
+                } else {
+                    upcoming_word_style
+                };
+                cur_spans.push(Span::styled(syl.text.clone(), syl_style));
             }
+        } else {
+            cur_spans.push(Span::styled(word.text.clone(), theme.bold_primary));
         }
         cur_width += word_w;
     }
@@ -823,6 +830,230 @@ mod tests {
         assert!(
             has_hanging_indent,
             "Continuation line must be indented with hanging indent (4 spaces)"
+        );
+    }
+
+    #[test]
+    fn test_render_lyrics_gap_between_lines_does_not_jump_to_top() {
+        let mut app = App::new();
+        app.tracks.push(Track::new("Song", "Artist"));
+        app.playing = Some(0);
+
+        let lines: Vec<LyricLine> = (0..20)
+            .map(|i| {
+                let start = i * 10_000; // 0s, 10s, 20s...
+                let end = start + 5_000; // 5s, 15s, 25s... (5-second song gap between lines)
+                LyricLine::new(format!("Song Line Number {i}"), Some(start), Some(end))
+            })
+            .collect();
+
+        let lyrics = Lyrics {
+            source: Some("lrc.red".to_string()),
+            sync_type: SyncType::Line,
+            title: Some("Song".to_string()),
+            artist: Some("Artist".to_string()),
+            isrc: None,
+            lines,
+            unavailable_reason: None,
+        };
+        app.lyrics_state.lyrics = Some(lyrics);
+
+        let theme = Theme::new(None);
+        let area = Rect::new(0, 0, 100, 12); // Small height (12) so only a few lines fit
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // Position at 103.0s (playing Line 10)
+        terminal
+            .draw(|frame| {
+                render_lyrics(frame, area, &app, Some((103.0, Some(200.0))), &theme);
+            })
+            .unwrap();
+
+        let buffer_active = terminal.backend().buffer().clone();
+        let rows_active: Vec<String> = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buffer_active[(x, y)].symbol())
+                    .collect()
+            })
+            .collect();
+
+        // Line 10 must be active with ▶ and visible
+        assert!(
+            rows_active
+                .iter()
+                .any(|r| r.contains("▶") && r.contains("Song Line Number 10")),
+            "Line 10 must be active and visible"
+        );
+        // Line 0 must NOT be visible since viewport scrolled down
+        assert!(
+            !rows_active.iter().any(|r| r.contains("Song Line Number 0")),
+            "Line 0 must not be visible when scrolled to Line 10"
+        );
+
+        // Position at 107.0s (in the 5-second gap between Line 10 and Line 11)
+        terminal
+            .draw(|frame| {
+                render_lyrics(frame, area, &app, Some((107.0, Some(200.0))), &theme);
+            })
+            .unwrap();
+
+        let buffer_gap = terminal.backend().buffer().clone();
+        let rows_gap: Vec<String> = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buffer_gap[(x, y)].symbol())
+                    .collect()
+            })
+            .collect();
+
+        // During the gap, lyrics must NOT jump to the top!
+        // Line 0 must STILL NOT be visible
+        assert!(
+            !rows_gap.iter().any(|r| r.contains("Song Line Number 0")),
+            "Lyrics must not jump to top (Line 0) during gap between lines"
+        );
+        // Line 10 must remain visible and active
+        assert!(
+            rows_gap
+                .iter()
+                .any(|r| r.contains("▶") && r.contains("Song Line Number 10")),
+            "Line 10 must remain visible and active during gap"
+        );
+    }
+
+    #[test]
+    fn test_render_lyrics_gap_between_words_does_not_color_full_line() {
+        let mut app = App::new();
+        app.tracks.push(Track::new("Song", "Artist"));
+        app.playing = Some(0);
+
+        let lyrics = Lyrics {
+            source: Some("lrc.red".to_string()),
+            sync_type: SyncType::Word,
+            title: Some("Song".to_string()),
+            artist: Some("Artist".to_string()),
+            isrc: None,
+            lines: vec![LyricLine::with_words(
+                "First Second",
+                Some(1000),
+                Some(5000),
+                vec![
+                    LyricWord::new("First", Some(1000), Some(2000)),
+                    LyricWord::new("Second", Some(3000), Some(4000)),
+                ],
+            )],
+            unavailable_reason: None,
+        };
+        app.lyrics_state.lyrics = Some(lyrics);
+
+        let theme = Theme::new(None);
+        let area = Rect::new(0, 0, 80, 10);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // Position at 2.5s (2500ms): in the gap between "First" (ended at 2000ms) and "Second" (starts at 3000ms)
+        terminal
+            .draw(|frame| {
+                render_lyrics(frame, area, &app, Some((2.5, Some(60.0))), &theme);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+
+        // Find cell for "F" in "First" -> should be bold_primary (Cyan)
+        let first_is_colored = (0..area.height).any(|y| {
+            (0..area.width).any(|x| {
+                let cell = &buffer[(x, y)];
+                cell.symbol() == "F" && cell.fg == theme.bold_primary.fg.unwrap()
+            })
+        });
+        assert!(
+            first_is_colored,
+            "Finished word 'First' must remain colored in bold_primary"
+        );
+
+        // Find cell for "S" in "Second" -> must NOT be bold_primary, must be Gray (upcoming)
+        let second_is_upcoming_gray = (0..area.height).any(|y| {
+            (0..area.width).any(|x| {
+                let cell = &buffer[(x, y)];
+                cell.symbol() == "S" && cell.fg == Color::Gray
+            })
+        });
+        assert!(
+            second_is_upcoming_gray,
+            "Upcoming word 'Second' during word gap must remain dim Gray, NOT colored full line"
+        );
+    }
+
+    #[test]
+    fn test_render_lyrics_gap_between_syllables_does_not_color_full_word() {
+        let mut app = App::new();
+        app.tracks.push(Track::new("Song", "Artist"));
+        app.playing = Some(0);
+
+        let lyrics = Lyrics {
+            source: Some("lrc.red".to_string()),
+            sync_type: SyncType::Syllable,
+            title: Some("Song".to_string()),
+            artist: Some("Artist".to_string()),
+            isrc: None,
+            lines: vec![LyricLine::with_words(
+                "fantasy",
+                Some(1000),
+                Some(5000),
+                vec![LyricWord::with_syllables(
+                    "fantasy",
+                    Some(1000),
+                    Some(4000),
+                    vec![
+                        LyricSyllable::new("fan", Some(1000), Some(2000)),
+                        LyricSyllable::new("ta", Some(2500), Some(3000)),
+                        LyricSyllable::new("sy", Some(3200), Some(4000)),
+                    ],
+                )],
+            )],
+            unavailable_reason: None,
+        };
+        app.lyrics_state.lyrics = Some(lyrics);
+
+        let theme = Theme::new(None);
+        let area = Rect::new(0, 0, 80, 10);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // Position at 2.2s (2200ms): in the gap between "fan" (ended at 2000ms) and "ta" (starts at 2500ms)
+        terminal
+            .draw(|frame| {
+                render_lyrics(frame, area, &app, Some((2.2, Some(60.0))), &theme);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+
+        // "f" in "fan" must be bold_primary
+        let fan_is_colored = (0..area.height).any(|y| {
+            (0..area.width).any(|x| {
+                let cell = &buffer[(x, y)];
+                cell.symbol() == "f" && cell.fg == theme.bold_primary.fg.unwrap()
+            })
+        });
+        assert!(
+            fan_is_colored,
+            "Finished syllable 'fan' must remain colored"
+        );
+
+        // "t" in "ta" must be Gray (upcoming)
+        let ta_is_gray = (0..area.height).any(|y| {
+            (0..area.width).any(|x| {
+                let cell = &buffer[(x, y)];
+                cell.symbol() == "t" && cell.fg == Color::Gray
+            })
+        });
+        assert!(
+            ta_is_gray,
+            "Upcoming syllable 'ta' during gap must remain dim Gray, NOT colored"
         );
     }
 }
