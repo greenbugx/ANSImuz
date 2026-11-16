@@ -1,8 +1,14 @@
 pub mod model;
+pub mod provider;
 pub mod types;
+pub mod worker;
 
 pub use model::{LyricLine, LyricSyllable, LyricWord, Lyrics};
-pub use types::{SyncType, ValidationError};
+pub use provider::{
+    LyricsResponse, classify_lyrics_error, fetch_lyrics, spawn_fetch_lyrics, track_to_py_dict,
+};
+pub use types::{LyricsError, LyricsStatus, SyncType, ValidationError};
+pub use worker::{LyricsCommand, LyricsEvent, LyricsState, LyricsWorker};
 
 #[cfg(test)]
 mod tests {
@@ -348,5 +354,190 @@ mod tests {
             }
             other => panic!("Expected LinesOutOfOrder, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_classify_lyrics_error() {
+        assert_eq!(
+            classify_lyrics_error("Rate limit exceeded: HTTP 429 quota"),
+            LyricsError::RateLimit("Rate limit exceeded: HTTP 429 quota".to_string())
+        );
+        assert_eq!(
+            classify_lyrics_error("Network connection error: timed out"),
+            LyricsError::Network("Network connection error: timed out".to_string())
+        );
+        assert_eq!(
+            classify_lyrics_error("Track not found on provider."),
+            LyricsError::NotFound("Track not found on provider.".to_string())
+        );
+        assert_eq!(
+            classify_lyrics_error("Resource 404"),
+            LyricsError::NotFound("Resource 404".to_string())
+        );
+        assert_eq!(
+            classify_lyrics_error("Unexpected syntax error in script"),
+            LyricsError::Backend("Unexpected syntax error in script".to_string())
+        );
+    }
+
+    #[test]
+    fn test_lyrics_response_generation_and_track_validation() {
+        use crate::music::track::Track;
+
+        let track1 = Track::new("Creep", "Radiohead")
+            .with_album("Pablo Honey")
+            .with_duration_ms(238000);
+        let track2 = Track::new("Karma Police", "Radiohead");
+
+        let response = LyricsResponse {
+            generation: 42,
+            track_title: "Creep".to_string(),
+            artist: "Radiohead".to_string(),
+            result: Ok(Some(Lyrics::from_plain_text(
+                Some("Creep".to_string()),
+                Some("Radiohead".to_string()),
+                "I'm a creep",
+            ))),
+        };
+
+        // Matching generation and track identity
+        assert!(response.is_valid_for(42, &track1));
+        assert!(!response.should_reject(42, Some(&track1)));
+
+        // Case-insensitive and trimmed match
+        let response_fuzzy = LyricsResponse {
+            generation: 42,
+            track_title: "  creep  ".to_string(),
+            artist: "RADIOHEAD ".to_string(),
+            result: Ok(None),
+        };
+        assert!(response_fuzzy.is_valid_for(42, &track1));
+        assert!(!response_fuzzy.should_reject(42, Some(&track1)));
+
+        // Stale generation must be rejected
+        assert!(!response.is_valid_for(41, &track1));
+        assert!(response.should_reject(41, Some(&track1)));
+        assert!(!response.is_valid_for(43, &track1));
+        assert!(response.should_reject(43, Some(&track1)));
+
+        // Changed track title or artist must be rejected
+        assert!(!response.is_valid_for(42, &track2));
+        assert!(response.should_reject(42, Some(&track2)));
+
+        // Stopped playback (no current track) must be rejected
+        assert!(response.should_reject(42, None));
+    }
+
+    #[test]
+    fn test_track_to_py_dict_conversion() {
+        use crate::music::track::Track;
+        use pyo3::prelude::*;
+        use pyo3::types::PyDictMethods;
+
+        let _guard = crate::paths::ENV_LOCK.lock().unwrap();
+        Python::attach(|py| {
+            let track = Track::new("Creep", "Radiohead")
+                .with_album("Pablo Honey")
+                .with_duration_ms(238000)
+                .with_spotify_id("spotify:track:123")
+                .with_stream_url("https://example.com/audio.mp3")
+                .with_art_url("https://example.com/art.jpg")
+                .with_artists(vec!["Radiohead".to_string(), "Thom Yorke".to_string()]);
+
+            let dict = track_to_py_dict(py, &track).expect("track_to_py_dict succeeds");
+            assert_eq!(
+                dict.get_item("title")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "Creep"
+            );
+            assert_eq!(
+                dict.get_item("artist")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "Radiohead"
+            );
+            assert_eq!(
+                dict.get_item("album")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "Pablo Honey"
+            );
+            assert_eq!(
+                dict.get_item("duration_ms")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<u64>()
+                    .unwrap(),
+                238000
+            );
+            assert_eq!(
+                dict.get_item("spotify_id")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "spotify:track:123"
+            );
+            assert_eq!(
+                dict.get_item("stream_url")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "https://example.com/audio.mp3"
+            );
+            assert_eq!(
+                dict.get_item("art_url")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "https://example.com/art.jpg"
+            );
+            let artists = dict
+                .get_item("artists")
+                .unwrap()
+                .unwrap()
+                .extract::<Vec<String>>()
+                .unwrap();
+            assert_eq!(artists, vec!["Radiohead", "Thom Yorke"]);
+        });
+    }
+
+    #[test]
+    fn test_spawn_fetch_lyrics_channel_delivery() {
+        use crate::music::track::Track;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let _guard = crate::paths::ENV_LOCK.lock().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let track = Track::new("NonExistentTrack_XYZ_12345", "UnknownArtist_99999");
+
+        let handle = spawn_fetch_lyrics(track, 7, tx);
+        let resp = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("Must receive LyricsResponse on channel");
+
+        assert_eq!(resp.generation, 7);
+        assert_eq!(resp.track_title, "NonExistentTrack_XYZ_12345");
+        assert_eq!(resp.artist, "UnknownArtist_99999");
+        // Unknown track without internet or not on lrc.red should resolve to Ok(None) or Err(Network/NotFound)
+        match resp.result {
+            Ok(lyrics) => assert!(lyrics.is_none()),
+            Err(e) => assert!(matches!(
+                e,
+                LyricsError::NotFound(_) | LyricsError::Network(_) | LyricsError::Backend(_)
+            )),
+        }
+
+        let _ = handle.join();
     }
 }

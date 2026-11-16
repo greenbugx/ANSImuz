@@ -75,7 +75,10 @@ class TestBridgeSmoke(unittest.TestCase):
         mock_get_lyrics.return_value = {"provider": "lrc.red", "sync_type": "word"}
         res = bridge.get_lyrics({"title": "Test Song"})
         self.assertEqual(res, {"provider": "lrc.red", "sync_type": "word"})
-        mock_get_lyrics.assert_called_once_with({"title": "Test Song"})
+
+        fetch_res = bridge.fetch_lyrics({"title": "Test Song"})
+        self.assertEqual(fetch_res, {"provider": "lrc.red", "sync_type": "word"})
+        self.assertEqual(mock_get_lyrics.call_count, 2)
 
 
 class TestSpotifyResolutionErrorReporting(unittest.TestCase):

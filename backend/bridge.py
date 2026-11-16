@@ -20,6 +20,7 @@ __all__ = [
     "ProviderError",
     "RateLimitError",
     "TrackNotFoundError",
+    "fetch_lyrics",
     "get_lyrics",
     "resolve_playable",
     "search_music",
@@ -54,9 +55,10 @@ def resolve_playable(track: TrackDict) -> TrackDict:
         raise classify_error("Track resolution failed", exc) from exc
 
 
-def get_lyrics(track: TrackDict) -> dict[str, Any] | None:
+def fetch_lyrics(track: TrackDict) -> dict[str, Any] | None:
     """
-    Retrieves normalized lyrics for the given track dictionary via lyrics providers.
+    Fetches normalized lyrics for the given track dictionary via lyrics providers.
+    Invoked directly by Rust via PyO3.
     """
     try:
         return _get_lyrics(track)
@@ -64,3 +66,7 @@ def get_lyrics(track: TrackDict) -> dict[str, Any] | None:
         raise
     except Exception as exc:
         raise classify_error("Lyrics retrieval failed", exc) from exc
+
+
+# Maintain get_lyrics as an alias for backwards compatibility
+get_lyrics = fetch_lyrics
