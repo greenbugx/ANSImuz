@@ -3,8 +3,9 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph},
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::App;
 use crate::lyrics::synchronizer::compute_sync_point;
@@ -12,6 +13,10 @@ use crate::lyrics::types::{LyricsStatus, SyncType};
 use crate::lyrics::{LyricLine, Lyrics, LyricsSyncPoint};
 use crate::ui::screens::player::{layout_player_panel, render_player_panel};
 use crate::ui::theme::{Theme, truncate};
+
+const FIRST_LINE_PREFIX: &str = "  ";
+const ACTIVE_LINE_PREFIX: &str = "▶ ";
+const HANGING_INDENT_PREFIX: &str = "    "; // 4 spaces hanging indent
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LyricsLayout {
@@ -180,21 +185,48 @@ fn render_lyrics_content(
 ) {
     // Determine active synchronization point
     let sync_point = resolve_sync_point(app, lyrics, playback);
-
     let is_timed = lyrics.is_timed() && lyrics.sync_type != SyncType::Unsynced;
-    let mut rendered_lines: Vec<Line> = Vec::with_capacity(lyrics.lines.len() + 2);
+    let max_w = (inner.width as usize).saturating_sub(1).max(10);
+
+    let mut rendered_lines: Vec<Line<'static>> = Vec::with_capacity(lyrics.lines.len() * 2);
+    let mut active_visual_row: Option<usize> = None;
 
     if is_timed {
         for (idx, line) in lyrics.lines.iter().enumerate() {
-            rendered_lines.push(build_timed_line(idx, line, &sync_point, theme));
+            let is_current = sync_point.active_line_index == Some(idx) && !sync_point.is_in_gap;
+            let is_past = match sync_point.active_line_index {
+                Some(curr) => idx < curr || (idx == curr && sync_point.is_in_gap),
+                None => false,
+            };
+
+            if is_current {
+                active_visual_row = Some(rendered_lines.len());
+                wrap_active_timed_line(line, &sync_point, theme, max_w, &mut rendered_lines);
+            } else {
+                let style = if is_past {
+                    theme.dim.add_modifier(Modifier::ITALIC)
+                } else {
+                    Style::default().fg(Color::Gray)
+                };
+                wrap_plain_line(
+                    line.display_text(),
+                    style,
+                    false,
+                    max_w,
+                    &mut rendered_lines,
+                );
+            }
         }
     } else {
         let unsynced_style = Style::default().fg(Color::Gray);
         for line in &lyrics.lines {
-            rendered_lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(line.display_text().to_string(), unsynced_style),
-            ]));
+            wrap_plain_line(
+                line.display_text(),
+                unsynced_style,
+                false,
+                max_w,
+                &mut rendered_lines,
+            );
         }
     }
 
@@ -204,9 +236,9 @@ fn render_lyrics_content(
     let max_scroll = total_lines.saturating_sub(visible_height);
 
     let scroll_y = if app.lyrics_auto_scroll {
-        if is_timed && let Some(active_idx) = sync_point.active_line_index {
+        if is_timed && let Some(active_row) = active_visual_row {
             let center_offset = visible_height / 3;
-            active_idx.saturating_sub(center_offset).min(max_scroll)
+            active_row.saturating_sub(center_offset).min(max_scroll)
         } else {
             0
         }
@@ -214,9 +246,7 @@ fn render_lyrics_content(
         app.lyrics_scroll_offset.min(max_scroll)
     };
 
-    let paragraph = Paragraph::new(rendered_lines)
-        .scroll((scroll_y as u16, 0))
-        .wrap(Wrap { trim: false });
+    let paragraph = Paragraph::new(rendered_lines).scroll((scroll_y as u16, 0));
 
     frame.render_widget(paragraph, inner);
 }
@@ -246,41 +276,92 @@ fn resolve_sync_point(
     }
 }
 
-fn build_timed_line<'a>(
-    idx: usize,
-    line: &'a LyricLine,
-    sync_point: &LyricsSyncPoint,
-    theme: &Theme,
-) -> Line<'a> {
-    let is_current = sync_point.active_line_index == Some(idx) && !sync_point.is_in_gap;
-    let is_past = match sync_point.active_line_index {
-        Some(curr) => idx < curr || (idx == curr && sync_point.is_in_gap),
-        None => false,
-    };
-
-    if !is_current {
-        // Gone lyrics are dimmer (dark grey + italic), upcoming lyrics are dim (medium gray)
-        let style = if is_past {
-            theme.dim.add_modifier(Modifier::ITALIC)
+fn wrap_plain_line(
+    text: &str,
+    style: Style,
+    is_active: bool,
+    max_width: usize,
+    out: &mut Vec<Line<'static>>,
+) {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        let prefix = if is_active {
+            ACTIVE_LINE_PREFIX
         } else {
-            Style::default().fg(Color::Gray)
+            FIRST_LINE_PREFIX
         };
-        return Line::from(vec![
-            Span::raw("  "),
-            Span::styled(line.display_text().to_string(), style),
-        ]);
+        out.push(Line::from(vec![Span::raw(prefix)]));
+        return;
     }
 
-    // Active line: prominent bold marker and highlighted styling
-    let mut spans = vec![Span::styled("▶ ", theme.bold_primary)];
+    let first_prefix = if is_active {
+        ACTIVE_LINE_PREFIX
+    } else {
+        FIRST_LINE_PREFIX
+    };
+    let first_prefix_w = first_prefix.width();
+    let cont_prefix_w = HANGING_INDENT_PREFIX.width();
 
-    // If line has no words or active word index is none, highlight the whole line
+    let mut cur_spans: Vec<Span<'static>> = Vec::new();
+    let mut cur_width: usize = 0;
+    let mut is_first_line = true;
+
+    for word in trimmed.split_whitespace() {
+        let word_w = word.width();
+        let prefix = if is_first_line {
+            first_prefix
+        } else {
+            HANGING_INDENT_PREFIX
+        };
+        let prefix_w = if is_first_line {
+            first_prefix_w
+        } else {
+            cont_prefix_w
+        };
+
+        if cur_spans.is_empty() {
+            let prefix_style = if is_active && is_first_line {
+                style
+            } else {
+                Style::default()
+            };
+            cur_spans.push(Span::styled(prefix, prefix_style));
+            cur_spans.push(Span::styled(word.to_string(), style));
+            cur_width = prefix_w + word_w;
+        } else if cur_width + 1 + word_w > max_width {
+            out.push(Line::from(std::mem::take(&mut cur_spans)));
+            is_first_line = false;
+            cur_spans.push(Span::raw(HANGING_INDENT_PREFIX));
+            cur_spans.push(Span::styled(word.to_string(), style));
+            cur_width = cont_prefix_w + word_w;
+        } else {
+            cur_spans.push(Span::raw(" "));
+            cur_spans.push(Span::styled(word.to_string(), style));
+            cur_width += 1 + word_w;
+        }
+    }
+
+    if !cur_spans.is_empty() {
+        out.push(Line::from(cur_spans));
+    }
+}
+
+fn wrap_active_timed_line(
+    line: &LyricLine,
+    sync_point: &LyricsSyncPoint,
+    theme: &Theme,
+    max_width: usize,
+    out: &mut Vec<Line<'static>>,
+) {
     if line.words.is_empty() || sync_point.active_word_index.is_none() {
-        spans.push(Span::styled(
-            line.display_text().to_string(),
+        wrap_plain_line(
+            line.display_text(),
             theme.bold_primary,
-        ));
-        return Line::from(spans);
+            true,
+            max_width,
+            out,
+        );
+        return;
     }
 
     let active_w_idx = sync_point.active_word_index.unwrap_or(0);
@@ -288,38 +369,59 @@ fn build_timed_line<'a>(
         .fg(Color::Gray)
         .add_modifier(Modifier::BOLD);
 
+    let first_prefix_w = ACTIVE_LINE_PREFIX.width();
+    let cont_prefix_w = HANGING_INDENT_PREFIX.width();
+
+    let mut cur_spans: Vec<Span<'static>> = Vec::new();
+    let mut cur_width: usize = 0;
+    let mut is_first_line = true;
+
     for (w_idx, word) in line.words.iter().enumerate() {
-        if w_idx > 0 {
-            spans.push(Span::raw(" "));
+        let word_w = word.text.width();
+
+        if !cur_spans.is_empty() && cur_width + 1 + word_w > max_width {
+            out.push(Line::from(std::mem::take(&mut cur_spans)));
+            is_first_line = false;
+            cur_spans.push(Span::raw(HANGING_INDENT_PREFIX));
+            cur_width = cont_prefix_w;
+        } else if cur_spans.is_empty() {
+            if is_first_line {
+                cur_spans.push(Span::styled(ACTIVE_LINE_PREFIX, theme.bold_primary));
+                cur_width = first_prefix_w;
+            } else {
+                cur_spans.push(Span::raw(HANGING_INDENT_PREFIX));
+                cur_width = cont_prefix_w;
+            }
+        } else {
+            cur_spans.push(Span::raw(" "));
+            cur_width += 1;
         }
 
         if w_idx < active_w_idx {
-            // Already sung word: highlight color
-            spans.push(Span::styled(word.text.clone(), theme.bold_primary));
+            cur_spans.push(Span::styled(word.text.clone(), theme.bold_primary));
         } else if w_idx > active_w_idx {
-            // Upcoming word on active line: white
-            spans.push(Span::styled(word.text.clone(), upcoming_word_style));
+            cur_spans.push(Span::styled(word.text.clone(), upcoming_word_style));
         } else {
-            // Active word currently being sung!
             if !word.syllables.is_empty() && sync_point.active_syllable_index.is_some() {
                 let active_s_idx = sync_point.active_syllable_index.unwrap_or(0);
                 for (s_idx, syl) in word.syllables.iter().enumerate() {
-                    if s_idx <= active_s_idx {
-                        // Already sung syllable: highlight color
-                        spans.push(Span::styled(syl.text.clone(), theme.bold_primary));
+                    let syl_style = if s_idx <= active_s_idx {
+                        theme.bold_primary
                     } else {
-                        // Upcoming syllable: white
-                        spans.push(Span::styled(syl.text.clone(), upcoming_word_style));
-                    }
+                        upcoming_word_style
+                    };
+                    cur_spans.push(Span::styled(syl.text.clone(), syl_style));
                 }
             } else {
-                // Currently singing word: highlight color
-                spans.push(Span::styled(word.text.clone(), theme.bold_primary));
+                cur_spans.push(Span::styled(word.text.clone(), theme.bold_primary));
             }
         }
+        cur_width += word_w;
     }
 
-    Line::from(spans)
+    if !cur_spans.is_empty() {
+        out.push(Line::from(cur_spans));
+    }
 }
 
 fn render_centered_notice(
@@ -663,5 +765,64 @@ mod tests {
             .collect();
 
         assert!(text.contains("MANUAL SCROLL"));
+    }
+
+    #[test]
+    fn test_render_long_lines_wrap_with_hanging_indent() {
+        let mut app = App::new();
+        app.tracks.push(Track::new("Song", "Artist"));
+        app.playing = Some(0);
+
+        let long_line_1 = "Bigaadu teri piya ki vastu top 5 ko vipaasna ka VIP pass du like a D.I.D. dance crew, big moves only by my bandhus";
+        let long_line_2 = "Second very long lyric line that definitely wraps onto a second row with hanging indent";
+
+        let lyrics = Lyrics {
+            source: Some("lrc.red".to_string()),
+            sync_type: SyncType::Line,
+            title: Some("Song".to_string()),
+            artist: Some("Artist".to_string()),
+            isrc: None,
+            lines: vec![
+                LyricLine::new(long_line_1, Some(1000), Some(4000)),
+                LyricLine::new(long_line_2, Some(5000), Some(8000)),
+            ],
+            unavailable_reason: None,
+        };
+        app.lyrics_state.lyrics = Some(lyrics);
+
+        let theme = Theme::new(None);
+        // Using narrow area width of 80 so inner width of lyrics panel is around 40-45 chars
+        let area = Rect::new(0, 0, 80, 20);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // Position at 2.0s -> line 0 is active (wrapped), line 1 is upcoming (wrapped)
+        terminal
+            .draw(|frame| {
+                render_lyrics(frame, area, &app, Some((2.0, Some(60.0))), &theme);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let mut rows: Vec<String> = Vec::new();
+        for y in 0..area.height {
+            let row: String = (0..area.width).map(|x| buffer[(x, y)].symbol()).collect();
+            if !row.trim().is_empty() {
+                rows.push(row);
+            }
+        }
+
+        // Active line must have ▶ prefix
+        assert!(rows.iter().any(|r| r.contains("▶")));
+        // Must contain words from both the start and end of the wrapped line
+        assert!(rows.iter().any(|r| r.contains("Bigaadu")));
+        assert!(rows.iter().any(|r| r.contains("bandhus")));
+
+        // Continuation row must be indented with 4 spaces hanging indent
+        let has_hanging_indent = rows.iter().any(|r| r.contains("    "));
+        assert!(
+            has_hanging_indent,
+            "Continuation line must be indented with hanging indent (4 spaces)"
+        );
     }
 }
