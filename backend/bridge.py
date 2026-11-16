@@ -10,6 +10,7 @@ from exceptions import (
     classify_error,
 )
 from providers import spotify, ytmusic
+from providers.lyrics import get_lyrics as _get_lyrics
 
 TrackDict = dict[str, Any]
 
@@ -19,6 +20,7 @@ __all__ = [
     "ProviderError",
     "RateLimitError",
     "TrackNotFoundError",
+    "get_lyrics",
     "resolve_playable",
     "search_music",
 ]
@@ -50,3 +52,15 @@ def resolve_playable(track: TrackDict) -> TrackDict:
         raise
     except Exception as exc:
         raise classify_error("Track resolution failed", exc) from exc
+
+
+def get_lyrics(track: TrackDict) -> dict[str, Any] | None:
+    """
+    Retrieves normalized lyrics for the given track dictionary via lyrics providers.
+    """
+    try:
+        return _get_lyrics(track)
+    except ProviderError:
+        raise
+    except Exception as exc:
+        raise classify_error("Lyrics retrieval failed", exc) from exc

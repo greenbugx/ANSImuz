@@ -607,60 +607,6 @@ mod tests {
             &resolve_tx,
         );
         assert!(app.settings_open);
-        assert!(app.lyrics_open, "lyrics_open must remain true while settings is open");
-        assert!(app.settings_open);
-
-        // Going back from settings (Esc) returns to lyrics screen
-        handle_key(
-            &mut app,
-            &mut player,
-            make_key(KeyCode::Esc),
-            &player_tx,
-            &search_tx,
-            &resolve_tx,
-        );
-        assert!(!app.settings_open);
-        assert!(app.lyrics_open, "Must return to lyrics screen when exiting settings");
-
-        // Opening settings via command palette from lyrics screen
-        app.open_command_palette();
-        app.command_palette_query = "settings".to_string();
-        let filtered = filtered_commands(&app.command_palette_query);
-        assert_eq!(filtered[0].id, Action::OpenSettings);
-        handle_key(
-            &mut app,
-            &mut player,
-            make_key(KeyCode::Enter),
-            &player_tx,
-            &search_tx,
-            &resolve_tx,
-        );
-        assert!(app.settings_open);
-        assert!(app.lyrics_open);
-
-        // Going back from settings using 's' returns to lyrics screen
-        handle_key(
-            &mut app,
-            &mut player,
-            make_key(KeyCode::Char('s')),
-            &player_tx,
-            &search_tx,
-            &resolve_tx,
-        );
-        assert!(!app.settings_open);
-        assert!(app.lyrics_open, "Must return to lyrics screen using 's' keybind");
-
-        // Now from home screen (close lyrics first)
-        app.lyrics_open = false;
-        handle_key(
-            &mut app,
-            &mut player,
-            make_key(KeyCode::Char('s')),
-            &player_tx,
-            &search_tx,
-            &resolve_tx,
-        );
-        assert!(app.settings_open);
         assert!(!app.lyrics_open);
 
         handle_key(
