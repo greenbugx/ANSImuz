@@ -59,7 +59,13 @@ pub fn classify_lyrics_error(msg: &str) -> LyricsError {
 }
 
 /// Fetches and deserializes normalized lyrics for the given track using the Python backend.
+/// Checks the persistent disk cache before issuing network requests.
 pub fn fetch_lyrics(track: &Track) -> Result<Option<Lyrics>, LyricsError> {
+    // Check persistent disk cache first
+    if let Some(cached) = crate::lyrics::cache::get_lyrics_from_cache(track) {
+        return Ok(Some(cached));
+    }
+
     let json_opt = crate::music::with_backend(|py, bridge| {
         let py_dict = track_to_py_dict(py, track)?;
         let res = bridge.getattr("fetch_lyrics")?.call1((py_dict,))?;
@@ -79,6 +85,7 @@ pub fn fetch_lyrics(track: &Track) -> Result<Option<Lyrics>, LyricsError> {
                 LyricsError::Backend(format!("Failed to deserialize lyrics: {err}"))
             })?;
             lyrics.validate()?;
+            crate::lyrics::cache::store_lyrics_in_cache(track, &lyrics);
             Ok(Some(lyrics))
         }
         None => Ok(None),

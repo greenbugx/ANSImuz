@@ -1,9 +1,14 @@
+pub mod cache;
 pub mod model;
 pub mod provider;
 pub mod synchronizer;
 pub mod types;
 pub mod worker;
 
+pub use cache::{
+    LyricsCache, LyricsIndex, LyricsIndexEntry, clear_memory_cache, get_lyrics_from_cache,
+    invalidate_track_in_cache, store_lyrics_in_cache,
+};
 pub use model::{LyricLine, LyricSyllable, LyricWord, Lyrics};
 pub use provider::{
     LyricsResponse, classify_lyrics_error, fetch_lyrics, spawn_fetch_lyrics, track_to_py_dict,

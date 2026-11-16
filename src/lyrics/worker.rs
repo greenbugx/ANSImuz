@@ -274,6 +274,49 @@ fn run_lyrics_worker<F>(
                     continue;
                 }
 
+                // If not forcing refresh, check cache first for immediate offline/instant loading
+                if !force && let Some(cached) = crate::lyrics::cache::get_lyrics_from_cache(&track)
+                {
+                    current_generation = current_generation.wrapping_add(1);
+                    let generation = current_generation;
+                    active_generation.store(generation, Ordering::SeqCst);
+                    last_track = Some(track.clone());
+
+                    let _ = event_tx.send(LyricsEvent::Success {
+                        generation,
+                        title: track.title,
+                        artist: track.artist,
+                        lyrics: Box::new(cached),
+                    });
+                    continue;
+                }
+
+                if force {
+                    crate::lyrics::cache::invalidate_track_in_cache(&track);
+                }
+
+                // If not forcing refresh, check cache first for immediate offline/instant loading
+                if !force
+                    && let Some(cached) = crate::lyrics::cache::get_lyrics_from_cache(&track)
+                {
+                    current_generation = current_generation.wrapping_add(1);
+                    let generation = current_generation;
+                    active_generation.store(generation, Ordering::SeqCst);
+                    last_track = Some(track.clone());
+
+                    let _ = event_tx.send(LyricsEvent::Success {
+                        generation,
+                        title: track.title,
+                        artist: track.artist,
+                        lyrics: Box::new(cached),
+                    });
+                    continue;
+                }
+
+                if force {
+                    crate::lyrics::cache::invalidate_track_in_cache(&track);
+                }
+
                 // Track the current request generation
                 // Handle multiple rapid track changes
                 current_generation = current_generation.wrapping_add(1);
@@ -342,6 +385,7 @@ fn run_lyrics_worker<F>(
                 // Return success, unavailable (NotFound), and error states
                 match result {
                     Ok(Some(lyrics)) => {
+                        crate::lyrics::cache::store_lyrics_in_cache(&track, &lyrics);
                         let _ = event_tx.send(LyricsEvent::Success {
                             generation,
                             title: track.title,

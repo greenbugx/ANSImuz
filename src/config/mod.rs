@@ -349,10 +349,15 @@ pub fn discord_artwork_cache_dir() -> PathBuf {
     cache_base_dir().join("discord").join("artwork")
 }
 
+pub fn lyrics_cache_dir() -> PathBuf {
+    cache_base_dir().join("lyrics")
+}
+
 pub fn cache_bytes() -> u64 {
     dir_size(&artwork_cache_dir())
         + dir_size(&audio_cache_dir())
         + dir_size(&discord_artwork_cache_dir())
+        + dir_size(&lyrics_cache_dir())
 }
 
 static CACHE_TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -395,6 +400,8 @@ pub fn clean_stale_caches() {
     let _ = clean_stale_part_files(&audio_cache_dir());
     let _ = clean_stale_part_files(&discord_artwork_cache_dir());
     let _ = clean_stale_part_files(&discord_artwork_cache_dir().join("images"));
+    let _ = clean_stale_part_files(&lyrics_cache_dir());
+    let _ = clean_stale_part_files(&lyrics_cache_dir().join("entries"));
 }
 
 pub fn prune_cache_dir(dir: &std::path::Path, max_bytes: u64) -> std::io::Result<u64> {
@@ -506,8 +513,16 @@ pub fn clear_caches() -> std::io::Result<()> {
     // Clean up empty parent discord/ cache directory if present
     let _ = fs::remove_dir(cache_base_dir().join("discord"));
 
+    let lyrics_dir = lyrics_cache_dir();
+    if lyrics_dir.exists()
+        && let Err(e) = fs::remove_dir_all(&lyrics_dir)
+    {
+        err = Some(e);
+    }
+
     crate::artwork::clear_memory_cache();
     crate::music::clear_resolved_cache();
+    crate::lyrics::clear_memory_cache();
     if let Some(e) = err { Err(e) } else { Ok(()) }
 }
 
@@ -728,6 +743,53 @@ litterbox_expiry = "72h"
         assert!(
             !discord_dir.exists(),
             "discord artwork cache must be removed by clear_caches"
+        );
+    }
+
+    #[test]
+    fn test_clear_caches_includes_lyrics_and_updates_cache_bytes() {
+        let _guard = crate::artwork::ARTWORK_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _l_guard = crate::lyrics::cache::LYRICS_CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let lyrics_dir = lyrics_cache_dir();
+        let test_entries_dir = lyrics_dir.join("entries");
+        fs::create_dir_all(&test_entries_dir).expect("create lyrics entries dir");
+        fs::write(lyrics_dir.join("index.json"), b"{\"entries\":{}}").expect("write index");
+        fs::write(test_entries_dir.join("test.json"), b"{\"lyrics\":true}").expect("write entry");
+
+        // cache_bytes must count lyrics cache directory
+        assert!(cache_bytes() >= b"{\"lyrics\":true}".len() as u64);
+
+        // clear_caches must remove lyrics directory
+        let result = clear_caches();
+        assert!(result.is_ok(), "clear_caches must return Ok");
+        assert!(
+            !lyrics_dir.exists(),
+            "lyrics cache must be removed by clear_caches"
+        );
+    }
+    #[test]
+    fn test_clear_caches_includes_lyrics_and_updates_cache_bytes() {
+        let _guard = crate::artwork::ARTWORK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _l_guard = crate::lyrics::cache::LYRICS_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let lyrics_dir = lyrics_cache_dir();
+        let test_entries_dir = lyrics_dir.join("entries");
+        fs::create_dir_all(&test_entries_dir).expect("create lyrics entries dir");
+        fs::write(lyrics_dir.join("index.json"), b"{\"entries\":{}}").expect("write index");
+        fs::write(test_entries_dir.join("test.json"), b"{\"lyrics\":true}").expect("write entry");
+
+        // cache_bytes must count lyrics cache directory
+        assert!(cache_bytes() >= b"{\"lyrics\":true}".len() as u64);
+
+        // clear_caches must remove lyrics directory
+        let result = clear_caches();
+        assert!(result.is_ok(), "clear_caches must return Ok");
+        assert!(
+            !lyrics_dir.exists(),
+            "lyrics cache must be removed by clear_caches"
         );
     }
     #[test]
