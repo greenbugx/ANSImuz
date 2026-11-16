@@ -19,6 +19,12 @@ const MAX_DUMP_BYTES: u64 = 64 * 1024 * 1024;
 const MIN_DUMP_BYTES: u64 = 100 * 1024;
 pub const MAX_PREFETCH_RESULTS: usize = 50;
 
+/// Comprehensive fallback chain of YouTube player clients supported by yt-dlp.
+/// yt-dlp queries clients in order, collecting and falling back to working formats
+/// if any individual client triggers 429 rate limits, PO token requirements, or missing streams.
+pub const YTDL_PLAYER_CLIENTS: &str =
+    "android,ios,mweb,web,web_music,android_vr,tv,tv_samsung,tv_simply,visionos,default";
+
 const REQ_ID_VOLUME: u64 = 1;
 const REQ_ID_TIME_POS: u64 = 2;
 const REQ_ID_DURATION: u64 = 3;
@@ -221,7 +227,9 @@ impl AudioPlayer {
             .arg("--idle=no")
             .arg("--force-window=no")
             .arg(format!("--input-ipc-server={}", self.endpoint.as_str()))
-            .arg("--ytdl-raw-options-append=extractor-args=youtube:player_client=visionos,default")
+            .arg(format!(
+                "--ytdl-raw-options-append=extractor-args=youtube:player_client={YTDL_PLAYER_CLIENTS}"
+            ))
             .arg(url)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -771,7 +779,9 @@ pub fn start_dump_cancellable(
         .arg("--no-video")
         .arg("--no-audio")
         .arg("--really-quiet")
-        .arg("--ytdl-raw-options-append=extractor-args=youtube:player_client=visionos,default")
+        .arg(format!(
+            "--ytdl-raw-options-append=extractor-args=youtube:player_client={YTDL_PLAYER_CLIENTS}"
+        ))
         .arg(format!("--stream-dump={}", part.display()))
         .arg(&media)
         .stdin(Stdio::null())
@@ -909,11 +919,25 @@ pub fn start_dump_cancellable(
 }
 
 fn resolve_stream(url: &str) -> Result<String, String> {
-    let output = Command::new("yt-dlp")
-        .arg("--extractor-args")
-        .arg("youtube:player_client=visionos,default")
+    // Try with comprehensive player client fallback chain
+    match resolve_stream_with_client(url, Some(YTDL_PLAYER_CLIENTS)) {
+        Ok(media) if !media.is_empty() => Ok(media),
+        Ok(_) | Err(_) => {
+            // Fallback to default yt-dlp extractor settings without player_client override
+            resolve_stream_with_client(url, None)
+        }
+    }
+}
+
+fn resolve_stream_with_client(url: &str, client_arg: Option<&str>) -> Result<String, String> {
+    let mut cmd = Command::new("yt-dlp");
+    if let Some(clients) = client_arg {
+        cmd.arg("--extractor-args")
+            .arg(format!("youtube:player_client={clients}"));
+    }
+    let output = cmd
         .arg("-f")
-        .arg("bestaudio")
+        .arg("bestaudio/best")
         .arg("--get-url")
         .arg(url)
         .output()
