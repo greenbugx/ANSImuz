@@ -13,11 +13,12 @@ class TestBackendImports(unittest.TestCase):
     def test_backend_modules_import_cleanly(self):
         from artwork import thumbnails
         import bridge
-        from providers import spotify, ytmusic
+        from providers import lyrics, spotify, ytmusic
 
         self.assertIsNotNone(bridge)
         self.assertIsNotNone(spotify)
         self.assertIsNotNone(ytmusic)
+        self.assertIsNotNone(lyrics)
         self.assertIsNotNone(thumbnails)
 
     def test_spotify_provider_lazy_initializes_ytmusic(self):
@@ -66,6 +67,15 @@ class TestBridgeSmoke(unittest.TestCase):
         yt_res = bridge.search_music("test", provider="ytmusic")
         self.assertEqual(yt_res, [{"title": "Yt Track"}])
         mock_yt_search.assert_called_once_with("test")
+
+    @patch("bridge._get_lyrics")
+    def test_bridge_get_lyrics_routing(self, mock_get_lyrics):
+        import bridge
+
+        mock_get_lyrics.return_value = {"provider": "lrc.red", "sync_type": "word"}
+        res = bridge.get_lyrics({"title": "Test Song"})
+        self.assertEqual(res, {"provider": "lrc.red", "sync_type": "word"})
+        mock_get_lyrics.assert_called_once_with({"title": "Test Song"})
 
 
 class TestSpotifyResolutionErrorReporting(unittest.TestCase):
