@@ -364,15 +364,20 @@ class LrcRedProvider(LyricsProvider):
         page_url = metadata.get("page") or f"{self.base_url}/s/{isrc}"
 
         return {
-            "provider": self.name,
+            "source": self.name,
+            "sync_type": sync_type,
+            "title": title,
+            "artist": artist,
             "isrc": isrc,
+            "lines": lines,
+            # Aliases & additional metadata
+            "provider": self.name,
             "track_title": title,
             "artist_name": artist,
+            "album": album,
             "album_name": album,
             "duration_seconds": duration,
             "language": language,
-            "sync_type": sync_type,
-            "lines": lines,
             "plain_lyrics": plain_lyrics,
             "raw_ttml": raw_ttml,
             "raw_lrc": raw_lrc,

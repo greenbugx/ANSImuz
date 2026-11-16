@@ -18,8 +18,9 @@ DEFAULT_TIMEOUT = 15.0
 
 def parse_timestamp(ts: str | float | int | None) -> int | None:
     """
-    Parses a timestamp in seconds (float/int), mm:ss[.xx], or hh:mm:ss[.xx]
-    into milliseconds (int). Returns None if input is invalid or missing.
+    Parses a timestamp in seconds (float/int), mm:ss[.xx], hh:mm:ss[.xx],
+    hh:mm:ss:frames, or unit strings (e.g. '19.764s', '19764ms') into integer
+    milliseconds. Returns None if input is invalid or missing.
     """
     if ts is None:
         return None
@@ -31,7 +32,20 @@ def parse_timestamp(ts: str | float | int | None) -> int | None:
         return None
 
     # Strip any enclosing brackets or angle tags if passed accidentally
-    ts_str = ts_str.lstrip("[<").rstrip("]>")
+    ts_str = ts_str.lstrip("[<").rstrip("]>").strip()
+    if not ts_str:
+        return None
+
+    # Handle explicit millisecond units
+    if ts_str.endswith("ms"):
+        try:
+            return max(0, int(round(float(ts_str[:-2]))))
+        except ValueError:
+            return None
+
+    # Handle explicit seconds units
+    if ts_str.endswith("s"):
+        ts_str = ts_str[:-1].strip()
 
     parts = ts_str.split(":")
     try:
@@ -47,6 +61,16 @@ def parse_timestamp(ts: str | float | int | None) -> int | None:
             mins = float(parts[1])
             secs = float(parts[2])
             return max(0, int(round((hrs * 3600.0 + mins * 60.0 + secs) * 1000.0)))
+        elif len(parts) == 4:
+            # hh:mm:ss:frames
+            hrs = float(parts[0])
+            mins = float(parts[1])
+            secs = float(parts[2])
+            frames = float(parts[3])
+            return max(
+                0,
+                int(round((hrs * 3600.0 + mins * 60.0 + secs + frames / 30.0) * 1000.0)),
+            )
         return None
     except (ValueError, TypeError):
         return None
@@ -113,7 +137,6 @@ def extract_artists(track: dict[str, Any]) -> list[str]:
 
     artist_str = track.get("artist") or track.get("author")
     if isinstance(artist_str, str) and artist_str.strip():
-        # Split on comma if present, or return as single item
         return [a.strip() for a in artist_str.split(",") if a.strip()]
 
     return []
@@ -170,10 +193,22 @@ def extract_isrc(track: dict[str, Any]) -> str | None:
     return None
 
 
+def get_xml_attr(elem: ET.Element, name: str) -> str | None:
+    """Retrieves an XML element attribute matching the local name, ignoring namespaces."""
+    if name in elem.attrib:
+        return elem.attrib[name]
+    for k, v in elem.attrib.items():
+        if k.split("}")[-1] == name:
+            return v
+    return None
+
+
 def parse_ttml(ttml_text: str) -> tuple[str, list[dict[str, Any]]]:
     """
     Parses a TTML XML document containing timed lyrics lines and spans.
-    Returns (sync_type, lines) where sync_type is 'word', 'line', or 'none'.
+    Handles XML namespaces, timing formats, paragraph lines, word timings,
+    and syllable timings where present.
+    Returns (sync_type, lines) where sync_type is 'syllable', 'word', 'line', or 'none'.
     """
     if not ttml_text or not ttml_text.strip():
         return "none", []
@@ -184,37 +219,147 @@ def parse_ttml(ttml_text: str) -> tuple[str, list[dict[str, Any]]]:
         return "none", []
 
     lines: list[dict[str, Any]] = []
-    has_word_sync = False
     has_line_sync = False
+    has_word_sync = False
+    has_syllable_sync = False
 
     for elem in root.iter():
         tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
         if tag != "p":
             continue
 
-        p_begin = parse_timestamp(elem.attrib.get("begin"))
-        p_end = parse_timestamp(elem.attrib.get("end"))
+        p_begin = parse_timestamp(get_xml_attr(elem, "begin"))
+        p_dur = parse_timestamp(get_xml_attr(elem, "dur"))
+        p_end = parse_timestamp(get_xml_attr(elem, "end"))
+        if p_end is None and p_begin is not None and p_dur is not None:
+            p_end = p_begin + p_dur
         if p_begin is not None:
             has_line_sync = True
 
+        raw_line_text = "".join(elem.itertext()).strip()
+        full_text = re.sub(r"\s+", " ", raw_line_text)
+
+        direct_spans = [
+            child for child in elem if child.tag.split("}")[-1] == "span"
+        ]
+        all_spans = [
+            child
+            for child in elem.iter()
+            if child != elem and child.tag.split("}")[-1] == "span"
+        ]
+
         words: list[dict[str, Any]] = []
-        # Find all direct or nested <span> children
-        for child in elem:
-            c_tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
-            if c_tag == "span":
-                s_begin = parse_timestamp(child.attrib.get("begin"))
-                s_end = parse_timestamp(child.attrib.get("end"))
-                s_text = child.text or ""
-                if s_begin is not None or s_text:
+
+        if not all_spans:
+            # Paragraph without timed inner spans: extract words with missing timestamps
+            for tok in full_text.split():
+                words.append({
+                    "text": tok,
+                    "start_ms": None,
+                    "end_ms": None,
+                    "syllables": [],
+                })
+        else:
+            # Check for nested span hierarchy: <span word><span syl/>...</span>
+            has_nested = any(
+                any(c.tag.split("}")[-1] == "span" for c in s) for s in direct_spans
+            )
+            if has_nested:
+                for s in direct_spans:
+                    w_text = "".join(s.itertext()).strip()
+                    if not w_text:
+                        continue
+                    w_begin = parse_timestamp(get_xml_attr(s, "begin")) or p_begin
+                    w_end = parse_timestamp(get_xml_attr(s, "end")) or p_end
+                    if w_begin is not None:
+                        has_word_sync = True
+
+                    nested = [c for c in s if c.tag.split("}")[-1] == "span"]
+                    syls: list[dict[str, Any]] = []
+                    if nested:
+                        for ns in nested:
+                            ns_text = "".join(ns.itertext()).strip()
+                            if ns_text:
+                                ns_begin = (
+                                    parse_timestamp(get_xml_attr(ns, "begin")) or w_begin
+                                )
+                                ns_end = (
+                                    parse_timestamp(get_xml_attr(ns, "end")) or w_end
+                                )
+                                syls.append({
+                                    "text": ns_text,
+                                    "start_ms": ns_begin,
+                                    "end_ms": ns_end,
+                                })
+                                has_syllable_sync = True
+                        if syls:
+                            w_text = "".join(ns["text"] for ns in syls)
+
                     words.append({
-                        "start_ms": s_begin if s_begin is not None else p_begin,
-                        "end_ms": s_end if s_end is not None else p_end,
-                        "text": s_text,
+                        "text": w_text,
+                        "start_ms": w_begin,
+                        "end_ms": w_end,
+                        "syllables": syls,
                     })
+            else:
+                # Sibling spans model (consecutive spans grouped by whitespace tail/text)
+                current_syllables: list[dict[str, Any]] = []
+                for s in direct_spans:
+                    s_text = s.text or ""
+                    s_tail = s.tail or ""
+                    s_begin = parse_timestamp(get_xml_attr(s, "begin"))
+                    s_end = parse_timestamp(get_xml_attr(s, "end"))
                     if s_begin is not None:
                         has_word_sync = True
 
-        full_text = "".join(elem.itertext()).strip()
+                    current_syllables.append({
+                        "text": s_text,
+                        "start_ms": s_begin if s_begin is not None else p_begin,
+                        "end_ms": s_end if s_end is not None else p_end,
+                        "tail": s_tail,
+                    })
+
+                    has_space = bool(
+                        s_tail and any(c.isspace() for c in s_tail)
+                    ) or s_text.endswith(" ")
+                    if has_space or s == direct_spans[-1]:
+                        combined_text = "".join(
+                            syl["text"] for syl in current_syllables
+                        ).strip()
+                        if combined_text:
+                            w_start = current_syllables[0]["start_ms"]
+                            w_end = current_syllables[-1]["end_ms"]
+                            syls = []
+                            if len(current_syllables) > 1:
+                                has_syllable_sync = True
+                                syls = [
+                                    {
+                                        "text": syl["text"].strip(),
+                                        "start_ms": syl["start_ms"],
+                                        "end_ms": syl["end_ms"],
+                                    }
+                                    for syl in current_syllables
+                                    if syl["text"].strip()
+                                ]
+                            words.append({
+                                "text": combined_text,
+                                "start_ms": w_start,
+                                "end_ms": w_end,
+                                "syllables": syls,
+                            })
+                        current_syllables = []
+
+        if p_begin is None and words and words[0]["start_ms"] is not None:
+            p_begin = words[0]["start_ms"]
+        if p_end is None and words and words[-1]["end_ms"] is not None:
+            p_end = words[-1]["end_ms"]
+
+        if words:
+            full_text = " ".join(w["text"] for w in words if w.get("text"))
+        else:
+            raw_line_text = "".join(elem.itertext()).strip()
+            full_text = re.sub(r"\s+", " ", raw_line_text)
+
         lines.append({
             "start_ms": p_begin,
             "end_ms": p_end,
@@ -229,15 +374,23 @@ def parse_ttml(ttml_text: str) -> tuple[str, list[dict[str, Any]]]:
         if lines[i]["end_ms"] is None and lines[i + 1]["start_ms"] is not None:
             lines[i]["end_ms"] = lines[i + 1]["start_ms"]
 
-    sync_type = "word" if has_word_sync else ("line" if has_line_sync else "none")
+    if has_syllable_sync:
+        sync_type = "syllable"
+    elif has_word_sync:
+        sync_type = "word"
+    elif has_line_sync:
+        sync_type = "line"
+    else:
+        sync_type = "none"
+
     return sync_type, lines
 
 
 def parse_lrc(lrc_text: str) -> tuple[str, list[dict[str, Any]]]:
     """
     Parses LRC text (supports standard LRC, enhanced LRC with <mm:ss.xx> word tags,
-    multi-timestamp lines, and unsynchronized plain text).
-    Returns (sync_type, lines) where sync_type is 'word', 'line', or 'none'.
+    syllable groupings, multi-timestamp lines, and unsynchronized plain text).
+    Returns (sync_type, lines) where sync_type is 'syllable', 'word', 'line', or 'none'.
     """
     if not lrc_text or not lrc_text.strip():
         return "none", []
@@ -247,6 +400,7 @@ def parse_lrc(lrc_text: str) -> tuple[str, list[dict[str, Any]]]:
     timed_lines: list[dict[str, Any]] = []
     plain_lines: list[str] = []
     has_word_sync = False
+    has_syllable_sync = False
 
     time_tag_pattern = re.compile(r"\[(\d{1,2}:\d{2}(?:\.\d{1,3})?)\]")
     word_tag_pattern = re.compile(r"<(\d{1,2}:\d{2}(?:\.\d{1,3})?)>([^<]*)")
@@ -271,68 +425,123 @@ def parse_lrc(lrc_text: str) -> tuple[str, list[dict[str, Any]]]:
 
         tags = time_tag_pattern.findall(line)
         if not tags:
-            # Plain line without leading timestamp
             plain_lines.append(line)
             continue
 
-        # Extract remainder after stripping leading timestamp tags
         remainder = time_tag_pattern.sub("", line).strip()
-
-        # Check for word-level sync tags: <00:01.23>word
         word_matches = list(word_tag_pattern.finditer(remainder))
-        words: list[dict[str, Any]] = []
-        if word_matches:
-            for i, match in enumerate(word_matches):
-                w_start = parse_timestamp(match.group(1))
-                if w_start is not None:
-                    w_start = max(0, w_start + offset_ms)
-                w_text = match.group(2)
-                w_end = None
-                if i + 1 < len(word_matches):
-                    w_next_start = parse_timestamp(word_matches[i + 1].group(1))
-                    if w_next_start is not None:
-                        w_end = max(0, w_next_start + offset_ms)
 
-                word_clean = w_text.strip()
-                if word_clean:
-                    words.append({
-                        "start_ms": w_start,
-                        "end_ms": w_end,
-                        "text": word_clean,
-                    })
-                    if w_start is not None:
-                        has_word_sync = True
+        words: list[dict[str, Any]] = []
+        clean_text = ""
+        line_end_ms: int | None = None
+
+        if word_matches:
+            has_word_sync = True
+            tokens: list[dict[str, Any]] = []
+            for i, match in enumerate(word_matches):
+                ts = parse_timestamp(match.group(1))
+                if ts is not None:
+                    ts = max(0, ts + offset_ms)
+                txt = match.group(2)
+                next_ts = None
+                if i + 1 < len(word_matches):
+                    next_ts = parse_timestamp(word_matches[i + 1].group(1))
+                    if next_ts is not None:
+                        next_ts = max(0, next_ts + offset_ms)
+                tokens.append({"start_ms": ts, "end_ms": next_ts, "raw": txt})
+
+            curr_syls: list[dict[str, Any]] = []
+            for idx, tok in enumerate(tokens):
+                raw = tok["raw"]
+                # Closing timestamp with empty text at end of line provides line_end_ms
+                if not raw.strip() and idx == len(tokens) - 1:
+                    line_end_ms = tok["start_ms"]
+                    continue
+
+                curr_syls.append(tok)
+                is_last_content = (idx == len(tokens) - 1) or (
+                    idx == len(tokens) - 2 and not tokens[-1]["raw"].strip()
+                )
+
+                if raw.endswith(" ") or raw.endswith("\t") or is_last_content:
+                    combined = "".join(s["raw"] for s in curr_syls).strip()
+                    if combined:
+                        w_start = curr_syls[0]["start_ms"]
+                        w_end = curr_syls[-1]["end_ms"]
+                        syls = []
+                        if len(curr_syls) > 1:
+                            has_syllable_sync = True
+                            syls = [
+                                {
+                                    "text": s["raw"].strip(),
+                                    "start_ms": s["start_ms"],
+                                    "end_ms": s["end_ms"],
+                                }
+                                for s in curr_syls
+                                if s["raw"].strip()
+                            ]
+                        words.append({
+                            "text": combined,
+                            "start_ms": w_start,
+                            "end_ms": w_end,
+                            "syllables": syls,
+                        })
+                    curr_syls = []
 
             clean_text = re.sub(r"<[^>]+>", "", remainder).strip()
+            clean_text = re.sub(r"\s+", " ", clean_text)
+            if line_end_ms is None and words:
+                line_end_ms = words[-1]["end_ms"]
         else:
             clean_text = remainder
+            for tok in clean_text.split():
+                words.append({
+                    "text": tok,
+                    "start_ms": None,
+                    "end_ms": None,
+                    "syllables": [],
+                })
 
         for tag in tags:
             tag_ms = parse_timestamp(tag)
             if tag_ms is not None:
                 tag_ms = max(0, tag_ms + offset_ms)
             timed_lines.append({
-                "start_ms": tag_ms,
-                "end_ms": None,
                 "text": clean_text,
+                "start_ms": tag_ms,
+                "end_ms": line_end_ms,
                 "words": list(words),
             })
 
     if timed_lines:
-        timed_lines.sort(key=lambda item: item["start_ms"] if item["start_ms"] is not None else 0)
-        # Calculate line end_ms based on next line's start_ms
+        timed_lines.sort(
+            key=lambda item: item["start_ms"] if item["start_ms"] is not None else 0
+        )
         for i in range(len(timed_lines) - 1):
             if timed_lines[i]["end_ms"] is None and timed_lines[i + 1]["start_ms"] is not None:
                 timed_lines[i]["end_ms"] = timed_lines[i + 1]["start_ms"]
-        sync_type = "word" if has_word_sync else "line"
+
+        if has_syllable_sync:
+            sync_type = "syllable"
+        elif has_word_sync:
+            sync_type = "word"
+        else:
+            sync_type = "line"
         return sync_type, timed_lines
 
-    # If no timestamps were found at all, treat as unsynchronized plain lyrics
-    parsed_plain = [
-        {"start_ms": None, "end_ms": None, "text": pl, "words": []}
-        for pl in plain_lines
-        if pl
-    ]
+    # Plain unsynchronized lyrics
+    parsed_plain: list[dict[str, Any]] = []
+    for pl in plain_lines:
+        w_list = [
+            {"text": tok, "start_ms": None, "end_ms": None, "syllables": []}
+            for tok in pl.split()
+        ]
+        parsed_plain.append({
+            "text": pl,
+            "start_ms": None,
+            "end_ms": None,
+            "words": w_list,
+        })
     return "none", parsed_plain
 
 
