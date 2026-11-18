@@ -77,6 +77,7 @@ impl LyricWord {
 
 /// A line of lyrics containing optional line timestamps and a list of words.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(from = "LyricLineRaw")]
 pub struct LyricLine {
     #[serde(default)]
     pub start_ms: Option<u64>,
@@ -86,15 +87,64 @@ pub struct LyricLine {
     pub text: String,
     #[serde(default)]
     pub words: Vec<LyricWord>,
+    /// True when this line contains background / harmony vocals.
+    #[serde(default)]
+    pub is_background: bool,
+}
+
+#[derive(Deserialize)]
+struct LyricLineRaw {
+    #[serde(default)]
+    start_ms: Option<u64>,
+    #[serde(default)]
+    end_ms: Option<u64>,
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    words: Vec<LyricWord>,
+    #[serde(default)]
+    is_background: Option<bool>,
+    #[serde(default)]
+    vocal_type: Option<String>,
+    #[serde(default)]
+    background: Option<bool>,
+}
+
+impl From<LyricLineRaw> for LyricLine {
+    fn from(raw: LyricLineRaw) -> Self {
+        let is_bg = raw.is_background.unwrap_or(false)
+            || raw.background.unwrap_or(false)
+            || raw
+                .vocal_type
+                .as_deref()
+                .map(|s| s.eq_ignore_ascii_case("background") || s.eq_ignore_ascii_case("bg"))
+                .unwrap_or(false);
+        let line = LyricLine {
+            start_ms: raw.start_ms,
+            end_ms: raw.end_ms,
+            text: raw.text,
+            words: raw.words,
+            is_background: is_bg,
+        };
+        line.normalize()
+    }
+}
+
+fn is_background_text(s: &str) -> bool {
+    let t = s.trim();
+    (t.starts_with('(') && t.ends_with(')')) || (t.starts_with('（') && t.ends_with('）'))
 }
 
 impl LyricLine {
     pub fn new(text: impl Into<String>, start_ms: Option<u64>, end_ms: Option<u64>) -> Self {
+        let text_str = text.into();
+        let is_bg = is_background_text(&text_str);
         Self {
             start_ms,
             end_ms,
-            text: text.into(),
+            text: text_str,
             words: Vec::new(),
+            is_background: is_bg,
         }
     }
 
@@ -104,12 +154,29 @@ impl LyricLine {
         end_ms: Option<u64>,
         words: Vec<LyricWord>,
     ) -> Self {
+        let text_str = text.into();
+        let is_bg = is_background_text(&text_str);
         Self {
             start_ms,
             end_ms,
-            text: text.into(),
+            text: text_str,
             words,
+            is_background: is_bg,
         }
+    }
+
+    pub fn with_background(mut self, is_background: bool) -> Self {
+        self.is_background = is_background;
+        self
+    }
+
+    /// Classify and normalize a raw line.
+    /// Lines whose full text is wrapped in `(…)` or `（…）` are tagged as background vocals.
+    pub fn normalize(mut self) -> Self {
+        if !self.is_background && is_background_text(&self.text) {
+            self.is_background = true;
+        }
+        self
     }
 
     /// Returns the textual representation of this line.
@@ -313,7 +380,9 @@ impl Lyrics {
                 });
             }
 
-            if let Some(curr_start) = line.start_ms {
+            if let Some(curr_start) = line.start_ms
+                && !line.is_background
+            {
                 if let Some(prev_start) = prev_line_start
                     && curr_start < prev_start
                 {

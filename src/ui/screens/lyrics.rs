@@ -16,6 +16,7 @@ use crate::ui::theme::{Theme, truncate};
 
 const FIRST_LINE_PREFIX: &str = "  ";
 const ACTIVE_LINE_PREFIX: &str = "▶ ";
+const BACKGROUND_ACTIVE_PREFIX: &str = "▷ ";
 const HANGING_INDENT_PREFIX: &str = "    "; // 4 spaces hanging indent
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -193,14 +194,16 @@ fn render_lyrics_content(
 
     if is_timed {
         for (idx, line) in lyrics.lines.iter().enumerate() {
-            let is_current = sync_point.active_line_index == Some(idx);
+            let is_current = sync_point.active_line_indices.contains(&idx);
             let is_past = match sync_point.active_line_index {
-                Some(curr) => idx < curr,
+                Some(curr) => idx < curr && !is_current,
                 None => false,
             };
 
             if is_current {
-                active_visual_row = Some(rendered_lines.len());
+                if sync_point.active_line_index == Some(idx) || active_visual_row.is_none() {
+                    active_visual_row = Some(rendered_lines.len());
+                }
                 wrap_active_timed_line(line, &sync_point, theme, max_w, &mut rendered_lines);
             } else {
                 let style = if is_past {
@@ -208,13 +211,7 @@ fn render_lyrics_content(
                 } else {
                     Style::default().fg(Color::Gray)
                 };
-                wrap_plain_line(
-                    line.display_text(),
-                    style,
-                    false,
-                    max_w,
-                    &mut rendered_lines,
-                );
+                wrap_plain_line(line.display_text(), style, None, max_w, &mut rendered_lines);
             }
         }
     } else {
@@ -223,7 +220,7 @@ fn render_lyrics_content(
             wrap_plain_line(
                 line.display_text(),
                 unsynced_style,
-                false,
+                None,
                 max_w,
                 &mut rendered_lines,
             );
@@ -279,26 +276,17 @@ fn resolve_sync_point(
 fn wrap_plain_line(
     text: &str,
     style: Style,
-    is_active: bool,
+    prefix_override: Option<&'static str>,
     max_width: usize,
     out: &mut Vec<Line<'static>>,
 ) {
+    let first_prefix = prefix_override.unwrap_or(FIRST_LINE_PREFIX);
     let trimmed = text.trim();
     if trimmed.is_empty() {
-        let prefix = if is_active {
-            ACTIVE_LINE_PREFIX
-        } else {
-            FIRST_LINE_PREFIX
-        };
-        out.push(Line::from(vec![Span::raw(prefix)]));
+        out.push(Line::from(vec![Span::raw(first_prefix)]));
         return;
     }
 
-    let first_prefix = if is_active {
-        ACTIVE_LINE_PREFIX
-    } else {
-        FIRST_LINE_PREFIX
-    };
     let first_prefix_w = first_prefix.width();
     let cont_prefix_w = HANGING_INDENT_PREFIX.width();
 
@@ -308,26 +296,16 @@ fn wrap_plain_line(
 
     for word in trimmed.split_whitespace() {
         let word_w = word.width();
-        let prefix = if is_first_line {
-            first_prefix
-        } else {
-            HANGING_INDENT_PREFIX
-        };
-        let prefix_w = if is_first_line {
-            first_prefix_w
-        } else {
-            cont_prefix_w
-        };
 
         if cur_spans.is_empty() {
-            let prefix_style = if is_active && is_first_line {
+            let prefix_style = if prefix_override.is_some() && is_first_line {
                 style
             } else {
                 Style::default()
             };
-            cur_spans.push(Span::styled(prefix, prefix_style));
+            cur_spans.push(Span::styled(first_prefix, prefix_style));
             cur_spans.push(Span::styled(word.to_string(), style));
-            cur_width = prefix_w + word_w;
+            cur_width = first_prefix_w + word_w;
         } else if cur_width + 1 + word_w > max_width {
             out.push(Line::from(std::mem::take(&mut cur_spans)));
             is_first_line = false;
@@ -353,23 +331,40 @@ fn wrap_active_timed_line(
     max_width: usize,
     out: &mut Vec<Line<'static>>,
 ) {
+    let is_bg = line.is_background;
+    let prefix = if is_bg {
+        BACKGROUND_ACTIVE_PREFIX
+    } else {
+        ACTIVE_LINE_PREFIX
+    };
+    let active_style = if is_bg {
+        theme.primary.add_modifier(Modifier::ITALIC)
+    } else {
+        theme.bold_primary
+    };
+    let upcoming_word_style = if is_bg {
+        Style::default()
+            .fg(Color::Gray)
+            .add_modifier(Modifier::ITALIC)
+    } else {
+        Style::default()
+            .fg(Color::Gray)
+            .add_modifier(Modifier::BOLD)
+    };
+
     let has_word_timing = line.words.iter().any(|w| w.start_ms.is_some());
     if !has_word_timing {
         wrap_plain_line(
             line.display_text(),
-            theme.bold_primary,
-            true,
+            active_style,
+            Some(prefix),
             max_width,
             out,
         );
         return;
     }
 
-    let upcoming_word_style = Style::default()
-        .fg(Color::Gray)
-        .add_modifier(Modifier::BOLD);
-
-    let first_prefix_w = ACTIVE_LINE_PREFIX.width();
+    let first_prefix_w = prefix.width();
     let cont_prefix_w = HANGING_INDENT_PREFIX.width();
 
     let mut cur_spans: Vec<Span<'static>> = Vec::new();
@@ -386,7 +381,7 @@ fn wrap_active_timed_line(
             cur_width = cont_prefix_w;
         } else if cur_spans.is_empty() {
             if is_first_line {
-                cur_spans.push(Span::styled(ACTIVE_LINE_PREFIX, theme.bold_primary));
+                cur_spans.push(Span::styled(prefix, active_style));
                 cur_width = first_prefix_w;
             } else {
                 cur_spans.push(Span::raw(HANGING_INDENT_PREFIX));
@@ -414,14 +409,14 @@ fn wrap_active_timed_line(
             for syl in &word.syllables {
                 let s_start = syl.start_ms.unwrap_or(w_start);
                 let syl_style = if sync_point.position_ms >= s_start {
-                    theme.bold_primary
+                    active_style
                 } else {
                     upcoming_word_style
                 };
                 cur_spans.push(Span::styled(syl.text.clone(), syl_style));
             }
         } else {
-            cur_spans.push(Span::styled(word.text.clone(), theme.bold_primary));
+            cur_spans.push(Span::styled(word.text.clone(), active_style));
         }
         cur_width += word_w;
     }
@@ -1054,6 +1049,58 @@ mod tests {
         assert!(
             ta_is_gray,
             "Upcoming syllable 'ta' during gap must remain dim Gray, NOT colored"
+        );
+    }
+
+    #[test]
+    fn test_render_dual_active_lead_and_background_lines() {
+        let mut app = App::new();
+        app.tracks.push(Track::new("Bohemian Rhapsody", "Queen"));
+        app.playing = Some(0);
+
+        let lyrics = Lyrics {
+            source: Some("lrc.red".to_string()),
+            sync_type: SyncType::Line,
+            title: Some("Bohemian Rhapsody".to_string()),
+            artist: Some("Queen".to_string()),
+            isrc: None,
+            lines: vec![
+                LyricLine::new("Mama, just killed a man", Some(10000), Some(14000)),
+                LyricLine::new("(Galileo)", Some(12000), Some(15000)),
+                LyricLine::new("Put a gun against his head", Some(16000), Some(20000)),
+            ],
+            unavailable_reason: None,
+        };
+        app.lyrics_state.lyrics = Some(lyrics);
+
+        let theme = Theme::new(None);
+        let area = Rect::new(0, 0, 80, 10);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // At 13.0s (13000ms): both Line 0 (10000..14000) and Line 1 (12000..15000) are concurrently active
+        terminal
+            .draw(|frame| {
+                render_lyrics(frame, area, &app, Some((13.0, Some(200.0))), &theme);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer().clone();
+        let rows: Vec<String> = (0..area.height)
+            .map(|y| (0..area.width).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect();
+
+        // Lead vocal must have '▶' prefix
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("▶") && r.contains("Mama, just killed a man")),
+            "Lead active line must be displayed with '▶'"
+        );
+        // Background vocal must have '▷' prefix
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("▷") && r.contains("(Galileo)")),
+            "Background active line must be displayed with '▷'"
         );
     }
 }

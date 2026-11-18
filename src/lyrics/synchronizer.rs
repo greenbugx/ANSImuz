@@ -6,8 +6,11 @@ use crate::playback::PlayerEvent;
 /// Detailed synchronization point in time for lyrics rendering.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct LyricsSyncPoint {
-    /// Active line index within `lyrics.lines`, if any line is current.
+    /// Primary (lead vocal) active line index within `lyrics.lines`, if any line is current.
     pub active_line_index: Option<usize>,
+    /// All simultaneously active line indices (lead + any overlapping background lines).
+    /// Always contains `active_line_index` as the first element when it is `Some`.
+    pub active_line_indices: Vec<usize>,
     /// Active word index within the active line, if word-level timing is available.
     pub active_word_index: Option<usize>,
     /// Active syllable index within the active word, if syllable-level timing is available.
@@ -36,13 +39,22 @@ impl LyricsSyncPoint {
     /// Returns true if this sync point has an active line.
     #[inline]
     pub fn has_active_line(&self) -> bool {
-        self.active_line_index.is_some()
+        self.active_line_index.is_some() || !self.active_line_indices.is_empty()
     }
 
     /// Retrieves a reference to the active line from the provided lyrics.
     #[inline]
     pub fn active_line<'a>(&self, lyrics: &'a Lyrics) -> Option<&'a LyricLine> {
         self.active_line_index.and_then(|idx| lyrics.lines.get(idx))
+    }
+
+    /// Retrieves references to all currently active lines from the provided lyrics.
+    #[inline]
+    pub fn active_lines<'a>(&self, lyrics: &'a Lyrics) -> Vec<&'a LyricLine> {
+        self.active_line_indices
+            .iter()
+            .filter_map(|&idx| lyrics.lines.get(idx))
+            .collect()
     }
 
     /// Retrieves a reference to the active word from the provided lyrics.
@@ -238,6 +250,7 @@ pub fn compute_sync_point(
 
         return LyricsSyncPoint {
             active_line_index: active_line,
+            active_line_indices: active_line.into_iter().collect(),
             active_word_index: None,
             active_syllable_index: None,
             line_progress: progress,
@@ -252,9 +265,37 @@ pub fn compute_sync_point(
         };
     }
 
-    // Identify active lyric line and gap status
-    let (line_idx_opt, in_gap, line_progress) =
-        find_active_line(position_ms, &lyrics.lines, hint_index, duration_ms);
+    // Collect all concurrently active lines whose [start_ms, end_ms] window contains position_ms
+    let all_active = find_all_active_lines(position_ms, &lyrics.lines, duration_ms);
+
+    let (line_idx_opt, in_gap, line_progress, active_line_indices) = if !all_active.is_empty() {
+        // Prefer the active lead vocal (non-background) as primary scroll anchor
+        let primary_idx = all_active
+            .iter()
+            .copied()
+            .find(|&idx| !lyrics.lines[idx].is_background)
+            .unwrap_or(all_active[0]);
+
+        let line = &lyrics.lines[primary_idx];
+        let start = line.start_ms.unwrap_or(0);
+        let next_start = lyrics.lines.get(primary_idx + 1).and_then(|l| l.start_ms);
+        let end = line.end_ms.or(next_start).or(duration_ms).unwrap_or(start + 5000);
+        let prog = ((position_ms - start) as f32 / (end - start).max(1) as f32).clamp(0.0, 1.0);
+
+        let mut indices = all_active;
+        if let Some(pos) = indices.iter().position(|&i| i == primary_idx)
+            && pos != 0
+        {
+            indices.swap(0, pos);
+        }
+        (Some(primary_idx), false, prog, indices)
+    } else {
+        // When in a timestamp gap, fallback to find_active_line to preserve previous line index
+        let (fallback_idx, in_gap, prog) =
+            find_active_line(position_ms, &lyrics.lines, hint_index, duration_ms);
+        let indices = fallback_idx.into_iter().collect();
+        (fallback_idx, in_gap, prog, indices)
+    };
 
     // Identify active word, syllable, and progress within active line
     let (word_idx_opt, word_prog, syl_idx_opt, syl_prog) = match (line_idx_opt, in_gap) {
@@ -268,6 +309,7 @@ pub fn compute_sync_point(
 
     LyricsSyncPoint {
         active_line_index: line_idx_opt,
+        active_line_indices,
         active_word_index: word_idx_opt,
         active_syllable_index: syl_idx_opt,
         line_progress,
@@ -280,6 +322,33 @@ pub fn compute_sync_point(
         is_ended,
         is_paused,
     }
+}
+
+/// Returns every line index whose `[start_ms, end_ms]` window contains `ms`.
+fn find_all_active_lines(ms: u64, lines: &[LyricLine], duration_ms: Option<u64>) -> Vec<usize> {
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(i, line)| {
+            if let Some(start) = line.start_ms {
+                let next_start = if !line.is_background {
+                    lines
+                        .iter()
+                        .skip(i + 1)
+                        .find(|l| !l.is_background)
+                        .and_then(|l| l.start_ms)
+                        .or_else(|| lines.get(i + 1).and_then(|l| l.start_ms))
+                } else {
+                    lines.get(i + 1).and_then(|l| l.start_ms)
+                };
+                let end = line.end_ms.or(next_start).or(duration_ms).unwrap_or(start + 5000);
+                ms >= start && ms < end
+            } else {
+                false
+            }
+        })
+        .map(|(i, _)| i)
+        .collect()
 }
 
 /// Identifies the active line, whether the timestamp falls into a gap, and line progression.
@@ -695,5 +764,63 @@ mod tests {
             pt1, pt2,
             "Unchanged timestamp must return cached sync point directly"
         );
+    }
+
+    #[test]
+    fn test_overlapping_background_line_both_active() {
+        let lyrics = Lyrics {
+            lines: vec![
+                LyricLine {
+                    start_ms: Some(10000),
+                    end_ms: Some(14000),
+                    text: "Lead line".into(),
+                    is_background: false,
+                    words: vec![],
+                },
+                LyricLine {
+                    start_ms: Some(12000),
+                    end_ms: Some(15000),
+                    text: "(Background line)".into(),
+                    is_background: true,
+                    words: vec![],
+                },
+                LyricLine {
+                    start_ms: Some(16000),
+                    end_ms: Some(20000),
+                    text: "Next lead line".into(),
+                    is_background: false,
+                    words: vec![],
+                },
+            ],
+            sync_type: SyncType::Line,
+            ..Default::default()
+        };
+
+        let mut sync = LyricsSynchronizer::new();
+
+        // At 11.0s: only lead line is active
+        let pt1 = sync.sync_position(1, 11.0, Some(20.0), &lyrics);
+        assert_eq!(pt1.active_line_index, Some(0));
+        assert_eq!(pt1.active_line_indices, vec![0]);
+        assert_eq!(pt1.active_lines(&lyrics).len(), 1);
+
+        // At 13.0s: both lead line (10..14s) and background line (12..15s) are active simultaneously
+        let pt2 = sync.sync_position(1, 13.0, Some(20.0), &lyrics);
+        assert_eq!(pt2.active_line_index, Some(0)); // primary scroll anchor is lead line
+        assert_eq!(pt2.active_line_indices, vec![0, 1]);
+        assert!(pt2.active_line_indices.contains(&0));
+        assert!(pt2.active_line_indices.contains(&1));
+        assert_eq!(pt2.active_lines(&lyrics).len(), 2);
+
+        // At 14.5s: lead line finished (14s), but background line (12..15s) is still active
+        let pt3 = sync.sync_position(1, 14.5, Some(20.0), &lyrics);
+        assert_eq!(pt3.active_line_index, Some(1));
+        assert_eq!(pt3.active_line_indices, vec![1]);
+
+        // At 15.5s: interlude gap before next lead line (16s)
+        let pt4 = sync.sync_position(1, 15.5, Some(20.0), &lyrics);
+        assert!(pt4.is_in_gap);
+        assert_eq!(pt4.active_line_index, Some(1)); // stays on previous line, no jump to top
+        assert_eq!(pt4.active_line_indices, vec![1]);
     }
 }

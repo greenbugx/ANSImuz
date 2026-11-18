@@ -381,6 +381,57 @@ mod tests {
             }
             other => panic!("Expected LinesOutOfOrder, got {other:?}"),
         }
+
+        // Overlapping background lines must NOT trigger LinesOutOfOrder
+        let overlapping_bg = Lyrics {
+            lines: vec![
+                LyricLine::new("Lead vocal", Some(3000), Some(6000)),
+                LyricLine::new("(Background vocal)", Some(4000), Some(7000)),
+                LyricLine::new("Next lead vocal", Some(6000), Some(9000)),
+            ],
+            ..Lyrics::empty()
+        };
+        assert!(overlapping_bg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_deserialize_background_vocals() {
+        let json = r#"{
+            "sync_type": "line",
+            "title": "Bohemian Rhapsody",
+            "artist": "Queen",
+            "lines": [
+                {
+                    "start_ms": 10000,
+                    "end_ms": 14000,
+                    "text": "Mama, just killed a man"
+                },
+                {
+                    "start_ms": 12000,
+                    "end_ms": 15000,
+                    "text": "(Galileo)"
+                },
+                {
+                    "start_ms": 14500,
+                    "end_ms": 16000,
+                    "text": "Magnifico",
+                    "vocal_type": "background"
+                }
+            ]
+        }"#;
+
+        let lyrics: Lyrics = serde_json::from_str(json).expect("Deserialization succeeds");
+        assert_eq!(lyrics.lines.len(), 3);
+        assert!(!lyrics.lines[0].is_background);
+        assert!(
+            lyrics.lines[1].is_background,
+            "Parenthesized line must be tagged as background"
+        );
+        assert!(
+            lyrics.lines[2].is_background,
+            "vocal_type 'background' must be tagged as background"
+        );
+        assert!(lyrics.validate().is_ok());
     }
 
     #[test]
