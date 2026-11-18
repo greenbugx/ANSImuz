@@ -16,6 +16,7 @@ from providers.lyrics.base import (
     DEFAULT_TIMEOUT,
     DEFAULT_USER_AGENT,
     LyricsProvider,
+    clean_title_for_search,
     compute_similarity,
     extract_album,
     extract_artists,
@@ -26,10 +27,28 @@ from providers.lyrics.base import (
     get_xml_attr,
     normalize_text,
     parse_lrc,
+    parse_lyrics_plus,
+    parse_lyricsfile,
+    parse_qrc,
     parse_timestamp,
     parse_ttml,
 )
+from providers.lyrics.better_lyrics import BetterLyricsProvider
+from providers.lyrics.genius import (
+    DEFAULT_GENIUS_ATTRIBUTION,
+    DEFAULT_GENIUS_USER_AGENT,
+    GeniusProvider,
+    best_match,
+    clean_query,
+    is_section_header,
+    parse_genius_html,
+    strip_artifacts,
+    text_to_lyric_lines,
+)
+from providers.lyrics.lrclib import LrclibProvider
+from providers.lyrics.lyrics_plus import LyricsPlusProvider
 from providers.lyrics.lrc_red import LrcRedProvider, _version_conflicts
+import providers.lyrics
 
 
 class TestLyricsProviderInterface(unittest.TestCase):
@@ -710,6 +729,1046 @@ class TestLrcRedErrorHandling(unittest.TestCase):
 
         with self.assertRaises(ProviderError):
             self.provider.search("test query")
+
+
+class TestCleanTitleForSearch(unittest.TestCase):
+    def test_clean_video_and_audio_tags(self):
+        self.assertEqual(
+            clean_title_for_search("Levitating (Official Music Video)"),
+            "Levitating",
+        )
+        self.assertEqual(
+            clean_title_for_search("Starboy [Official Video]"),
+            "Starboy",
+        )
+        self.assertEqual(
+            clean_title_for_search("Song Title (Lyric Video)"),
+            "Song Title",
+        )
+        self.assertEqual(
+            clean_title_for_search("Another Song - Official Audio"),
+            "Another Song",
+        )
+        self.assertEqual(
+            clean_title_for_search("Track (Remastered)"),
+            "Track",
+        )
+
+    def test_clean_title_unchanged(self):
+        self.assertEqual(clean_title_for_search("Bohemian Rhapsody"), "Bohemian Rhapsody")
+        self.assertEqual(clean_title_for_search(""), "")
+
+
+class TestParseQrc(unittest.TestCase):
+    def test_parse_empty_or_whitespace(self):
+        self.assertEqual(parse_qrc(""), ("none", []))
+        self.assertEqual(parse_qrc("   "), ("none", []))
+
+    def test_parse_standard_qrc_words(self):
+        qrc = (
+            "[1000,2000]Hello (1000,500)world (1500,500)\n"
+            "[3000,2000]How (3000,600)are (3600,400)you (4000,1000)"
+        )
+        sync_type, lines = parse_qrc(qrc)
+        self.assertEqual(sync_type, "word")
+        self.assertEqual(len(lines), 2)
+
+        line0 = lines[0]
+        self.assertEqual(line0["start_ms"], 1000)
+        self.assertEqual(line0["end_ms"], 3000)
+        self.assertEqual(line0["text"], "Hello world")
+        self.assertEqual(len(line0["words"]), 2)
+        self.assertEqual(line0["words"][0]["text"], "Hello")
+        self.assertEqual(line0["words"][0]["start_ms"], 1000)
+        self.assertEqual(line0["words"][0]["end_ms"], 1500)
+        self.assertEqual(line0["words"][1]["text"], "world")
+        self.assertEqual(line0["words"][1]["start_ms"], 1500)
+        self.assertEqual(line0["words"][1]["end_ms"], 2000)
+
+    def test_parse_qrc_xml_wrapped(self):
+        xml_qrc = (
+            '<?xml version="1.0" encoding="utf-8"?>\n'
+            '<QrcInfos>\n'
+            '<Lyric_1 LyricType="1" LyricContent="[ti:Test]\n'
+            '[offset:0]\n'
+            '[16392,2152]I\'m (16392,264)tryna (16656,208)put (16864,178)you (17042,181)"/>\n'
+            '</QrcInfos>'
+        )
+        sync_type, lines = parse_qrc(xml_qrc)
+        self.assertEqual(sync_type, "word")
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0]["text"], "I'm tryna put you")
+        self.assertEqual(lines[0]["start_ms"], 16392)
+        self.assertEqual(lines[0]["end_ms"], 16392 + 2152)
+
+    def test_parse_qrc_background_vocals(self):
+        qrc = "[5000,1500]((5000,750)yeah (5750,750))"
+        sync_type, lines = parse_qrc(qrc)
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0]["is_background"])
+
+
+class TestBetterLyricsProvider(unittest.TestCase):
+    def setUp(self):
+        self.mock_session = MagicMock()
+        self.provider = BetterLyricsProvider(session=self.mock_session)
+
+    def test_name_and_attribution(self):
+        self.assertEqual(self.provider.name, "BetterLyrics")
+        self.assertIn("BetterLyrics", self.provider.attribution)
+
+    def test_missing_title_returns_none(self):
+        self.assertIsNone(self.provider.get_lyrics({}))
+        self.assertIsNone(self.provider.get_lyrics({"title": ""}))
+
+    def test_primary_endpoint_success_ttml(self):
+        ttml_content = (
+            '<tt xmlns="http://www.w3.org/ns/ttml" xmlns:itunes="http://music.apple.com/lyric-ttml-internal">'
+            '<body><div><p begin="00:09.50" end="00:11.70">'
+            '<span>If </span><span>you </span><span>wanna</span>'
+            '</p></div></body></tt>'
+        )
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"ttml": ttml_content}
+        self.mock_session.get.return_value = mock_resp
+
+        track = {
+            "title": "Levitating",
+            "artist": "Dua Lipa",
+            "duration_ms": 203000,
+            "album": "Future Nostalgia",
+        }
+        res = self.provider.get_lyrics(track)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["source"], "BetterLyrics")
+        self.assertEqual(res["title"], "Levitating")
+        self.assertEqual(res["artist"], "Dua Lipa")
+        self.assertEqual(len(res["lines"]), 1)
+        self.assertEqual(res["lines"][0]["text"], "If you wanna")
+
+    def test_fallback_to_portato_when_primary_fails(self):
+        # First call (BASE) returns 401
+        base_resp = MagicMock()
+        base_resp.status_code = 401
+        base_resp.json.return_value = {"error": "API key required"}
+
+        # Second call (PORTATO) returns 200 with QRC
+        portato_resp = MagicMock()
+        portato_resp.status_code = 200
+        portato_resp.json.return_value = {
+            "lyrics": "[1000,2000]Starboy (1000,1000)rocks (2000,1000)",
+            "provider": "qq",
+        }
+
+        self.mock_session.get.side_effect = [base_resp, portato_resp]
+
+        track = {
+            "title": "Starboy",
+            "artist": "The Weeknd",
+            "duration_ms": 230000,
+        }
+        res = self.provider.get_lyrics(track)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["source"], "BetterLyrics (QQ)")
+        self.assertEqual(len(res["lines"]), 1)
+        self.assertEqual(res["lines"][0]["text"], "Starboy rocks")
+
+    def test_both_endpoints_401_returns_none(self):
+        base_resp = MagicMock()
+        base_resp.status_code = 401
+        portato_resp = MagicMock()
+        portato_resp.status_code = 401
+
+        self.mock_session.get.side_effect = [base_resp, portato_resp]
+
+        track = {"title": "Unknown Song", "artist": "Unknown Artist", "duration_ms": 180000}
+        self.assertIsNone(self.provider.get_lyrics(track))
+
+    def test_request_exception_handled_gracefully(self):
+        import requests
+        self.mock_session.get.side_effect = requests.RequestException("Network failed")
+        track = {"title": "Any Song", "artist": "Any Artist"}
+        self.assertIsNone(self.provider.get_lyrics(track))
+
+
+class TestParseLyricsPlus(unittest.TestCase):
+    def test_parse_empty_or_invalid(self):
+        self.assertEqual(parse_lyrics_plus({}), ("none", []))
+        self.assertEqual(parse_lyrics_plus({"lyrics": []}), ("none", []))
+
+    def test_parse_syllables_and_word_grouping(self):
+        data = {
+            "type": "Word",
+            "lyrics": [
+                {
+                    "time": 1000,
+                    "duration": 2000,
+                    "syllabus": [
+                        {"time": 1000, "duration": 400, "text": "He"},
+                        {"time": 1400, "duration": 600, "text": "llo "},
+                        {"time": 2000, "duration": 1000, "text": "world"},
+                    ],
+                }
+            ],
+        }
+        sync_type, lines = parse_lyrics_plus(data)
+        self.assertEqual(sync_type, "syllable")
+        self.assertEqual(len(lines), 1)
+
+        line0 = lines[0]
+        self.assertEqual(line0["start_ms"], 1000)
+        self.assertEqual(line0["end_ms"], 3000)
+        self.assertEqual(line0["text"], "Hello world")
+        self.assertEqual(len(line0["words"]), 2)
+
+        # Word 1: Hello (2 syllables)
+        w0 = line0["words"][0]
+        self.assertEqual(w0["text"], "Hello")
+        self.assertEqual(w0["start_ms"], 1000)
+        self.assertEqual(w0["end_ms"], 2000)
+        self.assertEqual(len(w0["syllables"]), 2)
+        self.assertEqual(w0["syllables"][0]["text"], "He")
+        self.assertEqual(w0["syllables"][1]["text"], "llo")
+
+        # Word 2: world (single token)
+        w1 = line0["words"][1]
+        self.assertEqual(w1["text"], "world")
+        self.assertEqual(w1["start_ms"], 2000)
+        self.assertEqual(w1["end_ms"], 3000)
+        self.assertEqual(len(w1["syllables"]), 0)
+
+    def test_parse_line_level_sync_only(self):
+        data = {
+            "lyrics": [
+                {"time": 2000, "duration": 4000, "text": "Line level synced only"}
+            ]
+        }
+        sync_type, lines = parse_lyrics_plus(data)
+        self.assertEqual(sync_type, "line")
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0]["start_ms"], 2000)
+        self.assertEqual(lines[0]["end_ms"], 6000)
+        self.assertEqual(lines[0]["text"], "Line level synced only")
+
+    def test_parse_duet_singers_and_opposite_tag(self):
+        data = {
+            "lyrics": [
+                {"time": 1000, "text": "Lead line", "element": {"singer": "v1"}},
+                {"time": 3000, "text": "Duet answering line", "element": {"singer": "v2"}},
+                {"time": 5000, "text": "Opposite line", "element": ["opposite"]},
+            ]
+        }
+        sync_type, lines = parse_lyrics_plus(data)
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(lines[0]["singer"], 0)  # v1 is primary
+        self.assertEqual(lines[1]["singer"], 1)  # v2 is secondary
+        self.assertEqual(lines[2]["singer"], 1)  # opposite tag forces singer 1
+
+    def test_parse_background_agent_detection(self):
+        data = {
+            "metadata": {
+                "agents": {
+                    "v2": {"type": "background", "alias": "bg_singer"}
+                }
+            },
+            "lyrics": [
+                {"time": 1000, "text": "Lead", "element": {"singer": "v1"}},
+                {"time": 2000, "text": "Harmony", "element": {"singer": "v2"}},
+            ],
+        }
+        sync_type, lines = parse_lyrics_plus(data)
+        self.assertEqual(len(lines), 2)
+        self.assertFalse(lines[0]["is_background"])
+        self.assertTrue(lines[1]["is_background"])
+
+
+class TestLyricsPlusProvider(unittest.TestCase):
+    def setUp(self):
+        self.mock_session = MagicMock()
+        self.provider = LyricsPlusProvider(
+            mirrors=["https://mirror1.test", "https://mirror2.test"],
+            session=self.mock_session,
+        )
+
+    def test_name_and_attribution(self):
+        self.assertEqual(self.provider.name, "LyricsPlus")
+        self.assertIn("LyricsPlus", self.provider.attribution)
+
+    def test_missing_title_returns_none(self):
+        self.assertIsNone(self.provider.get_lyrics({}))
+        self.assertIsNone(self.provider.get_lyrics({"title": "  "}))
+
+    def test_race_selects_first_valid_mirror_and_remembers_last_good(self):
+        def mock_get(url, **kwargs):
+            mock_resp = MagicMock()
+            if "mirror1" in url:
+                mock_resp.status_code = 404
+            elif "mirror2" in url:
+                mock_resp.status_code = 200
+                mock_resp.json.return_value = {
+                    "lyrics": [
+                        {
+                            "time": 5000,
+                            "text": "Winner line",
+                            "syllabus": [{"time": 5000, "duration": 500, "text": "Winner "}],
+                        }
+                    ]
+                }
+            return mock_resp
+
+        self.mock_session.get.side_effect = mock_get
+
+        track = {"title": "Levitating", "artist": "Dua Lipa", "duration_ms": 203000}
+        res = self.provider.get_lyrics(track)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["source"], "LyricsPlus")
+        self.assertEqual(len(res["lines"]), 1)
+        self.assertEqual(res["lines"][0]["text"], "Winner")
+        self.assertEqual(self.provider.last_good_mirror, "https://mirror2.test")
+
+    def test_all_mirrors_failing_returns_none(self):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 500
+        self.mock_session.get.return_value = mock_resp
+
+        track = {"title": "Unknown Song", "artist": "Unknown Artist"}
+        self.assertIsNone(self.provider.get_lyrics(track))
+
+
+class TestParseLyricsfile(unittest.TestCase):
+    def test_parse_empty_or_invalid(self):
+        self.assertIsNone(parse_lyricsfile(""))
+        self.assertIsNone(parse_lyricsfile("invalid yaml without lines"))
+
+    def test_parse_word_sync_lyricsfile(self):
+        yaml_text = (
+            "version: '1.0'\n"
+            "lines:\n"
+            "- text: When you were here before\n"
+            "  start_ms: 19980\n"
+            "  end_ms: 22048\n"
+            "  words:\n"
+            "  - text: 'When '\n"
+            "    start_ms: 19980\n"
+            "  - text: 'you '\n"
+            "    start_ms: 20260\n"
+            "  - text: before\n"
+            "    start_ms: 20800\n"
+        )
+        res = parse_lyricsfile(yaml_text)
+        self.assertIsNotNone(res)
+        sync_type, lines = res
+        self.assertEqual(sync_type, "word")
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0]["text"], "When you were here before")
+        self.assertEqual(lines[0]["start_ms"], 19980)
+        self.assertEqual(lines[0]["end_ms"], 22048)
+        self.assertEqual(len(lines[0]["words"]), 3)
+        self.assertEqual(lines[0]["words"][0]["text"], "When")
+        self.assertEqual(lines[0]["words"][0]["start_ms"], 19980)
+        self.assertEqual(lines[0]["words"][0]["end_ms"], 20260)
+
+
+class TestLrclibProvider(unittest.TestCase):
+    def setUp(self):
+        self.mock_session = MagicMock()
+        self.provider = LrclibProvider(session=self.mock_session)
+
+    def test_name_and_attribution(self):
+        self.assertEqual(self.provider.name, "LRCLIB")
+        self.assertIn("LRCLIB", self.provider.attribution)
+
+    def test_missing_title_returns_none(self):
+        self.assertIsNone(self.provider.get_lyrics({}))
+
+    def test_get_by_signature_with_lyricsfile_word_sync(self):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "id": 12345,
+            "trackName": "Creep",
+            "artistName": "Radiohead",
+            "hasWordSync": True,
+            "lyricsfile": (
+                "lines:\n"
+                "- text: I'm a creep\n"
+                "  start_ms: 1000\n"
+                "  end_ms: 3000\n"
+                "  words:\n"
+                "  - text: 'I''m '\n"
+                "    start_ms: 1000\n"
+                "  - text: creep\n"
+                "    start_ms: 2000\n"
+            ),
+        }
+        self.mock_session.get.return_value = mock_resp
+
+        res = self.provider.get_lyrics({"title": "Creep", "artist": "Radiohead", "duration_ms": 238000})
+        self.assertIsNotNone(res)
+        self.assertEqual(res["source"], "LRCLIB")
+        self.assertEqual(res["sync_type"], "word")
+        self.assertEqual(len(res["lines"]), 1)
+        self.assertEqual(res["lines"][0]["text"], "I'm a creep")
+
+    def test_fallback_to_search_when_get_returns_404(self):
+        get_resp = MagicMock()
+        get_resp.status_code = 404
+
+        search_resp = MagicMock()
+        search_resp.status_code = 200
+        search_resp.json.return_value = [
+            {
+                "id": 999,
+                "trackName": "Starboy",
+                "artistName": "The Weeknd",
+                "duration": 230,
+                "syncedLyrics": "[00:16.39] I'm tryna put you in the worst mood",
+            }
+        ]
+        self.mock_session.get.side_effect = [get_resp, search_resp]
+
+        res = self.provider.get_lyrics({"title": "Starboy", "artist": "The Weeknd", "duration_ms": 230000})
+        self.assertIsNotNone(res)
+        self.assertEqual(res["source"], "LRCLIB")
+        self.assertEqual(res["sync_type"], "line")
+        self.assertEqual(len(res["lines"]), 1)
+
+
+class TestLyricsProviderChain(unittest.TestCase):
+    @patch("providers.lyrics.get_genius_provider")
+    @patch("providers.lyrics.get_better_lyrics_provider")
+    @patch("providers.lyrics.get_lrclib_provider")
+    @patch("providers.lyrics.get_lyrics_plus_provider")
+    @patch("providers.lyrics.get_lrc_red_provider")
+    def test_chain_prefers_lrc_red(
+        self, mock_get_lrcred, mock_get_plus, mock_get_lrclib, mock_get_better, mock_get_genius
+    ):
+        mock_lrcred = MagicMock()
+        mock_lrcred.get_lyrics.return_value = {
+            "source": "lrc.red",
+            "lines": [{"text": "Hello from lrc.red", "start_ms": 0}],
+        }
+        mock_get_lrcred.return_value = mock_lrcred
+
+        mock_plus = MagicMock()
+        mock_get_plus.return_value = mock_plus
+
+        mock_lrclib = MagicMock()
+        mock_get_lrclib.return_value = mock_lrclib
+
+        mock_better = MagicMock()
+        mock_get_better.return_value = mock_better
+
+        mock_genius = MagicMock()
+        mock_get_genius.return_value = mock_genius
+
+        res = providers.lyrics.get_lyrics({"title": "Test", "artist": "Artist"})
+        self.assertEqual(res["source"], "lrc.red")
+        mock_lrcred.get_lyrics.assert_called_once()
+        mock_plus.get_lyrics.assert_not_called()
+        mock_lrclib.get_lyrics.assert_not_called()
+        mock_better.get_lyrics.assert_not_called()
+        mock_genius.get_lyrics.assert_not_called()
+
+    @patch("providers.lyrics.get_genius_provider")
+    @patch("providers.lyrics.get_better_lyrics_provider")
+    @patch("providers.lyrics.get_lrclib_provider")
+    @patch("providers.lyrics.get_lyrics_plus_provider")
+    @patch("providers.lyrics.get_lrc_red_provider")
+    def test_chain_falls_back_to_lyrics_plus_when_lrcred_returns_none(
+        self, mock_get_lrcred, mock_get_plus, mock_get_lrclib, mock_get_better, mock_get_genius
+    ):
+        mock_lrcred = MagicMock()
+        mock_lrcred.get_lyrics.return_value = None
+        mock_get_lrcred.return_value = mock_lrcred
+
+        mock_plus = MagicMock()
+        mock_plus.get_lyrics.return_value = {
+            "source": "LyricsPlus",
+            "lines": [{"text": "Plus line", "start_ms": 50}],
+        }
+        mock_get_plus.return_value = mock_plus
+
+        mock_lrclib = MagicMock()
+        mock_get_lrclib.return_value = mock_lrclib
+
+        mock_better = MagicMock()
+        mock_get_better.return_value = mock_better
+
+        mock_genius = MagicMock()
+        mock_get_genius.return_value = mock_genius
+
+        res = providers.lyrics.get_lyrics({"title": "Test", "artist": "Artist"})
+        self.assertEqual(res["source"], "LyricsPlus")
+        mock_lrcred.get_lyrics.assert_called_once()
+        mock_plus.get_lyrics.assert_called_once()
+        mock_lrclib.get_lyrics.assert_not_called()
+        mock_better.get_lyrics.assert_not_called()
+        mock_genius.get_lyrics.assert_not_called()
+
+    @patch("providers.lyrics.get_genius_provider")
+    @patch("providers.lyrics.get_better_lyrics_provider")
+    @patch("providers.lyrics.get_lrclib_provider")
+    @patch("providers.lyrics.get_lyrics_plus_provider")
+    @patch("providers.lyrics.get_lrc_red_provider")
+    def test_chain_falls_back_to_lrclib_when_lrcred_and_plus_return_none(
+        self, mock_get_lrcred, mock_get_plus, mock_get_lrclib, mock_get_better, mock_get_genius
+    ):
+        mock_lrcred = MagicMock()
+        mock_lrcred.get_lyrics.return_value = None
+        mock_get_lrcred.return_value = mock_lrcred
+
+        mock_plus = MagicMock()
+        mock_plus.get_lyrics.return_value = None
+        mock_get_plus.return_value = mock_plus
+
+        mock_lrclib = MagicMock()
+        mock_lrclib.get_lyrics.return_value = {
+            "source": "LRCLIB",
+            "lines": [{"text": "LRCLIB line", "start_ms": 75}],
+        }
+        mock_get_lrclib.return_value = mock_lrclib
+
+        mock_better = MagicMock()
+        mock_get_better.return_value = mock_better
+
+        mock_genius = MagicMock()
+        mock_get_genius.return_value = mock_genius
+
+        res = providers.lyrics.get_lyrics({"title": "Test", "artist": "Artist"})
+        self.assertEqual(res["source"], "LRCLIB")
+        mock_lrcred.get_lyrics.assert_called_once()
+        mock_plus.get_lyrics.assert_called_once()
+        mock_lrclib.get_lyrics.assert_called_once()
+        mock_better.get_lyrics.assert_not_called()
+        mock_genius.get_lyrics.assert_not_called()
+
+    @patch("providers.lyrics.get_genius_provider")
+    @patch("providers.lyrics.get_better_lyrics_provider")
+    @patch("providers.lyrics.get_lrclib_provider")
+    @patch("providers.lyrics.get_lyrics_plus_provider")
+    @patch("providers.lyrics.get_lrc_red_provider")
+    def test_chain_falls_back_to_better_lyrics_when_first_three_return_none(
+        self, mock_get_lrcred, mock_get_plus, mock_get_lrclib, mock_get_better, mock_get_genius
+    ):
+        mock_lrcred = MagicMock()
+        mock_lrcred.get_lyrics.return_value = None
+        mock_get_lrcred.return_value = mock_lrcred
+
+        mock_plus = MagicMock()
+        mock_plus.get_lyrics.return_value = None
+        mock_get_plus.return_value = mock_plus
+
+        mock_lrclib = MagicMock()
+        mock_lrclib.get_lyrics.return_value = None
+        mock_get_lrclib.return_value = mock_lrclib
+
+        mock_better = MagicMock()
+        mock_better.get_lyrics.return_value = {
+            "source": "BetterLyrics",
+            "lines": [{"text": "Fallback BetterLyrics", "start_ms": 100}],
+        }
+        mock_get_better.return_value = mock_better
+
+        mock_genius = MagicMock()
+        mock_get_genius.return_value = mock_genius
+
+        res = providers.lyrics.get_lyrics({"title": "Test", "artist": "Artist"})
+        self.assertEqual(res["source"], "BetterLyrics")
+        mock_lrcred.get_lyrics.assert_called_once()
+        mock_plus.get_lyrics.assert_called_once()
+        mock_lrclib.get_lyrics.assert_called_once()
+        mock_better.get_lyrics.assert_called_once()
+        mock_genius.get_lyrics.assert_not_called()
+
+    @patch("providers.lyrics.get_genius_provider")
+    @patch("providers.lyrics.get_better_lyrics_provider")
+    @patch("providers.lyrics.get_lrclib_provider")
+    @patch("providers.lyrics.get_lyrics_plus_provider")
+    @patch("providers.lyrics.get_lrc_red_provider")
+    def test_chain_falls_back_to_genius_when_first_four_return_none(
+        self, mock_get_lrcred, mock_get_plus, mock_get_lrclib, mock_get_better, mock_get_genius
+    ):
+        mock_lrcred = MagicMock()
+        mock_lrcred.get_lyrics.return_value = None
+        mock_get_lrcred.return_value = mock_lrcred
+
+        mock_plus = MagicMock()
+        mock_plus.get_lyrics.return_value = None
+        mock_get_plus.return_value = mock_plus
+
+        mock_lrclib = MagicMock()
+        mock_lrclib.get_lyrics.return_value = None
+        mock_get_lrclib.return_value = mock_lrclib
+
+        mock_better = MagicMock()
+        mock_better.get_lyrics.return_value = None
+        mock_get_better.return_value = mock_better
+
+        mock_genius = MagicMock()
+        mock_genius.get_lyrics.return_value = {
+            "source": "Genius",
+            "sync_type": "none",
+            "lines": [{"text": "Genius extreme fallback line", "start_ms": None}],
+        }
+        mock_get_genius.return_value = mock_genius
+
+        res = providers.lyrics.get_lyrics({"title": "Test", "artist": "Artist"})
+        self.assertEqual(res["source"], "Genius")
+        mock_lrcred.get_lyrics.assert_called_once()
+        mock_plus.get_lyrics.assert_called_once()
+        mock_lrclib.get_lyrics.assert_called_once()
+        mock_better.get_lyrics.assert_called_once()
+        mock_genius.get_lyrics.assert_called_once()
+
+    @patch("providers.lyrics.get_genius_provider")
+    @patch("providers.lyrics.get_better_lyrics_provider")
+    @patch("providers.lyrics.get_lrclib_provider")
+    @patch("providers.lyrics.get_lyrics_plus_provider")
+    @patch("providers.lyrics.get_lrc_red_provider")
+    def test_chain_falls_back_when_providers_raise_exceptions(
+        self, mock_get_lrcred, mock_get_plus, mock_get_lrclib, mock_get_better, mock_get_genius
+    ):
+        mock_lrcred = MagicMock()
+        mock_lrcred.get_lyrics.side_effect = RuntimeError("Crash in lrc.red")
+        mock_get_lrcred.return_value = mock_lrcred
+
+        mock_plus = MagicMock()
+        mock_plus.get_lyrics.side_effect = RuntimeError("Crash in LyricsPlus")
+        mock_get_plus.return_value = mock_plus
+
+        mock_lrclib = MagicMock()
+        mock_lrclib.get_lyrics.side_effect = RuntimeError("Crash in LRCLIB")
+        mock_get_lrclib.return_value = mock_lrclib
+
+        mock_better = MagicMock()
+        mock_better.get_lyrics.side_effect = RuntimeError("Crash in BetterLyrics")
+        mock_get_better.return_value = mock_better
+
+        mock_genius = MagicMock()
+        mock_genius.get_lyrics.return_value = {
+            "source": "Genius",
+            "lines": [{"text": "Safe Genius fallback", "start_ms": None}],
+        }
+        mock_get_genius.return_value = mock_genius
+
+        res = providers.lyrics.get_lyrics({"title": "Test", "artist": "Artist"})
+        self.assertEqual(res["source"], "Genius")
+        mock_lrcred.get_lyrics.assert_called_once()
+        mock_plus.get_lyrics.assert_called_once()
+        mock_lrclib.get_lyrics.assert_called_once()
+        mock_better.get_lyrics.assert_called_once()
+        mock_genius.get_lyrics.assert_called_once()
+
+    @patch("providers.lyrics.get_genius_provider")
+    @patch("providers.lyrics.get_better_lyrics_provider")
+    @patch("providers.lyrics.get_lrclib_provider")
+    @patch("providers.lyrics.get_lyrics_plus_provider")
+    @patch("providers.lyrics.get_lrc_red_provider")
+    def test_chain_returns_none_when_all_five_providers_fail(
+        self, mock_get_lrcred, mock_get_plus, mock_get_lrclib, mock_get_better, mock_get_genius
+    ):
+        mock_lrcred = MagicMock()
+        mock_lrcred.get_lyrics.return_value = None
+        mock_get_lrcred.return_value = mock_lrcred
+
+        mock_plus = MagicMock()
+        mock_plus.get_lyrics.return_value = None
+        mock_get_plus.return_value = mock_plus
+
+        mock_lrclib = MagicMock()
+        mock_lrclib.get_lyrics.return_value = None
+        mock_get_lrclib.return_value = mock_lrclib
+
+        mock_better = MagicMock()
+        mock_better.get_lyrics.return_value = None
+        mock_get_better.return_value = mock_better
+
+        mock_genius = MagicMock()
+        mock_genius.get_lyrics.return_value = None
+        mock_get_genius.return_value = mock_genius
+
+        res = providers.lyrics.get_lyrics({"title": "Test", "artist": "Artist"})
+        self.assertIsNone(res)
+        mock_lrcred.get_lyrics.assert_called_once()
+        mock_plus.get_lyrics.assert_called_once()
+        mock_lrclib.get_lyrics.assert_called_once()
+        mock_better.get_lyrics.assert_called_once()
+        mock_genius.get_lyrics.assert_called_once()
+
+
+class TestCleanTitleForSearch(unittest.TestCase):
+    def test_clean_video_and_audio_tags(self):
+        self.assertEqual(
+            clean_title_for_search("Levitating (Official Music Video)"),
+            "Levitating",
+        )
+        self.assertEqual(
+            clean_title_for_search("Starboy [Official Video]"),
+            "Starboy",
+        )
+        self.assertEqual(
+            clean_title_for_search("Song Title (Lyric Video)"),
+            "Song Title",
+        )
+        self.assertEqual(
+            clean_title_for_search("Another Song - Official Audio"),
+            "Another Song",
+        )
+        self.assertEqual(
+            clean_title_for_search("Track (Remastered)"),
+            "Track",
+        )
+
+    def test_clean_title_unchanged(self):
+        self.assertEqual(clean_title_for_search("Bohemian Rhapsody"), "Bohemian Rhapsody")
+        self.assertEqual(clean_title_for_search(""), "")
+
+
+class TestParseQrc(unittest.TestCase):
+    def test_parse_empty_or_whitespace(self):
+        self.assertEqual(parse_qrc(""), ("none", []))
+        self.assertEqual(parse_qrc("   "), ("none", []))
+
+    def test_parse_standard_qrc_words(self):
+        qrc = (
+            "[1000,2000]Hello (1000,500)world (1500,500)\n"
+            "[3000,2000]How (3000,600)are (3600,400)you (4000,1000)"
+        )
+        sync_type, lines = parse_qrc(qrc)
+        self.assertEqual(sync_type, "word")
+        self.assertEqual(len(lines), 2)
+
+        line0 = lines[0]
+        self.assertEqual(line0["start_ms"], 1000)
+        self.assertEqual(line0["end_ms"], 3000)
+        self.assertEqual(line0["text"], "Hello world")
+        self.assertEqual(len(line0["words"]), 2)
+        self.assertEqual(line0["words"][0]["text"], "Hello")
+        self.assertEqual(line0["words"][0]["start_ms"], 1000)
+        self.assertEqual(line0["words"][0]["end_ms"], 1500)
+        self.assertEqual(line0["words"][1]["text"], "world")
+        self.assertEqual(line0["words"][1]["start_ms"], 1500)
+        self.assertEqual(line0["words"][1]["end_ms"], 2000)
+
+    def test_parse_qrc_xml_wrapped(self):
+        xml_qrc = (
+            '<?xml version="1.0" encoding="utf-8"?>\n'
+            '<QrcInfos>\n'
+            '<Lyric_1 LyricType="1" LyricContent="[ti:Test]\n'
+            '[offset:0]\n'
+            '[16392,2152]I\'m (16392,264)tryna (16656,208)put (16864,178)you (17042,181)"/>\n'
+            '</QrcInfos>'
+        )
+        sync_type, lines = parse_qrc(xml_qrc)
+        self.assertEqual(sync_type, "word")
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0]["text"], "I'm tryna put you")
+        self.assertEqual(lines[0]["start_ms"], 16392)
+        self.assertEqual(lines[0]["end_ms"], 16392 + 2152)
+
+    def test_parse_qrc_background_vocals(self):
+        qrc = "[5000,1500]((5000,750)yeah (5750,750))"
+        sync_type, lines = parse_qrc(qrc)
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0]["is_background"])
+
+
+class TestBetterLyricsProvider(unittest.TestCase):
+    def setUp(self):
+        self.mock_session = MagicMock()
+        self.provider = BetterLyricsProvider(session=self.mock_session)
+
+    def test_name_and_attribution(self):
+        self.assertEqual(self.provider.name, "BetterLyrics")
+        self.assertIn("BetterLyrics", self.provider.attribution)
+
+    def test_missing_title_returns_none(self):
+        self.assertIsNone(self.provider.get_lyrics({}))
+        self.assertIsNone(self.provider.get_lyrics({"title": ""}))
+
+    def test_primary_endpoint_success_ttml(self):
+        ttml_content = (
+            '<tt xmlns="http://www.w3.org/ns/ttml" xmlns:itunes="http://music.apple.com/lyric-ttml-internal">'
+            '<body><div><p begin="00:09.50" end="00:11.70">'
+            '<span>If </span><span>you </span><span>wanna</span>'
+            '</p></div></body></tt>'
+        )
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"ttml": ttml_content}
+        self.mock_session.get.return_value = mock_resp
+
+        track = {
+            "title": "Levitating",
+            "artist": "Dua Lipa",
+            "duration_ms": 203000,
+            "album": "Future Nostalgia",
+        }
+        res = self.provider.get_lyrics(track)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["source"], "BetterLyrics")
+        self.assertEqual(res["title"], "Levitating")
+        self.assertEqual(res["artist"], "Dua Lipa")
+        self.assertEqual(len(res["lines"]), 1)
+        self.assertEqual(res["lines"][0]["text"], "If you wanna")
+
+    def test_fallback_to_portato_when_primary_fails(self):
+        # First call (BASE) returns 401
+        base_resp = MagicMock()
+        base_resp.status_code = 401
+        base_resp.json.return_value = {"error": "API key required"}
+
+        # Second call (PORTATO) returns 200 with QRC
+        portato_resp = MagicMock()
+        portato_resp.status_code = 200
+        portato_resp.json.return_value = {
+            "lyrics": "[1000,2000]Starboy (1000,1000)rocks (2000,1000)",
+            "provider": "qq",
+        }
+
+        self.mock_session.get.side_effect = [base_resp, portato_resp]
+
+        track = {
+            "title": "Starboy",
+            "artist": "The Weeknd",
+            "duration_ms": 230000,
+        }
+        res = self.provider.get_lyrics(track)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["source"], "BetterLyrics (QQ)")
+        self.assertEqual(len(res["lines"]), 1)
+        self.assertEqual(res["lines"][0]["text"], "Starboy rocks")
+
+    def test_both_endpoints_401_returns_none(self):
+        base_resp = MagicMock()
+        base_resp.status_code = 401
+        portato_resp = MagicMock()
+        portato_resp.status_code = 401
+
+        self.mock_session.get.side_effect = [base_resp, portato_resp]
+
+        track = {"title": "Unknown Song", "artist": "Unknown Artist", "duration_ms": 180000}
+        self.assertIsNone(self.provider.get_lyrics(track))
+
+    def test_request_exception_handled_gracefully(self):
+        import requests
+        self.mock_session.get.side_effect = requests.RequestException("Network failed")
+        track = {"title": "Any Song", "artist": "Any Artist"}
+        self.assertIsNone(self.provider.get_lyrics(track))
+
+
+class TestGeniusHelpers(unittest.TestCase):
+    def test_clean_query(self):
+        self.assertEqual(
+            clean_query("Dua Lipa - Levitating (Official Music Video) [4K]"),
+            "Dua Lipa - Levitating",
+        )
+        self.assertEqual(
+            clean_query("Song prod. by Metro Boomin"),
+            "Song",
+        )
+        self.assertEqual(
+            clean_query("★ Starboy ~"),
+            "Starboy",
+        )
+        self.assertEqual(
+            clean_query("Track Name | Album Title"),
+            "Track Name",
+        )
+
+    def test_strip_artifacts(self):
+        raw = "Lyrics\u00a0line\u200bwith\ufeffspaces\u2005here\n12You might also like\nMore lyrics\n123Embed"
+        cleaned = strip_artifacts(raw)
+        self.assertNotIn("You might also like", cleaned)
+        self.assertNotIn("Embed", cleaned)
+        self.assertNotIn("\u00a0", cleaned)
+        self.assertNotIn("\u200b", cleaned)
+        self.assertNotIn("\ufeff", cleaned)
+        self.assertIn("Lyrics line with spaces here", cleaned)
+        self.assertIn("More lyrics", cleaned)
+
+    def test_is_section_header(self):
+        self.assertTrue(is_section_header("[Verse 1]"))
+        self.assertTrue(is_section_header("[Chorus]"))
+        self.assertTrue(is_section_header("[Bridge: Dua Lipa]"))
+        self.assertTrue(is_section_header("[Intro]"))
+        self.assertFalse(is_section_header("I had a premonition"))
+        self.assertFalse(is_section_header("[]"))
+        self.assertFalse(is_section_header("[ ]"))
+
+    def test_text_to_lyric_lines(self):
+        text = "\n\n[Verse 1]\nLine 1\n(Backing vocal)\n\n\n[Chorus]\nChorus line\n\n"
+        lines = text_to_lyric_lines(text)
+        self.assertEqual(len(lines), 6)
+        # Leading and trailing empty lines are dropped
+        self.assertEqual(lines[0]["text"], "[Verse 1]")
+        self.assertFalse(lines[0]["is_background"])
+        self.assertIsNone(lines[0]["start_ms"])
+        self.assertEqual(lines[1]["text"], "Line 1")
+        self.assertFalse(lines[1]["is_background"])
+        self.assertEqual(lines[2]["text"], "(Backing vocal)")
+        self.assertTrue(lines[2]["is_background"])
+        # Gap between stanzas
+        self.assertEqual(lines[3]["text"], "")
+        self.assertEqual(lines[4]["text"], "[Chorus]")
+        self.assertEqual(lines[5]["text"], "Chorus line")
+
+    def test_parse_genius_html_modern_container(self):
+        html_doc = """
+        <div data-lyrics-container="true">
+            <div class="LyricsHeader__Container">Header to discard</div>
+            [Verse 1]<br>
+            If you wanna run away with me<br>
+            <div data-exclude-from-selection="true">14 Contributors</div>
+            I know a galaxy<br>
+            12You might also like
+        </div>
+        <div data-lyrics-container="true">
+            [Chorus]<br>
+            I had a premonition<br>
+            123Embed
+        </div>
+        """
+        lines = parse_genius_html(html_doc)
+        self.assertIsNotNone(lines)
+        texts = [l["text"] for l in lines]
+        self.assertIn("[Verse 1]", texts)
+        self.assertIn("If you wanna run away with me", texts)
+        self.assertIn("I know a galaxy", texts)
+        self.assertIn("[Chorus]", texts)
+        self.assertIn("I had a premonition", texts)
+        self.assertNotIn("Header to discard", "".join(texts))
+        self.assertNotIn("14 Contributors", "".join(texts))
+        self.assertNotIn("You might also like", "".join(texts))
+        self.assertNotIn("Embed", "".join(texts))
+
+    def test_parse_genius_html_old_container(self):
+        html_doc = """
+        <div class="lyrics">
+            [Verse 1]<br>
+            Old container line 1<br>
+            Old container line 2
+        </div>
+        """
+        lines = parse_genius_html(html_doc)
+        self.assertIsNotNone(lines)
+        texts = [l["text"] for l in lines]
+        self.assertIn("[Verse 1]", texts)
+        self.assertIn("Old container line 1", texts)
+        self.assertIn("Old container line 2", texts)
+
+    def test_best_match_penalizes_translations_and_tracklists(self):
+        candidates = [
+            {
+                "title": "Levitating (Türkçe Çeviri)",
+                "artist_names": "Dua Lipa",
+                "path": "/Dua-lipa-levitating-turkce-ceviri-lyrics",
+                "url": "https://genius.com/translation",
+            },
+            {
+                "title": "Future Nostalgia Tracklist",
+                "artist_names": "Dua Lipa",
+                "path": "/Dua-lipa-future-nostalgia-tracklist-lyrics",
+                "url": "https://genius.com/tracklist",
+            },
+            {
+                "title": "Levitating",
+                "artist_names": "Dua Lipa",
+                "path": "/Dua-lipa-levitating-lyrics",
+                "url": "https://genius.com/canonical",
+            },
+        ]
+        match = best_match(candidates, "Levitating", "Dua Lipa")
+        self.assertIsNotNone(match)
+        self.assertEqual(match["url"], "https://genius.com/canonical")
+
+
+class TestGeniusProvider(unittest.TestCase):
+    def setUp(self):
+        self.mock_session = MagicMock()
+        self.provider = GeniusProvider(session=self.mock_session)
+
+    def test_provider_metadata(self):
+        self.assertEqual(self.provider.name, "Genius")
+        self.assertEqual(self.provider.attribution, DEFAULT_GENIUS_ATTRIBUTION)
+        headers = self.provider._headers()
+        self.assertEqual(headers["User-Agent"], DEFAULT_GENIUS_USER_AGENT)
+
+    def test_get_lyrics_success(self):
+        # 1. Multi-search response
+        search_resp = MagicMock()
+        search_resp.status_code = 200
+        search_resp.json.return_value = {
+            "response": {
+                "sections": [
+                    {
+                        "type": "song",
+                        "hits": [
+                            {
+                                "result": {
+                                    "title": "Levitating",
+                                    "artist_names": "Dua Lipa",
+                                    "path": "/Dua-lipa-levitating-lyrics",
+                                    "url": "https://genius.com/Dua-lipa-levitating-lyrics",
+                                }
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+
+        # 2. Page HTML response
+        page_resp = MagicMock()
+        page_resp.status_code = 200
+        page_resp.text = """
+        <div data-lyrics-container="true">
+            [Verse 1]<br>
+            If you wanna run away with me, I know a galaxy<br>
+            And I can take you for a ride<br>
+            123Embed
+        </div>
+        """
+
+        self.mock_session.get.side_effect = [search_resp, page_resp]
+
+        track = {
+            "title": "Levitating (Official Video)",
+            "artist": "Dua Lipa",
+            "album": "Future Nostalgia",
+            "duration_ms": 203000,
+        }
+        res = self.provider.get_lyrics(track)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["source"], "Genius")
+        self.assertEqual(res["sync_type"], "none")
+        self.assertEqual(res["title"], "Levitating")
+        self.assertEqual(res["artist"], "Dua Lipa")
+        self.assertEqual(res["url"], "https://genius.com/Dua-lipa-levitating-lyrics")
+        self.assertTrue(len(res["lines"]) >= 3)
+        self.assertEqual(res["lines"][0]["text"], "[Verse 1]")
+        self.assertIsNone(res["lines"][0]["start_ms"])
+        self.assertFalse(res["lines"][0]["is_background"])
+
+    def test_get_lyrics_no_search_hits(self):
+        search_resp = MagicMock()
+        search_resp.status_code = 200
+        search_resp.json.return_value = {
+            "response": {
+                "sections": [{"type": "song", "hits": []}]
+            }
+        }
+        self.mock_session.get.return_value = search_resp
+        track = {"title": "Unknown Song Title", "artist": "Unknown Artist"}
+        self.assertIsNone(self.provider.get_lyrics(track))
+
+    def test_get_lyrics_network_error(self):
+        import requests
+        self.mock_session.get.side_effect = requests.RequestException("Timeout connecting to Genius")
+        track = {"title": "Levitating", "artist": "Dua Lipa"}
+        self.assertIsNone(self.provider.get_lyrics(track))
 
 
 if __name__ == "__main__":

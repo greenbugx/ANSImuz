@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import math
 import re
 import unicodedata
@@ -573,6 +574,469 @@ def parse_lrc(lrc_text: str) -> tuple[str, list[dict[str, Any]]]:
             "singer": 0,
         })
     return "none", parsed_plain
+
+
+def clean_title_for_search(title: str) -> str:
+    """
+    Cleans metadata, audio/video tags, and version suffixes from a title string
+    to improve lyrics search hit rates.
+    """
+    if not title:
+        return ""
+    # Strip parenthesized or bracketed video/metadata tags
+    cleaned = re.sub(
+        r"\s*[\(\[](?:(?:official\s*)?(?:music\s*video|lyric\s*video|video|audio|visualizer)|lyrics?|hd|uhd|4k|remastered|explicit)[\)\]]",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
+    # Strip trailing dash markers like " - Official Video"
+    cleaned = re.sub(
+        r"\s*-\s*(?:(?:official\s*)?(?:music\s*video|lyric\s*video|video|audio|visualizer)|lyrics?|hd|uhd|4k|remastered)\s*$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    return cleaned.strip()
+
+
+def parse_qrc(qrc_text: str) -> tuple[str, list[dict[str, Any]]]:
+    """
+    Parses QQ Music QRC karaoke lyrics text (or XML with LyricContent attribute).
+    Returns (sync_type, lines) where sync_type is 'syllable', 'word', 'line', or 'none'.
+    """
+    if not qrc_text or not qrc_text.strip():
+        return "none", []
+
+    # If wrapped in XML e.g. <Lyric_1 ... LyricContent="..."/>, extract content
+    content_match = re.search(r'LyricContent="([^"]*)"', qrc_text)
+    if not content_match:
+        # Check multiline attribute match
+        content_match = re.search(r'LyricContent="([\s\S]*?)"(?:\s*/>|\s*>)', qrc_text)
+    raw_lyrics = content_match.group(1) if content_match else qrc_text
+    raw_lyrics = html.unescape(raw_lyrics)
+
+    line_pattern = re.compile(r"^\s*\[(\d+),(\d+)\](.*)$")
+    word_pattern = re.compile(r"([^()]+)\((\d+),(\d+)\)")
+
+    lines: list[dict[str, Any]] = []
+    has_word_sync = False
+    has_syllable_sync = False
+
+    for raw_line in raw_lyrics.splitlines():
+        line_match = line_pattern.match(raw_line)
+        if not line_match:
+            continue
+        start_ms = int(line_match.group(1))
+        dur_ms = int(line_match.group(2))
+        line_end_ms = start_ms + dur_ms if dur_ms > 0 else None
+        body = line_match.group(3)
+
+        matches = word_pattern.findall(body)
+        tokens: list[dict[str, Any]] = []
+        for txt, s_str, d_str in matches:
+            w_s = int(s_str)
+            w_d = int(d_str)
+            tokens.append({"raw": txt, "start_ms": w_s, "end_ms": w_s + w_d})
+
+        words: list[dict[str, Any]] = []
+        curr_syls: list[dict[str, Any]] = []
+        for idx, tok in enumerate(tokens):
+            raw = tok["raw"]
+            if not raw.strip():
+                if curr_syls:
+                    combined = "".join(s["raw"] for s in curr_syls).strip()
+                    if combined:
+                        w_start = curr_syls[0]["start_ms"]
+                        w_end = curr_syls[-1]["end_ms"]
+                        syls = []
+                        if len(curr_syls) > 1:
+                            has_syllable_sync = True
+                            syls = [
+                                {
+                                    "text": s["raw"].strip(),
+                                    "start_ms": s["start_ms"],
+                                    "end_ms": s["end_ms"],
+                                }
+                                for s in curr_syls
+                                if s["raw"].strip()
+                            ]
+                        words.append({
+                            "text": combined,
+                            "start_ms": w_start,
+                            "end_ms": w_end,
+                            "syllables": syls,
+                        })
+                    curr_syls = []
+                continue
+
+            curr_syls.append(tok)
+            if raw.endswith(" ") or raw.endswith("\t") or idx == len(tokens) - 1:
+                combined = "".join(s["raw"] for s in curr_syls).strip()
+                if combined:
+                    w_start = curr_syls[0]["start_ms"]
+                    w_end = curr_syls[-1]["end_ms"]
+                    syls = []
+                    if len(curr_syls) > 1:
+                        has_syllable_sync = True
+                        syls = [
+                            {
+                                "text": s["raw"].strip(),
+                                "start_ms": s["start_ms"],
+                                "end_ms": s["end_ms"],
+                            }
+                            for s in curr_syls
+                            if s["raw"].strip()
+                        ]
+                    words.append({
+                        "text": combined,
+                        "start_ms": w_start,
+                        "end_ms": w_end,
+                        "syllables": syls,
+                    })
+                curr_syls = []
+
+        if words:
+            has_word_sync = True
+            full_text = " ".join(w["text"] for w in words if w.get("text"))
+        else:
+            clean = re.sub(r"\(\d+,\d+\)", "", body).strip()
+            full_text = re.sub(r"\s+", " ", clean)
+
+        # Check background vocals
+        b_trim = body.strip()
+        t_trim = full_text.strip()
+        is_bg = (
+            (t_trim.startswith("(") and t_trim.endswith(")"))
+            or (t_trim.startswith("（") and t_trim.endswith("）"))
+            or (b_trim.startswith("(") and b_trim.endswith(")"))
+            or (b_trim.startswith("（") and b_trim.endswith("）"))
+        )
+        if is_bg and not (t_trim.startswith("(") and t_trim.endswith(")")) and not (t_trim.startswith("（") and t_trim.endswith("）")):
+            full_text = f"({full_text})"
+
+        lines.append({
+            "start_ms": start_ms,
+            "end_ms": line_end_ms,
+            "text": full_text,
+            "words": words,
+            "is_background": is_bg,
+            "singer": 0,
+        })
+
+    if not lines:
+        return "none", []
+
+    lines.sort(key=lambda item: item["start_ms"] if item["start_ms"] is not None else 0)
+    for i in range(len(lines) - 1):
+        if lines[i]["end_ms"] is None and lines[i + 1]["start_ms"] is not None:
+            lines[i]["end_ms"] = lines[i + 1]["start_ms"]
+
+    if has_syllable_sync:
+        sync_type = "syllable"
+    elif has_word_sync:
+        sync_type = "word"
+    else:
+        sync_type = "line"
+
+    return sync_type, lines
+
+
+def parse_lyrics_plus(response: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+    """
+    Parses a LyricsPlus v2 response dictionary into normalized lines and sync type.
+    Handles syllable-level timings, word groupings, background vocals, and duet agents.
+    """
+    if not isinstance(response, dict):
+        return "none", []
+
+    lyrics_list = response.get("lyrics")
+    if not isinstance(lyrics_list, list) or not lyrics_list:
+        return "none", []
+
+    metadata = response.get("metadata") or {}
+    agents = metadata.get("agents") if isinstance(metadata, dict) else {}
+    bg_singers: set[str] = set()
+    if isinstance(agents, dict):
+        for agent_id, agent_info in agents.items():
+            if isinstance(agent_info, dict):
+                a_type = str(agent_info.get("type") or "").lower()
+                if a_type in ("background", "bg"):
+                    bg_singers.add(str(agent_id))
+                    alias = agent_info.get("alias")
+                    if alias:
+                        bg_singers.add(str(alias))
+
+    lines: list[dict[str, Any]] = []
+    has_syllable_sync = False
+    has_word_sync = False
+
+    for raw_line in lyrics_list:
+        if not isinstance(raw_line, dict):
+            continue
+        time_ms = raw_line.get("time")
+        dur_ms = raw_line.get("duration")
+        if time_ms is None:
+            continue
+
+        syllables = raw_line.get("syllabus")
+        words: list[dict[str, Any]] = []
+        curr_syls: list[dict[str, Any]] = []
+
+        if isinstance(syllables, list) and syllables:
+            for idx, syl in enumerate(syllables):
+                if not isinstance(syl, dict):
+                    continue
+                raw_text = syl.get("text") or ""
+                s_time = syl.get("time")
+                s_dur = syl.get("duration") or 0
+                if s_time is None:
+                    continue
+                s_end = s_time + s_dur
+                curr_syls.append({
+                    "text": raw_text,
+                    "start_ms": s_time,
+                    "end_ms": s_end,
+                })
+                is_last = (idx == len(syllables) - 1)
+                if raw_text.endswith(" ") or raw_text.endswith("\t") or is_last:
+                    combined = "".join(s["text"] for s in curr_syls).strip()
+                    if combined:
+                        w_start = curr_syls[0]["start_ms"]
+                        w_end = curr_syls[-1]["end_ms"]
+                        syl_list: list[dict[str, Any]] = []
+                        if len(curr_syls) > 1:
+                            has_syllable_sync = True
+                            syl_list = [
+                                {
+                                    "text": s["text"].strip(),
+                                    "start_ms": s["start_ms"],
+                                    "end_ms": s["end_ms"],
+                                }
+                                for s in curr_syls
+                                if s["text"].strip()
+                            ]
+                        words.append({
+                            "text": combined,
+                            "start_ms": w_start,
+                            "end_ms": w_end,
+                            "syllables": syl_list,
+                        })
+                    curr_syls = []
+
+        if words:
+            has_word_sync = True
+            full_text = " ".join(w["text"] for w in words if w.get("text"))
+            line_start = min(time_ms, words[0]["start_ms"]) if words[0]["start_ms"] is not None else time_ms
+            line_end = words[-1]["end_ms"]
+        else:
+            raw_line_text = str(raw_line.get("text") or "").strip()
+            full_text = raw_line_text
+            line_start = time_ms
+            line_end = time_ms + dur_ms if dur_ms and dur_ms > 0 else None
+            words = [
+                {"text": tok, "start_ms": None, "end_ms": None, "syllables": []}
+                for tok in full_text.split()
+            ]
+
+        elem = raw_line.get("element")
+        singer_name: str | None = None
+        says_opposite = False
+        is_bg = False
+
+        if isinstance(elem, dict):
+            s_val = elem.get("singer")
+            if s_val is not None:
+                singer_name = str(s_val).strip()
+            v_type = elem.get("vocal_type") or elem.get("type") or elem.get("role")
+            if isinstance(v_type, str) and v_type.lower() in ("background", "bg"):
+                is_bg = True
+        elif isinstance(elem, list):
+            for tag in elem:
+                if isinstance(tag, str):
+                    t_lower = tag.lower()
+                    if t_lower in ("opposite", "right"):
+                        says_opposite = True
+                    elif t_lower in ("background", "bg"):
+                        is_bg = True
+
+        if singer_name and singer_name in bg_singers:
+            is_bg = True
+
+        t_trim = full_text.strip()
+        if (t_trim.startswith("(") and t_trim.endswith(")")) or (
+            t_trim.startswith("（") and t_trim.endswith("）")
+        ):
+            is_bg = True
+        elif is_bg:
+            full_text = f"({full_text})"
+
+        lines.append({
+            "start_ms": line_start,
+            "end_ms": line_end,
+            "text": full_text,
+            "words": words,
+            "is_background": is_bg,
+            "_singer_name": singer_name,
+            "_says_opposite": says_opposite,
+        })
+
+    if not lines:
+        return "none", []
+
+    distinct_singers: list[str] = []
+    for l in lines:
+        s_name = l.get("_singer_name")
+        if s_name and s_name not in distinct_singers:
+            distinct_singers.append(s_name)
+
+    has_multi = len(distinct_singers) > 1
+    for l in lines:
+        s_name = l.pop("_singer_name", None)
+        says_opp = l.pop("_says_opposite", False)
+        if says_opp:
+            l["singer"] = 1
+        elif has_multi and s_name in distinct_singers:
+            l["singer"] = distinct_singers.index(s_name)
+        else:
+            l["singer"] = 0
+
+    lines.sort(key=lambda item: item["start_ms"] if item["start_ms"] is not None else 0)
+    for i in range(len(lines) - 1):
+        if lines[i]["end_ms"] is None and lines[i + 1]["start_ms"] is not None:
+            lines[i]["end_ms"] = lines[i + 1]["start_ms"]
+
+    if has_syllable_sync:
+        sync_type = "syllable"
+    elif has_word_sync:
+        sync_type = "word"
+    elif lines:
+        sync_type = "line"
+    else:
+        sync_type = "none"
+
+    return sync_type, lines
+
+
+
+def parse_lyricsfile(yaml_text: str) -> tuple[str, list[dict[str, Any]]] | None:
+    """
+    Parses an LRCLIB Lyricsfile YAML document into lines with word-level timings.
+    Returns (sync_type, lines) or None if parsing fails or no lines are found.
+    """
+    if not yaml_text or "lines:\n" not in yaml_text:
+        return None
+
+    lines_part = yaml_text.split("lines:\n", 1)[-1]
+    raw_lines = lines_part.splitlines()
+
+    lines: list[dict[str, Any]] = []
+    curr_line: dict[str, Any] | None = None
+    curr_words: list[dict[str, Any]] = []
+    curr_word: dict[str, Any] | None = None
+    in_words = False
+    has_word_sync = False
+
+    def finish_word() -> None:
+        nonlocal curr_word
+        if curr_word and curr_word.get("text"):
+            curr_words.append(curr_word)
+        curr_word = None
+
+    def finish_line() -> None:
+        nonlocal curr_line, curr_words, in_words, has_word_sync
+        finish_word()
+        if curr_line is not None:
+            if curr_words:
+                has_word_sync = True
+                for i in range(len(curr_words) - 1):
+                    if curr_words[i].get("end_ms") is None and curr_words[i + 1].get("start_ms") is not None:
+                        curr_words[i]["end_ms"] = curr_words[i + 1]["start_ms"]
+                if curr_words[-1].get("end_ms") is None:
+                    curr_words[-1]["end_ms"] = curr_line.get("end_ms")
+                curr_line["words"] = curr_words
+            else:
+                curr_line["words"] = [
+                    {"text": tok, "start_ms": None, "end_ms": None, "syllables": []}
+                    for tok in curr_line.get("text", "").split()
+                ]
+            t_trim = curr_line.get("text", "").strip()
+            if (t_trim.startswith("(") and t_trim.endswith(")")) or (
+                t_trim.startswith("（") and t_trim.endswith("）")
+            ):
+                curr_line["is_background"] = True
+            lines.append(curr_line)
+        curr_line = None
+        curr_words = []
+        in_words = False
+
+    for raw in raw_lines:
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+
+        if raw.startswith("- text:") or (raw.startswith("- ") and "text:" in raw):
+            finish_line()
+            text_val = raw.split("text:", 1)[1].strip()
+            if (text_val.startswith("'") and text_val.endswith("'")) or (text_val.startswith('"') and text_val.endswith('"')):
+                text_val = text_val[1:-1].replace("''", "'")
+            curr_line = {
+                "text": text_val,
+                "start_ms": None,
+                "end_ms": None,
+                "words": [],
+                "is_background": False,
+                "singer": 0,
+            }
+            in_words = False
+        elif curr_line is not None:
+            if raw.strip().startswith("words:"):
+                in_words = True
+            elif in_words and raw.strip().startswith("- text:"):
+                finish_word()
+                w_text = raw.split("text:", 1)[1].strip()
+                if (w_text.startswith("'") and w_text.endswith("'")) or (w_text.startswith('"') and w_text.endswith('"')):
+                    w_text = w_text[1:-1].replace("''", "'")
+                curr_word = {
+                    "text": w_text.strip(),
+                    "start_ms": None,
+                    "end_ms": None,
+                    "syllables": [],
+                }
+            elif in_words and curr_word is not None and "start_ms:" in raw:
+                try:
+                    curr_word["start_ms"] = int(raw.split("start_ms:", 1)[1].strip())
+                except ValueError:
+                    pass
+            elif in_words and curr_word is not None and "end_ms:" in raw:
+                try:
+                    curr_word["end_ms"] = int(raw.split("end_ms:", 1)[1].strip())
+                except ValueError:
+                    pass
+            elif not in_words and "start_ms:" in raw:
+                try:
+                    curr_line["start_ms"] = int(raw.split("start_ms:", 1)[1].strip())
+                except ValueError:
+                    pass
+            elif not in_words and "end_ms:" in raw:
+                try:
+                    curr_line["end_ms"] = int(raw.split("end_ms:", 1)[1].strip())
+                except ValueError:
+                    pass
+
+    finish_line()
+    if not lines:
+        return None
+
+    lines.sort(key=lambda item: item["start_ms"] if item["start_ms"] is not None else 0)
+    for i in range(len(lines) - 1):
+        if lines[i]["end_ms"] is None and lines[i + 1]["start_ms"] is not None:
+            lines[i]["end_ms"] = lines[i + 1]["start_ms"]
+
+    sync_type = "word" if has_word_sync else ("line" if any(l["start_ms"] is not None for l in lines) else "none")
+    return sync_type, lines
+
+
 
 
 class LyricsProvider(ABC):

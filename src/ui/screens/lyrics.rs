@@ -122,7 +122,7 @@ pub fn render_lyrics(
             frame,
             inner,
             "LOADING LYRICS...",
-            "Searching for synchronized lyrics on lrc.red",
+            "Searching for synchronized lyrics...",
             theme,
         );
         return;
