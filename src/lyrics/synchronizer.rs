@@ -269,17 +269,27 @@ pub fn compute_sync_point(
     let all_active = find_all_active_lines(position_ms, &lyrics.lines, duration_ms);
 
     let (line_idx_opt, in_gap, line_progress, active_line_indices) = if !all_active.is_empty() {
-        // Prefer the active lead vocal (non-background) as primary scroll anchor
+        // Prefer the active lead vocal (non-background, primary singer) as primary scroll anchor
         let primary_idx = all_active
             .iter()
             .copied()
-            .find(|&idx| !lyrics.lines[idx].is_background)
+            .find(|&idx| !lyrics.lines[idx].is_background && lyrics.lines[idx].singer == 0)
+            .or_else(|| {
+                all_active
+                    .iter()
+                    .copied()
+                    .find(|&idx| !lyrics.lines[idx].is_background)
+            })
             .unwrap_or(all_active[0]);
 
         let line = &lyrics.lines[primary_idx];
         let start = line.start_ms.unwrap_or(0);
         let next_start = lyrics.lines.get(primary_idx + 1).and_then(|l| l.start_ms);
-        let end = line.end_ms.or(next_start).or(duration_ms).unwrap_or(start + 5000);
+        let end = line
+            .end_ms
+            .or(next_start)
+            .or(duration_ms)
+            .unwrap_or(start + 5000);
         let prog = ((position_ms - start) as f32 / (end - start).max(1) as f32).clamp(0.0, 1.0);
 
         let mut indices = all_active;
@@ -335,13 +345,17 @@ fn find_all_active_lines(ms: u64, lines: &[LyricLine], duration_ms: Option<u64>)
                     lines
                         .iter()
                         .skip(i + 1)
-                        .find(|l| !l.is_background)
+                        .find(|l| !l.is_background && l.singer == line.singer)
                         .and_then(|l| l.start_ms)
                         .or_else(|| lines.get(i + 1).and_then(|l| l.start_ms))
                 } else {
                     lines.get(i + 1).and_then(|l| l.start_ms)
                 };
-                let end = line.end_ms.or(next_start).or(duration_ms).unwrap_or(start + 5000);
+                let end = line
+                    .end_ms
+                    .or(next_start)
+                    .or(duration_ms)
+                    .unwrap_or(start + 5000);
                 ms >= start && ms < end
             } else {
                 false
@@ -775,6 +789,7 @@ mod tests {
                     end_ms: Some(14000),
                     text: "Lead line".into(),
                     is_background: false,
+                    singer: 0,
                     words: vec![],
                 },
                 LyricLine {
@@ -782,6 +797,7 @@ mod tests {
                     end_ms: Some(15000),
                     text: "(Background line)".into(),
                     is_background: true,
+                    singer: 0,
                     words: vec![],
                 },
                 LyricLine {
@@ -789,6 +805,7 @@ mod tests {
                     end_ms: Some(20000),
                     text: "Next lead line".into(),
                     is_background: false,
+                    singer: 0,
                     words: vec![],
                 },
             ],
@@ -822,5 +839,28 @@ mod tests {
         assert!(pt4.is_in_gap);
         assert_eq!(pt4.active_line_index, Some(1)); // stays on previous line, no jump to top
         assert_eq!(pt4.active_line_indices, vec![1]);
+    }
+
+    #[test]
+    fn test_duet_singers_overlapping_sync_point() {
+        let lyrics = Lyrics {
+            lines: vec![
+                LyricLine::new("I can show you the world", Some(10000), Some(14000)).with_singer(0),
+                LyricLine::new("Shining, shimmering, splendid", Some(12000), Some(15000))
+                    .with_singer(1),
+            ],
+            sync_type: SyncType::Line,
+            ..Default::default()
+        };
+
+        let mut sync = LyricsSynchronizer::new();
+
+        // At 13.0s: both singers are active at the same time
+        let pt = sync.sync_position(1, 13.0, Some(20.0), &lyrics);
+        // Singer 0 is primary scroll anchor
+        assert_eq!(pt.active_line_index, Some(0));
+        assert_eq!(pt.active_line_indices, vec![0, 1]);
+        assert_eq!(lyrics.lines[pt.active_line_indices[0]].singer, 0);
+        assert_eq!(lyrics.lines[pt.active_line_indices[1]].singer, 1);
     }
 }

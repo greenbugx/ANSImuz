@@ -283,6 +283,34 @@ class TestTTMLParser(unittest.TestCase):
         self.assertEqual(lines[1]["start_ms"], 15000)
         self.assertIsNone(lines[1]["end_ms"])
 
+    def test_parse_ttml_duet_agents(self):
+        ttml = """
+        <tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttm="http://www.w3.org/ns/ttml#metadata">
+            <head>
+                <metadata>
+                    <ttm:agent xml:id="v1" type="person"><ttm:name type="full">Singer 1</ttm:name></ttm:agent>
+                    <ttm:agent xml:id="v2" type="person"><ttm:name type="full">Singer 2</ttm:name></ttm:agent>
+                </metadata>
+            </head>
+            <body>
+                <div>
+                    <p begin="10.000s" end="14.000s" ttm:agent="v1">I'll stop the world</p>
+                    <p begin="12.000s" end="15.000s" ttm:agent="v2">and melt with you</p>
+                    <p begin="16.000s" end="20.000s" ttm:agent="v1">You've seen the difference</p>
+                </div>
+            </body>
+        </tt>
+        """
+        sync, lines = parse_ttml(ttml)
+        self.assertEqual(sync, "line")
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(lines[0]["singer"], 0)
+        self.assertEqual(lines[0]["text"], "I'll stop the world")
+        self.assertEqual(lines[1]["singer"], 1)
+        self.assertEqual(lines[1]["text"], "and melt with you")
+        self.assertEqual(lines[2]["singer"], 0)
+        self.assertEqual(lines[2]["text"], "You've seen the difference")
+
 
 class TestLRCParser(unittest.TestCase):
     def test_parse_empty_lrc(self):

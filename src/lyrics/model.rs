@@ -90,6 +90,9 @@ pub struct LyricLine {
     /// True when this line contains background / harmony vocals.
     #[serde(default)]
     pub is_background: bool,
+    /// Singer index: 0 = primary (left-aligned), 1 = secondary (right-aligned), 2+ reserved.
+    #[serde(default)]
+    pub singer: u8,
 }
 
 #[derive(Deserialize)]
@@ -108,6 +111,10 @@ struct LyricLineRaw {
     vocal_type: Option<String>,
     #[serde(default)]
     background: Option<bool>,
+    #[serde(default)]
+    singer: Option<u8>,
+    #[serde(default)]
+    speaker: Option<u8>,
 }
 
 impl From<LyricLineRaw> for LyricLine {
@@ -119,12 +126,14 @@ impl From<LyricLineRaw> for LyricLine {
                 .as_deref()
                 .map(|s| s.eq_ignore_ascii_case("background") || s.eq_ignore_ascii_case("bg"))
                 .unwrap_or(false);
+        let singer = raw.singer.or(raw.speaker).unwrap_or(0);
         let line = LyricLine {
             start_ms: raw.start_ms,
             end_ms: raw.end_ms,
             text: raw.text,
             words: raw.words,
             is_background: is_bg,
+            singer,
         };
         line.normalize()
     }
@@ -145,6 +154,7 @@ impl LyricLine {
             text: text_str,
             words: Vec::new(),
             is_background: is_bg,
+            singer: 0,
         }
     }
 
@@ -162,11 +172,17 @@ impl LyricLine {
             text: text_str,
             words,
             is_background: is_bg,
+            singer: 0,
         }
     }
 
     pub fn with_background(mut self, is_background: bool) -> Self {
         self.is_background = is_background;
+        self
+    }
+
+    pub fn with_singer(mut self, singer: u8) -> Self {
+        self.singer = singer;
         self
     }
 
@@ -382,6 +398,7 @@ impl Lyrics {
 
             if let Some(curr_start) = line.start_ms
                 && !line.is_background
+                && line.singer == 0
             {
                 if let Some(prev_start) = prev_line_start
                     && curr_start < prev_start

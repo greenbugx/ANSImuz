@@ -10,13 +10,16 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::App;
 use crate::lyrics::synchronizer::compute_sync_point;
 use crate::lyrics::types::{LyricsStatus, SyncType};
-use crate::lyrics::{LyricLine, Lyrics, LyricsSyncPoint};
+use crate::lyrics::{LyricLine, LyricWord, Lyrics, LyricsSyncPoint};
 use crate::ui::screens::player::{layout_player_panel, render_player_panel};
 use crate::ui::theme::{Theme, truncate};
 
 const FIRST_LINE_PREFIX: &str = "  ";
 const ACTIVE_LINE_PREFIX: &str = "▶ ";
 const BACKGROUND_ACTIVE_PREFIX: &str = "▷ ";
+const ACTIVE_LINE_SUFFIX: &str = " ◀";
+const BACKGROUND_ACTIVE_SUFFIX: &str = " ◁";
+const RIGHT_LINE_SUFFIX: &str = "  ";
 const HANGING_INDENT_PREFIX: &str = "    "; // 4 spaces hanging indent
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -204,26 +207,67 @@ fn render_lyrics_content(
                 if sync_point.active_line_index == Some(idx) || active_visual_row.is_none() {
                     active_visual_row = Some(rendered_lines.len());
                 }
-                wrap_active_timed_line(line, &sync_point, theme, max_w, &mut rendered_lines);
+                if is_right_aligned(line) {
+                    let suffix = if line.is_background {
+                        BACKGROUND_ACTIVE_SUFFIX
+                    } else {
+                        ACTIVE_LINE_SUFFIX
+                    };
+                    wrap_right_aligned_line(
+                        line,
+                        Some(&sync_point),
+                        theme,
+                        theme.bold_primary,
+                        Some(suffix),
+                        max_w,
+                        &mut rendered_lines,
+                    );
+                } else {
+                    wrap_active_timed_line(line, &sync_point, theme, max_w, &mut rendered_lines);
+                }
             } else {
                 let style = if is_past {
                     theme.dim.add_modifier(Modifier::ITALIC)
                 } else {
                     Style::default().fg(Color::Gray)
                 };
-                wrap_plain_line(line.display_text(), style, None, max_w, &mut rendered_lines);
+                if is_right_aligned(line) {
+                    wrap_right_aligned_line(
+                        line,
+                        None,
+                        theme,
+                        style,
+                        Some(RIGHT_LINE_SUFFIX),
+                        max_w,
+                        &mut rendered_lines,
+                    );
+                } else {
+                    wrap_plain_line(line.display_text(), style, None, max_w, &mut rendered_lines);
+                }
             }
         }
     } else {
         let unsynced_style = Style::default().fg(Color::Gray);
         for line in &lyrics.lines {
-            wrap_plain_line(
-                line.display_text(),
-                unsynced_style,
-                None,
-                max_w,
-                &mut rendered_lines,
-            );
+            if is_right_aligned(line) {
+                wrap_right_aligned_line(
+                    line,
+                    None,
+                    theme,
+                    unsynced_style,
+                    Some(RIGHT_LINE_SUFFIX),
+                    max_w,
+                    &mut rendered_lines,
+                );
+            } else {
+                wrap_plain_line(
+                    line.display_text(),
+                    unsynced_style,
+                    None,
+                    max_w,
+                    &mut rendered_lines,
+                );
+            }
         }
     }
 
@@ -423,6 +467,190 @@ fn wrap_active_timed_line(
 
     if !cur_spans.is_empty() {
         out.push(Line::from(cur_spans));
+    }
+}
+
+#[inline]
+fn is_right_aligned(line: &LyricLine) -> bool {
+    line.singer > 0
+}
+
+fn wrap_right_aligned_line(
+    line: &LyricLine,
+    sync_point: Option<&LyricsSyncPoint>,
+    theme: &Theme,
+    fallback_style: Style,
+    suffix: Option<&'static str>,
+    max_width: usize,
+    out: &mut Vec<Line<'static>>,
+) {
+    let is_bg = line.is_background;
+    let active_style = if is_bg {
+        theme.primary.add_modifier(Modifier::ITALIC)
+    } else {
+        theme.bold_primary
+    };
+    let upcoming_word_style = if is_bg {
+        Style::default()
+            .fg(Color::Gray)
+            .add_modifier(Modifier::ITALIC)
+    } else {
+        Style::default()
+            .fg(Color::Gray)
+            .add_modifier(Modifier::BOLD)
+    };
+
+    let words: Vec<LyricWord> = if line.words.is_empty() {
+        line.display_text()
+            .split_whitespace()
+            .map(|tok| LyricWord::new(tok, None, None))
+            .collect()
+    } else {
+        line.words.clone()
+    };
+
+    if words.is_empty() {
+        let first_suffix = suffix.unwrap_or("");
+        let first_suffix_w = first_suffix.width();
+        let pad_left = max_width.saturating_sub(first_suffix_w);
+        let suf_style = if sync_point.is_some() {
+            active_style
+        } else {
+            fallback_style
+        };
+        out.push(Line::from(vec![
+            Span::raw(" ".repeat(pad_left)),
+            Span::styled(first_suffix, suf_style),
+        ]));
+        return;
+    }
+
+    let first_suffix = suffix.unwrap_or("");
+    let first_suffix_w = first_suffix.width();
+    let cont_indent_w = HANGING_INDENT_PREFIX.width();
+
+    struct WordSpan {
+        text: String,
+        style: Style,
+        width: usize,
+    }
+
+    let mut word_spans: Vec<Vec<WordSpan>> = Vec::with_capacity(words.len());
+    for (w_idx, word) in words.iter().enumerate() {
+        let mut spans = Vec::new();
+        if let Some(sp) = sync_point {
+            let w_start = word
+                .start_ms
+                .or_else(|| {
+                    words
+                        .get(w_idx.saturating_sub(1))
+                        .and_then(|prev| prev.end_ms)
+                })
+                .unwrap_or(line.start_ms.unwrap_or(0));
+            let has_word_started = sp.position_ms >= w_start;
+
+            if !has_word_started {
+                spans.push(WordSpan {
+                    text: word.text.clone(),
+                    style: upcoming_word_style,
+                    width: word.text.width(),
+                });
+            } else if !word.syllables.is_empty()
+                && word.syllables.iter().any(|s| s.start_ms.is_some())
+            {
+                for syl in &word.syllables {
+                    let s_start = syl.start_ms.unwrap_or(w_start);
+                    let syl_style = if sp.position_ms >= s_start {
+                        active_style
+                    } else {
+                        upcoming_word_style
+                    };
+                    spans.push(WordSpan {
+                        text: syl.text.clone(),
+                        style: syl_style,
+                        width: syl.text.width(),
+                    });
+                }
+            } else {
+                spans.push(WordSpan {
+                    text: word.text.clone(),
+                    style: active_style,
+                    width: word.text.width(),
+                });
+            }
+        } else {
+            spans.push(WordSpan {
+                text: word.text.clone(),
+                style: fallback_style,
+                width: word.text.width(),
+            });
+        }
+        word_spans.push(spans);
+    }
+
+    let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut cur_row_spans: Vec<Span<'static>> = Vec::new();
+    let mut cur_row_content_w: usize = 0;
+    let mut is_first_line = true;
+
+    for (w_idx, word) in words.iter().enumerate() {
+        let w_len = word.text.width();
+        let max_content_w = if is_first_line {
+            max_width.saturating_sub(first_suffix_w)
+        } else {
+            max_width.saturating_sub(cont_indent_w)
+        };
+
+        if !cur_row_spans.is_empty() && cur_row_content_w + 1 + w_len > max_content_w {
+            rows.push(std::mem::take(&mut cur_row_spans));
+            is_first_line = false;
+            cur_row_content_w = 0;
+        }
+
+        if !cur_row_spans.is_empty() {
+            cur_row_spans.push(Span::raw(" "));
+            cur_row_content_w += 1;
+        }
+
+        for ws in &word_spans[w_idx] {
+            cur_row_spans.push(Span::styled(ws.text.clone(), ws.style));
+            cur_row_content_w += ws.width;
+        }
+    }
+
+    if !cur_row_spans.is_empty() {
+        rows.push(cur_row_spans);
+    }
+
+    for (i, mut row_spans) in rows.into_iter().enumerate() {
+        let row_content_w: usize = row_spans.iter().map(|s| s.content.width()).sum();
+        let is_first = i == 0;
+        let pad_left = if is_first {
+            max_width.saturating_sub(row_content_w + first_suffix_w)
+        } else {
+            max_width.saturating_sub(row_content_w + cont_indent_w)
+        };
+
+        let mut final_spans = Vec::with_capacity(row_spans.len() + 2);
+        if pad_left > 0 {
+            final_spans.push(Span::raw(" ".repeat(pad_left)));
+        }
+        final_spans.append(&mut row_spans);
+
+        if is_first {
+            if first_suffix_w > 0 {
+                let suf_style = if sync_point.is_some() {
+                    active_style
+                } else {
+                    fallback_style
+                };
+                final_spans.push(Span::styled(first_suffix, suf_style));
+            }
+        } else if cont_indent_w > 0 {
+            final_spans.push(Span::raw(HANGING_INDENT_PREFIX));
+        }
+
+        out.push(Line::from(final_spans));
     }
 }
 
@@ -1101,6 +1329,115 @@ mod tests {
             rows.iter()
                 .any(|r| r.contains("▷") && r.contains("(Galileo)")),
             "Background active line must be displayed with '▷'"
+        );
+    }
+
+    #[test]
+    fn test_render_duet_second_singer_right_aligned() {
+        let mut app = App::new();
+        app.tracks
+            .push(Track::new("A Whole New World", "Aladdin & Jasmine"));
+        app.playing = Some(0);
+
+        let lyrics = Lyrics {
+            source: Some("lrc.red".to_string()),
+            sync_type: SyncType::Line,
+            title: Some("A Whole New World".to_string()),
+            artist: Some("Aladdin & Jasmine".to_string()),
+            isrc: None,
+            lines: vec![
+                LyricLine::new("I can show you the world", Some(10000), Some(14000)).with_singer(0),
+                LyricLine::new("Shining, shimmering, splendid", Some(12000), Some(15000))
+                    .with_singer(1),
+            ],
+            unavailable_reason: None,
+        };
+        app.lyrics_state.lyrics = Some(lyrics);
+
+        let theme = Theme::new(None);
+        let area = Rect::new(0, 0, 80, 10);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // At 13.0s: both lines active
+        terminal
+            .draw(|frame| {
+                render_lyrics(frame, area, &app, Some((13.0, Some(200.0))), &theme);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer().clone();
+        let rows: Vec<String> = (0..area.height)
+            .map(|y| (0..area.width).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect();
+
+        // Singer 0 (left-aligned) has '▶' prefix
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("▶") && r.contains("I can show you the world")),
+            "Singer 0 line must be left-aligned with '▶' prefix"
+        );
+
+        // Singer 1 (right-aligned) has '◀' suffix
+        assert!(
+            rows.iter()
+                .any(|r| { r.contains("Shining, shimmering, splendid") && r.contains("◀") }),
+            "Singer 1 line must be right-aligned with '◀' suffix"
+        );
+    }
+
+    #[test]
+    fn test_render_duet_second_singer_right_aligned() {
+        let mut app = App::new();
+        app.tracks
+            .push(Track::new("A Whole New World", "Aladdin & Jasmine"));
+        app.playing = Some(0);
+
+        let lyrics = Lyrics {
+            source: Some("lrc.red".to_string()),
+            sync_type: SyncType::Line,
+            title: Some("A Whole New World".to_string()),
+            artist: Some("Aladdin & Jasmine".to_string()),
+            isrc: None,
+            lines: vec![
+                LyricLine::new("I can show you the world", Some(10000), Some(14000)).with_singer(0),
+                LyricLine::new("Shining, shimmering, splendid", Some(12000), Some(15000))
+                    .with_singer(1),
+            ],
+            unavailable_reason: None,
+        };
+        app.lyrics_state.lyrics = Some(lyrics);
+
+        let theme = Theme::new(None);
+        let area = Rect::new(0, 0, 80, 10);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // At 13.0s: both lines active
+        terminal
+            .draw(|frame| {
+                render_lyrics(frame, area, &app, Some((13.0, Some(200.0))), &theme);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer().clone();
+        let rows: Vec<String> = (0..area.height)
+            .map(|y| (0..area.width).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect();
+
+        // Singer 0 (left-aligned) has '▶' prefix
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("▶") && r.contains("I can show you the world")),
+            "Singer 0 line must be left-aligned with '▶' prefix"
+        );
+
+        // Singer 1 (right-aligned) has '◀' suffix
+        assert!(
+            rows.iter().any(|r| {
+                r.contains("Shining, shimmering, splendid") && r.contains("◀")
+            }),
+            "Singer 1 line must be right-aligned with '◀' suffix"
         );
     }
 }

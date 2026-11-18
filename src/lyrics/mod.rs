@@ -435,6 +435,36 @@ mod tests {
     }
 
     #[test]
+    fn test_deserialize_duet_singer_field() {
+        let json = r#"{
+            "sync_type": "line",
+            "title": "A Whole New World",
+            "artist": "Aladdin & Jasmine",
+            "lines": [
+                {
+                    "start_ms": 10000,
+                    "end_ms": 14000,
+                    "text": "I can show you the world",
+                    "singer": 0
+                },
+                {
+                    "start_ms": 12000,
+                    "end_ms": 15000,
+                    "text": "Shining, shimmering, splendid",
+                    "singer": 1
+                }
+            ]
+        }"#;
+
+        let lyrics: Lyrics = serde_json::from_str(json).expect("Deserialization succeeds");
+        assert_eq!(lyrics.lines.len(), 2);
+        assert_eq!(lyrics.lines[0].singer, 0);
+        assert_eq!(lyrics.lines[1].singer, 1);
+        // Overlapping lines across different singers must pass validation
+        assert!(lyrics.validate().is_ok());
+    }
+
+    #[test]
     fn test_classify_lyrics_error() {
         assert_eq!(
             classify_lyrics_error("Rate limit exceeded: HTTP 429 quota"),

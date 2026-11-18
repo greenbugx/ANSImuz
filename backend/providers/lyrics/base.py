@@ -223,10 +223,27 @@ def parse_ttml(ttml_text: str) -> tuple[str, list[dict[str, Any]]]:
     has_word_sync = False
     has_syllable_sync = False
 
+    agent_map: dict[str, int] = {}
+    agent_order: list[str] = []
+
+    # Pre-populate agent map from <ttm:agent> metadata declarations if present
+    for elem in root.iter():
+        tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+        if tag == "agent":
+            agent_id = get_xml_attr(elem, "id")
+            if agent_id and agent_id not in agent_map:
+                agent_map[agent_id] = len(agent_order)
+                agent_order.append(agent_id)
+
     for elem in root.iter():
         tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
         if tag != "p":
             continue
+
+        agent_ref = get_xml_attr(elem, "agent")
+        if agent_ref and agent_ref not in agent_map:
+            agent_map[agent_ref] = len(agent_order)
+            agent_order.append(agent_ref)
 
         p_begin = parse_timestamp(get_xml_attr(elem, "begin"))
         p_dur = parse_timestamp(get_xml_attr(elem, "dur"))
@@ -365,7 +382,18 @@ def parse_ttml(ttml_text: str) -> tuple[str, list[dict[str, Any]]]:
             "end_ms": p_end,
             "text": full_text,
             "words": words,
+            "_agent": agent_ref,
         })
+
+    # Assign integer singer index (0 = primary/left, 1 = secondary/right)
+    # If 0 or 1 agent across all lines, all lines are singer 0
+    multiple_singers = len(agent_order) > 1
+    for line in lines:
+        a_ref = line.pop("_agent", None)
+        if multiple_singers and a_ref in agent_map:
+            line["singer"] = agent_map[a_ref]
+        else:
+            line["singer"] = 0
 
     lines.sort(key=lambda item: item["start_ms"] if item["start_ms"] is not None else 0)
 
@@ -511,6 +539,7 @@ def parse_lrc(lrc_text: str) -> tuple[str, list[dict[str, Any]]]:
                 "start_ms": tag_ms,
                 "end_ms": line_end_ms,
                 "words": list(words),
+                "singer": 0,
             })
 
     if timed_lines:
@@ -541,6 +570,7 @@ def parse_lrc(lrc_text: str) -> tuple[str, list[dict[str, Any]]]:
             "start_ms": None,
             "end_ms": None,
             "words": w_list,
+            "singer": 0,
         })
     return "none", parsed_plain
 
