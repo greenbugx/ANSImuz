@@ -7,13 +7,13 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use super::{events::handle_key, state::App};
-use crate::music::{ResolveResponse, SearchResponse};
+use crate::music::{PrefetchResolveResponse, ResolveResponse, SearchResponse};
 use crate::playback::{AudioPlayer, PlayerEvent};
 
 pub use super::playback::{
     advance_playback, handle_playback_ended, handle_playback_failed, handle_player_event,
-    handle_resolve_response, now_playing, play_next, play_next_queued, play_previous,
-    play_queue_item, play_search_result, play_track, recover_queue_failure,
+    handle_prefetch_response, handle_resolve_response, now_playing, play_next, play_next_queued,
+    play_previous, play_queue_item, play_search_result, play_track, recover_queue_failure,
     refill_queue_from_repeat_all, start_playback,
 };
 pub use super::search::{handle_search_result, refetch_if_needed};
@@ -30,6 +30,11 @@ pub fn run(
     let (player_tx, player_rx): (Sender<PlayerEvent>, Receiver<PlayerEvent>) = mpsc::channel();
     let (resolve_tx, resolve_rx): (Sender<ResolveResponse>, Receiver<ResolveResponse>) =
         mpsc::channel();
+    let (prefetch_tx, prefetch_rx): (
+        Sender<PrefetchResolveResponse>,
+        Receiver<PrefetchResolveResponse>,
+    ) = mpsc::channel();
+    app.prefetch_tx = Some(prefetch_tx);
     let (lyrics_worker, lyrics_rx) = crate::lyrics::LyricsWorker::spawn();
     app.lyrics_worker = Some(lyrics_worker);
 
@@ -42,6 +47,10 @@ pub fn run(
 
         while let Ok(response) = resolve_rx.try_recv() {
             handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, response);
+        }
+
+        while let Ok(response) = prefetch_rx.try_recv() {
+            handle_prefetch_response(&mut app, &player, response);
         }
 
         while let Ok(event) = lyrics_rx.try_recv() {
