@@ -17,6 +17,18 @@ pub const DEFAULT_MAX_LYRICS_CACHE_BYTES: u64 = 50 * 1024 * 1024;
 /// Recordings exceeding this difference (live vs studio versions) are treated as distinct.
 pub const DURATION_TOLERANCE_MS: u64 = 5000;
 
+/// Current version of the persistent cache index.
+pub const CURRENT_INDEX_VERSION: u32 = 1;
+
+/// Maximum allowable size for `index.json` on disk (5 MB).
+pub const MAX_INDEX_FILE_BYTES: u64 = 5 * 1024 * 1024;
+
+/// Maximum number of index entries tracked in cache.
+pub const MAX_CACHE_ENTRIES: usize = 10_000;
+
+/// Maximum allowable size for an individual lyrics payload file (2 MB).
+pub const MAX_ENTRY_PAYLOAD_BYTES: u64 = 2 * 1024 * 1024;
+
 static TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static GLOBAL_CACHE: Mutex<Option<LyricsCache>> = Mutex::new(None);
 
@@ -91,7 +103,19 @@ pub fn entry_file_name(primary_key: &str) -> String {
     format!("{}.json", sha256_hex(primary_key.as_bytes()))
 }
 
-/// Atomically writes bytes to a file via a temporary `.part` file and rename.
+/// Validates that an entry file name is a 64-character hex hash with a `.json` extension,
+/// preventing arbitrary file access or path traversal attacks.
+#[must_use]
+pub fn is_valid_entry_file_name(file: &str) -> bool {
+    if !file.ends_with(".json") {
+        return false;
+    }
+    let stem = &file[..file.len() - 5];
+    stem.len() == 64 && stem.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Atomically writes bytes to a file via a temporary `.part` file and safe rename.
+/// If replacement fails, the original destination file is restored from backup rather than deleted.
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -108,14 +132,29 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     }
 
     if let Err(e) = fs::rename(&temp_path, path) {
-        if e.kind() == std::io::ErrorKind::AlreadyExists
-            || e.kind() == std::io::ErrorKind::PermissionDenied
+        if (e.kind() == std::io::ErrorKind::AlreadyExists
+            || e.kind() == std::io::ErrorKind::PermissionDenied)
+            && path.exists()
         {
-            let _ = fs::remove_file(path);
-            if let Err(retry_err) = fs::rename(&temp_path, path) {
+            let backup_path =
+                path.with_file_name(format!("{stem}.bak-{}-{temp_id}.{ext}", std::process::id()));
+
+            // Move existing file to backup before replacing
+            if let Err(backup_err) = fs::rename(path, &backup_path) {
                 let _ = fs::remove_file(&temp_path);
-                return Err(retry_err);
+                return Err(backup_err);
             }
+
+            // Attempt to move temp_path to target path
+            if let Err(replace_err) = fs::rename(&temp_path, path) {
+                // Replacement failed: restore original file from backup!
+                let _ = fs::rename(&backup_path, path);
+                let _ = fs::remove_file(&temp_path);
+                return Err(replace_err);
+            }
+
+            // Replacement succeeded: safely clean up temporary backup file
+            let _ = fs::remove_file(&backup_path);
         } else {
             let _ = fs::remove_file(&temp_path);
             return Err(e);
@@ -153,7 +192,7 @@ pub struct LyricsIndexEntry {
 }
 
 fn default_index_version() -> u32 {
-    1
+    CURRENT_INDEX_VERSION
 }
 
 /// Persistent root index stored at `$XDG_CACHE_HOME/ansimuz/lyrics/index.json`.
@@ -168,7 +207,7 @@ pub struct LyricsIndex {
 impl Default for LyricsIndex {
     fn default() -> Self {
         Self {
-            version: default_index_version(),
+            version: CURRENT_INDEX_VERSION,
             entries: HashMap::new(),
         }
     }
@@ -183,6 +222,7 @@ pub struct LyricsCache {
     index_path: PathBuf,
     index: LyricsIndex,
     max_cache_bytes: u64,
+    dirty: bool,
 }
 
 impl LyricsCache {
@@ -197,23 +237,81 @@ impl LyricsCache {
 
         fs::create_dir_all(&entries_dir)?;
 
-        let (index, corrupt) = match fs::read_to_string(&index_path) {
-            Ok(data) => match serde_json::from_str::<LyricsIndex>(&data) {
-                Ok(parsed) => (parsed, false),
-                Err(_) => (LyricsIndex::default(), true),
-            },
-            Err(_) => (LyricsIndex::default(), false),
+        let mut needs_save = false;
+        let mut index = if index_path.exists() {
+            let file_size = fs::metadata(&index_path).map(|m| m.len()).unwrap_or(0);
+            if file_size > MAX_INDEX_FILE_BYTES {
+                needs_save = true;
+                LyricsIndex::default()
+            } else {
+                match fs::read_to_string(&index_path) {
+                    Ok(data) => match serde_json::from_str::<LyricsIndex>(&data) {
+                        Ok(parsed) => {
+                            if parsed.version != CURRENT_INDEX_VERSION {
+                                needs_save = true;
+                                LyricsIndex::default()
+                            } else {
+                                parsed
+                            }
+                        }
+                        Err(_) => {
+                            needs_save = true;
+                            LyricsIndex::default()
+                        }
+                    },
+                    Err(_) => {
+                        needs_save = true;
+                        LyricsIndex::default()
+                    }
+                }
+            }
+        } else {
+            LyricsIndex::default()
         };
 
-        let cache = Self {
+        // Validate and sanitize entries
+        let initial_count = index.entries.len();
+        index.entries.retain(|key, entry| {
+            if entry.key != *key {
+                return false;
+            }
+            if !is_valid_entry_file_name(&entry.file) {
+                return false;
+            }
+            if entry.size_bytes == 0 || entry.size_bytes > MAX_ENTRY_PAYLOAD_BYTES {
+                return false;
+            }
+            true
+        });
+        if index.entries.len() != initial_count {
+            needs_save = true;
+        }
+
+        // Cap maximum acceptable entry count
+        if index.entries.len() > MAX_CACHE_ENTRIES {
+            let mut entries_vec: Vec<(String, u64)> = index
+                .entries
+                .iter()
+                .map(|(k, e)| (k.clone(), e.last_accessed_at))
+                .collect();
+            entries_vec.sort_by_key(|(_, accessed)| *accessed);
+            let excess = index.entries.len() - MAX_CACHE_ENTRIES;
+            for (k, _) in entries_vec.into_iter().take(excess) {
+                index.entries.remove(&k);
+            }
+            needs_save = true;
+        }
+
+        let mut cache = Self {
             base_dir,
             entries_dir,
             index_path,
             index,
             max_cache_bytes,
+            dirty: false,
         };
 
-        if corrupt {
+        if needs_save {
             let _ = cache.save_index();
         }
 
@@ -226,86 +324,169 @@ impl LyricsCache {
         &self.base_dir
     }
 
+    /// Returns true if the in-memory cache index has unflushed changes.
+    #[must_use]
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
     /// Serializes and atomically commits `index.json` to disk.
-    pub fn save_index(&self) -> std::io::Result<()> {
+    pub fn save_index(&mut self) -> std::io::Result<()> {
         let json_bytes = serde_json::to_vec_pretty(&self.index)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        write_atomic(&self.index_path, &json_bytes)
+        write_atomic(&self.index_path, &json_bytes)?;
+        self.dirty = false;
+        Ok(())
+    }
+
+    /// Flushes dirty in-memory cache metadata to disk if needed.
+    pub fn flush(&mut self) -> std::io::Result<()> {
+        if self.dirty {
+            self.save_index()?;
+        }
+        Ok(())
     }
 
     /// Finds a matching entry key for a given track, taking into account
     /// exact IDs, normalized title/artist, and recording duration to disambiguate
     /// duplicate recordings (such as live vs studio versions).
+    ///
+    /// When recording duration is unavailable and multiple recordings match
+    /// the same normalized artist and title, returns `None` rather than choosing
+    /// an arbitrary entry non-deterministically.
     pub fn find_entry_key(&self, track: &Track) -> Option<String> {
+        // Exact provider + track_id match
+        if let Some(ref tid) = track.track_id {
+            let tid_trim = tid.trim();
+            let p_trim = track.provider.trim();
+            if !tid_trim.is_empty() && !p_trim.is_empty() {
+                for (key, entry) in &self.index.entries {
+                    if entry.provider.as_deref() == Some(p_trim)
+                        && entry.track_id.as_deref() == Some(tid_trim)
+                    {
+                        return Some(key.clone());
+                    }
+                }
+            }
+        }
+
+        // Exact spotify_id match
+        if let Some(ref sid) = track.spotify_id {
+            let s_trim = sid.trim();
+            if !s_trim.is_empty() {
+                for (key, entry) in &self.index.entries {
+                    if entry.spotify_id.as_deref() == Some(s_trim) {
+                        return Some(key.clone());
+                    }
+                }
+            }
+        }
+
         // Direct primary key match
         let primary = make_primary_key(track);
         if self.index.entries.contains_key(&primary) {
             return Some(primary);
         }
 
-        // Exact spotify_id match
-        if let Some(ref sid) = track.spotify_id {
-            let s_trim = sid.trim();
-            for (key, entry) in &self.index.entries {
-                if entry.spotify_id.as_deref() == Some(s_trim) {
-                    return Some(key.clone());
-                }
-            }
-        }
-
-        // Exact provider + track_id match
-        if let Some(ref tid) = track.track_id {
-            let tid_trim = tid.trim();
-            let p_trim = track.provider.trim();
-            for (key, entry) in &self.index.entries {
-                if entry.provider.as_deref() == Some(p_trim)
-                    && entry.track_id.as_deref() == Some(tid_trim)
-                {
-                    return Some(key.clone());
-                }
-            }
-        }
-
         // Normalized title + artist match with recording duration disambiguation
         let norm_artist = normalize_key_text(&track.artist);
         let norm_title = normalize_key_text(&track.title);
+        if norm_artist.is_empty() || norm_title.is_empty() {
+            return None;
+        }
 
-        let mut fallback_candidate = None;
-        for (key, entry) in &self.index.entries {
-            let e_artist = normalize_key_text(&entry.artist);
-            let e_title = normalize_key_text(&entry.title);
+        let matching_candidates: Vec<(&String, &LyricsIndexEntry)> = self
+            .index
+            .entries
+            .iter()
+            .filter(|(_, entry)| {
+                normalize_key_text(&entry.artist) == norm_artist
+                    && normalize_key_text(&entry.title) == norm_title
+            })
+            .collect();
 
-            if e_artist == norm_artist && e_title == norm_title {
-                match (track.duration_ms, entry.duration_ms) {
-                    (Some(t_dur), Some(e_dur)) => {
-                        let diff = (t_dur as i64 - e_dur as i64).unsigned_abs();
-                        if diff <= DURATION_TOLERANCE_MS {
-                            return Some(key.clone());
-                        }
-                        // Duration mismatch indicates a different recording (live version)
-                    }
-                    _ => {
-                        if fallback_candidate.is_none() {
-                            fallback_candidate = Some(key.clone());
+        if matching_candidates.is_empty() {
+            return None;
+        }
+
+        if let Some(t_dur) = track.duration_ms {
+            let mut best_candidate: Option<(&String, u64)> = None;
+            for (key, entry) in &matching_candidates {
+                if let Some(e_dur) = entry.duration_ms {
+                    let diff = (t_dur as i64 - e_dur as i64).unsigned_abs();
+                    if diff <= DURATION_TOLERANCE_MS {
+                        match best_candidate {
+                            Some((_, best_diff)) if diff < best_diff => {
+                                best_candidate = Some((key, diff));
+                            }
+                            None => {
+                                best_candidate = Some((key, diff));
+                            }
+                            _ => {}
                         }
                     }
                 }
             }
-        }
 
-        fallback_candidate
+            if let Some((key, _)) = best_candidate {
+                return Some((*key).clone());
+            }
+
+            // If no candidate matched within duration tolerance, allow single candidate
+            // only if that candidate has no duration recorded (unversioned legacy entry).
+            if matching_candidates.len() == 1 && matching_candidates[0].1.duration_ms.is_none() {
+                return Some(matching_candidates[0].0.clone());
+            }
+
+            None
+        } else {
+            // Duration is unavailable. If multiple candidates exist, return None to avoid
+            // non-deterministically returning live/remaster versions.
+            if matching_candidates.len() == 1 {
+                Some(matching_candidates[0].0.clone())
+            } else {
+                None
+            }
+        }
     }
 
     /// Loads and validates cached lyrics for a track, handling corruption transparently.
+    ///
+    /// Cache hits update LRU access time in-memory without triggering synchronous disk I/O.
     pub fn get(&mut self, track: &Track) -> Option<Lyrics> {
         let key = self.find_entry_key(track)?;
         let entry = self.index.entries.get(&key)?;
+
+        if !is_valid_entry_file_name(&entry.file) {
+            self.index.entries.remove(&key);
+            let _ = self.save_index();
+            return None;
+        }
+
         let file_path = self.entries_dir.join(&entry.file);
+
+        // Pre-validate payload file existence and size bounds before reading or deserializing
+        match fs::metadata(&file_path) {
+            Ok(meta) => {
+                let len = meta.len();
+                if len == 0 || len > MAX_ENTRY_PAYLOAD_BYTES {
+                    let _ = fs::remove_file(&file_path);
+                    self.index.entries.remove(&key);
+                    let _ = self.save_index();
+                    return None;
+                }
+            }
+            Err(_) => {
+                // Missing entry file -> purge stale index entry
+                self.index.entries.remove(&key);
+                let _ = self.save_index();
+                return None;
+            }
+        }
 
         let bytes = match fs::read(&file_path) {
             Ok(b) => b,
             Err(_) => {
-                // Missing entry file -> purge stale index entry
                 self.index.entries.remove(&key);
                 let _ = self.save_index();
                 return None;
@@ -331,10 +512,10 @@ impl LyricsCache {
             return None;
         }
 
-        // Cache hit: update LRU access timestamp
+        // Cache hit: update LRU access timestamp in memory only (no disk write)
         if let Some(entry_mut) = self.index.entries.get_mut(&key) {
             entry_mut.last_accessed_at = current_unix_timestamp();
-            let _ = self.save_index();
+            self.dirty = true;
         }
 
         Some(lyrics)
@@ -348,6 +529,15 @@ impl LyricsCache {
 
         let json_bytes = serde_json::to_vec_pretty(lyrics)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+        if json_bytes.len() as u64 > MAX_ENTRY_PAYLOAD_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "Lyrics payload exceeds maximum allowable size of {MAX_ENTRY_PAYLOAD_BYTES} bytes"
+                ),
+            ));
+        }
 
         write_atomic(&file_path, &json_bytes)?;
 
@@ -401,10 +591,10 @@ impl LyricsCache {
         self.save_index()
     }
 
-    /// Enforces `max_cache_bytes` by deleting least-recently-accessed entries.
+    /// Enforces `max_cache_bytes` and `MAX_CACHE_ENTRIES` by deleting least-recently-accessed entries.
     pub fn prune(&mut self) -> std::io::Result<u64> {
         let mut total_size: u64 = self.index.entries.values().map(|e| e.size_bytes).sum();
-        if total_size <= self.max_cache_bytes {
+        if total_size <= self.max_cache_bytes && self.index.entries.len() <= MAX_CACHE_ENTRIES {
             return Ok(0);
         }
 
@@ -420,7 +610,8 @@ impl LyricsCache {
         let mut removed_keys = Vec::new();
 
         for (k, _, size) in keys_by_access {
-            if total_size <= self.max_cache_bytes {
+            let remaining_count = self.index.entries.len().saturating_sub(removed_keys.len());
+            if total_size <= self.max_cache_bytes && remaining_count <= MAX_CACHE_ENTRIES {
                 break;
             }
             if let Some(entry) = self.index.entries.get(&k) {
@@ -456,34 +647,50 @@ impl LyricsCache {
     }
 }
 
-/// Retrieves cached lyrics for a track from the global cache singleton, if present and valid.
-pub fn get_lyrics_from_cache(track: &Track) -> Option<Lyrics> {
+impl Drop for LyricsCache {
+    fn drop(&mut self) {
+        let _ = self.flush();
+    }
+}
+
+/// Executes a closure with a mutable reference to the global `LyricsCache` singleton.
+/// Initializes the cache from disk if it has not yet been loaded.
+pub fn with_global_cache<R>(f: impl FnOnce(&mut LyricsCache) -> R) -> Option<R> {
     let mut lock = GLOBAL_CACHE.lock().ok()?;
     if lock.is_none() {
         *lock = LyricsCache::try_load(None, DEFAULT_MAX_LYRICS_CACHE_BYTES).ok();
     }
-    lock.as_mut()?.get(track)
+    let cache = lock.as_mut()?;
+    Some(f(cache))
+}
+
+/// Retrieves cached lyrics for a track from the global cache singleton, if present and valid.
+pub fn get_lyrics_from_cache(track: &Track) -> Option<Lyrics> {
+    with_global_cache(|cache| cache.get(track)).flatten()
 }
 
 /// Stores normalized lyrics for a track in the global cache singleton.
 pub fn store_lyrics_in_cache(track: &Track, lyrics: &Lyrics) {
-    if let Ok(mut lock) = GLOBAL_CACHE.lock() {
-        if lock.is_none() {
-            *lock = LyricsCache::try_load(None, DEFAULT_MAX_LYRICS_CACHE_BYTES).ok();
-        }
-        if let Some(cache) = lock.as_mut() {
-            let _ = cache.store(track, lyrics);
-        }
-    }
+    with_global_cache(|cache| {
+        let _ = cache.store(track, lyrics);
+    });
 }
 
 /// Invalidates cached lyrics for a track in the global cache singleton.
-pub fn invalidate_track_in_cache(track: &Track) {
-    if let Ok(mut lock) = GLOBAL_CACHE.lock()
-        && let Some(cache) = lock.as_mut()
-    {
-        let _ = cache.invalidate(track);
-    }
+pub fn invalidate_track_in_cache(track: &Track) -> bool {
+    with_global_cache(|cache| cache.invalidate(track)).unwrap_or(false)
+}
+
+/// Flushes any pending LRU metadata changes to disk.
+pub fn flush_lyrics_cache() {
+    with_global_cache(|cache| {
+        let _ = cache.flush();
+    });
+}
+
+/// Clears all entries in the persistent lyrics cache.
+pub fn clear_lyrics_cache() -> std::io::Result<()> {
+    with_global_cache(|cache| cache.clear()).unwrap_or(Ok(()))
 }
 
 /// Clears the in-memory global lyrics cache singleton reference.
@@ -601,7 +808,241 @@ mod tests {
             "Remaster within tolerance should match same recording"
         );
 
+        // Store live version so multiple recordings of the same song now exist in cache
+        let live_lyrics = make_test_lyrics("Comfortably Numb", "Pink Floyd");
+        cache.store(&live_track, &live_lyrics).expect("store live");
+        assert_eq!(cache.len(), 2);
+
+        // Ambiguous duration: query has no duration, but multiple recordings exist in cache
+        let unversioned_track = Track::new("Comfortably Numb", "Pink Floyd");
+        assert!(
+            cache.get(&unversioned_track).is_none(),
+            "Query without duration must return None when multiple recordings exist in cache"
+        );
+
+        // Single candidate without duration in cache or query succeeds unambiguously
+        let single_track = Track::new("Hey You", "Pink Floyd");
+        let single_lyrics = make_test_lyrics("Hey You", "Pink Floyd");
+        cache.store(&single_track, &single_lyrics).unwrap();
+        assert!(
+            cache.get(&single_track).is_some(),
+            "Single unique recording without duration should match unambiguously"
+        );
+
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_cache_read_does_not_rewrite_index_to_disk() {
+        let _guard = LYRICS_CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ansimuz-lyrics-test-read-io-{}",
+            current_unix_timestamp()
+        ));
+        let mut cache = LyricsCache::try_load(Some(temp_dir.clone()), 10 * 1024 * 1024).unwrap();
+
+        let track = Track::new("Read IO Test", "Artist").with_track_id("io-1");
+        let lyrics = make_test_lyrics("Read IO Test", "Artist");
+        cache.store(&track, &lyrics).unwrap();
+
+        // store() saved index to disk and left cache clean
+        assert!(!cache.is_dirty());
+        let index_file = temp_dir.join("index.json");
+        let meta_before = fs::metadata(&index_file).unwrap();
+        let mtime_before = meta_before.modified().unwrap();
+
+        // Small sleep so any file rewrite would have a different modified timestamp
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Read hit
+        let hit = cache.get(&track);
+        assert!(hit.is_some());
+        assert!(
+            cache.is_dirty(),
+            "Cache must be marked dirty in-memory after read hit"
+        );
+
+        let meta_after_read = fs::metadata(&index_file).unwrap();
+        let mtime_after_read = meta_after_read.modified().unwrap();
+        assert_eq!(
+            mtime_before, mtime_after_read,
+            "index.json on disk must NOT be rewritten on read hits!"
+        );
+
+        // Explicit flush
+        cache.flush().expect("flush must succeed");
+        assert!(!cache.is_dirty(), "Cache must be clean after flush");
+        let meta_after_flush = fs::metadata(&index_file).unwrap();
+        let mtime_after_flush = meta_after_flush.modified().unwrap();
+        assert!(
+            mtime_after_flush >= mtime_before,
+            "index.json modified time must update upon flush"
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_index_version_mismatch_resets_index() {
+        let _guard = LYRICS_CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ansimuz-lyrics-test-ver-mismatch-{}",
+            current_unix_timestamp()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let index_file = temp_dir.join("index.json");
+
+        // Write an index with an incompatible version
+        let raw = r#"{
+            "version": 999,
+            "entries": {
+                "dummy": {
+                    "key": "dummy",
+                    "file": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.json",
+                    "title": "Dummy",
+                    "artist": "Artist",
+                    "sync_type": "line",
+                    "cached_at": 100,
+                    "last_accessed_at": 100,
+                    "size_bytes": 50
+                }
+            }
+        }"#;
+        fs::write(&index_file, raw).unwrap();
+
+        let cache = LyricsCache::try_load(Some(temp_dir.clone()), 10 * 1024 * 1024).unwrap();
+        assert_eq!(cache.len(), 0, "Version mismatch must reset index");
+        assert_eq!(cache.index.version, CURRENT_INDEX_VERSION);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_invalid_entry_filenames_purged_on_load() {
+        let _guard = LYRICS_CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ansimuz-lyrics-test-traversal-{}",
+            current_unix_timestamp()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let index_file = temp_dir.join("index.json");
+
+        // Write an index referencing a path-traversal entry and a valid hex entry
+        let raw = r#"{
+            "version": 1,
+            "entries": {
+                "traversal": {
+                    "key": "traversal",
+                    "file": "../../../etc/passwd.json",
+                    "title": "Traversal",
+                    "artist": "Artist",
+                    "sync_type": "line",
+                    "cached_at": 100,
+                    "last_accessed_at": 100,
+                    "size_bytes": 50
+                },
+                "non_hex": {
+                    "key": "non_hex",
+                    "file": "not-valid-hex-length.json",
+                    "title": "Non Hex",
+                    "artist": "Artist",
+                    "sync_type": "line",
+                    "cached_at": 100,
+                    "last_accessed_at": 100,
+                    "size_bytes": 50
+                },
+                "zero_size": {
+                    "key": "zero_size",
+                    "file": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.json",
+                    "title": "Zero",
+                    "artist": "Artist",
+                    "sync_type": "line",
+                    "cached_at": 100,
+                    "last_accessed_at": 100,
+                    "size_bytes": 0
+                }
+            }
+        }"#;
+        fs::write(&index_file, raw).unwrap();
+
+        let cache = LyricsCache::try_load(Some(temp_dir.clone()), 10 * 1024 * 1024).unwrap();
+        assert_eq!(
+            cache.len(),
+            0,
+            "Invalid file paths and zero-sized entries must be purged on load"
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_oversized_payload_rejected() {
+        let _guard = LYRICS_CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ansimuz-lyrics-test-oversized-{}",
+            current_unix_timestamp()
+        ));
+        let mut cache = LyricsCache::try_load(Some(temp_dir.clone()), 10 * 1024 * 1024).unwrap();
+
+        // Create massive lyrics payload > MAX_ENTRY_PAYLOAD_BYTES (2 MB)
+        let huge_line = "A".repeat(1024 * 1024 * 3); // 3 MB line
+        let huge_lyrics = Lyrics {
+            source: Some("lrc.red".to_string()),
+            sync_type: SyncType::Line,
+            title: Some("Huge".to_string()),
+            artist: Some("Artist".to_string()),
+            isrc: None,
+            lines: vec![LyricLine::new(&huge_line, Some(1000), Some(2000))],
+            unavailable_reason: None,
+        };
+        let track = Track::new("Huge", "Artist");
+        let result = cache.store(&track, &huge_lyrics);
+        assert!(
+            result.is_err(),
+            "Payload exceeding MAX_ENTRY_PAYLOAD_BYTES must be rejected"
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_invalidate_initializes_global_cache_if_uninitialized() {
+        let _guard = LYRICS_CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        // Clear memory cache singleton
+        clear_memory_cache();
+
+        let track = Track::new("Uninitialized Test", "Artist").with_track_id("uninit-1");
+
+        // Invalidate on clean state must initialize without error or panic
+        let res = invalidate_track_in_cache(&track);
+        // Returned false because track was not in cache, but cache was successfully initialized
+        assert!(!res);
+
+        // Store a track to global cache
+        let lyrics = make_test_lyrics("Uninitialized Test", "Artist");
+        store_lyrics_in_cache(&track, &lyrics);
+
+        // Cache hit
+        let loaded = get_lyrics_from_cache(&track);
+        assert!(loaded.is_some());
+
+        // Invalidate removes it
+        let invalidated = invalidate_track_in_cache(&track);
+        assert!(invalidated);
+        assert!(get_lyrics_from_cache(&track).is_none());
+
+        clear_memory_cache();
     }
 
     #[test]

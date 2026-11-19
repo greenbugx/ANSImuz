@@ -6,8 +6,8 @@ pub mod types;
 pub mod worker;
 
 pub use cache::{
-    LyricsCache, LyricsIndex, LyricsIndexEntry, clear_memory_cache, get_lyrics_from_cache,
-    invalidate_track_in_cache, store_lyrics_in_cache,
+    LyricsCache, LyricsIndex, LyricsIndexEntry, clear_lyrics_cache, clear_memory_cache,
+    flush_lyrics_cache, get_lyrics_from_cache, invalidate_track_in_cache, store_lyrics_in_cache,
 };
 pub use model::{LyricLine, LyricSyllable, LyricWord, Lyrics};
 pub use provider::{
