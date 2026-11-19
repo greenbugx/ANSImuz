@@ -34,6 +34,10 @@ from providers.lyrics.lyrics_plus import (
     LyricsPlusProvider,
 )
 from providers.lyrics.lrc_red import LrcRedProvider
+from providers.lyrics.megalobiz import (
+    DEFAULT_MEGALOBIZ_ATTRIBUTION,
+    MegalobizProvider,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +46,7 @@ _genius_provider: GeniusProvider | None = None
 _lyrics_plus_provider: LyricsPlusProvider | None = None
 _lrclib_provider: LrclibProvider | None = None
 _lrc_red_provider: LrcRedProvider | None = None
+_megalobiz_provider: MegalobizProvider | None = None
 
 
 def get_better_lyrics_provider() -> BetterLyricsProvider:
@@ -72,6 +77,13 @@ def get_lrclib_provider() -> LrclibProvider:
     return _lrclib_provider
 
 
+def get_megalobiz_provider() -> MegalobizProvider:
+    global _megalobiz_provider
+    if _megalobiz_provider is None:
+        _megalobiz_provider = MegalobizProvider()
+    return _megalobiz_provider
+
+
 def get_lrc_red_provider() -> LrcRedProvider:
     global _lrc_red_provider
     if _lrc_red_provider is None:
@@ -89,8 +101,9 @@ def get_lyrics(track: dict[str, Any]) -> dict[str, Any] | None:
     1. lrc.red (LRCLIB ISRC provider with line/word-level sync)
     2. LyricsPlus (Aggregated Apple Music, QQ, Musixmatch syllable timings via mirror race)
     3. LRCLIB.net (Official LRCLIB database with Lyricsfile word sync & LRC line sync)
-    4. BetterLyrics (Apple Music TTML syllable-timed & Portato QQ Music QRC fallback)
-    5. Genius (Web scraper fallback providing unsynchronized plain lyrics with stanzas)
+    4. Megalobiz (Megalobiz community synchronized LRC sheets via official REST API)
+    5. BetterLyrics (Apple Music TTML syllable-timed & Portato QQ Music QRC fallback)
+    6. Genius (Web scraper fallback providing unsynchronized plain lyrics with stanzas)
     """
     # 1. Attempt lrc.red first
     try:
@@ -114,9 +127,17 @@ def get_lyrics(track: dict[str, Any]) -> dict[str, Any] | None:
         if res and res.get("lines"):
             return res
     except Exception as exc:
-        logger.debug("LRCLIB.net retrieval failed, falling back to BetterLyrics: %s", exc)
+        logger.debug("LRCLIB.net retrieval failed, falling back to Megalobiz: %s", exc)
 
-    # 4. Attempt BetterLyrics fourth
+    # 4. Attempt Megalobiz fourth
+    try:
+        res = get_megalobiz_provider().get_lyrics(track)
+        if res and res.get("lines"):
+            return res
+    except Exception as exc:
+        logger.debug("Megalobiz retrieval failed, falling back to BetterLyrics: %s", exc)
+
+    # 5. Attempt BetterLyrics fifth
     try:
         res = get_better_lyrics_provider().get_lyrics(track)
         if res and res.get("lines"):
@@ -124,7 +145,7 @@ def get_lyrics(track: dict[str, Any]) -> dict[str, Any] | None:
     except Exception as exc:
         logger.debug("BetterLyrics retrieval failed, falling back to Genius: %s", exc)
 
-    # 5. Fallback to Genius (last resort)
+    # 6. Fallback to Genius (last resort)
     try:
         return get_genius_provider().get_lyrics(track)
     except Exception as exc:
@@ -138,6 +159,7 @@ __all__ = [
     "DEFAULT_GENIUS_ATTRIBUTION",
     "DEFAULT_LRCLIB_ATTRIBUTION",
     "DEFAULT_LYRICS_PLUS_ATTRIBUTION",
+    "DEFAULT_MEGALOBIZ_ATTRIBUTION",
     "DEFAULT_TIMEOUT",
     "DEFAULT_USER_AGENT",
     "BetterLyricsProvider",
@@ -146,6 +168,7 @@ __all__ = [
     "LyricsPlusProvider",
     "LyricsProvider",
     "LrcRedProvider",
+    "MegalobizProvider",
     "clean_title_for_search",
     "format_timestamp",
     "get_better_lyrics_provider",
@@ -155,6 +178,7 @@ __all__ = [
     "get_lrclib_provider",
     "get_lyrics",
     "get_lyrics_plus_provider",
+    "get_megalobiz_provider",
     "parse_lrc",
     "parse_lyrics_plus",
     "parse_lyricsfile",

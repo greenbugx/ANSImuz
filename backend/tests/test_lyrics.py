@@ -48,6 +48,11 @@ from providers.lyrics.genius import (
 from providers.lyrics.lrclib import LrclibProvider
 from providers.lyrics.lyrics_plus import LyricsPlusProvider
 from providers.lyrics.lrc_red import LrcRedProvider, _version_conflicts
+from providers.lyrics.megalobiz import (
+    DEFAULT_MEGALOBIZ_ATTRIBUTION,
+    MegalobizProvider,
+    score_candidate as megalobiz_score_candidate,
+)
 import providers.lyrics
 
 
@@ -1137,12 +1142,13 @@ class TestLrclibProvider(unittest.TestCase):
 
 class TestLyricsProviderChain(unittest.TestCase):
     @patch("providers.lyrics.get_genius_provider")
+    @patch("providers.lyrics.get_megalobiz_provider")
     @patch("providers.lyrics.get_better_lyrics_provider")
     @patch("providers.lyrics.get_lrclib_provider")
     @patch("providers.lyrics.get_lyrics_plus_provider")
     @patch("providers.lyrics.get_lrc_red_provider")
     def test_chain_prefers_lrc_red(
-        self, mock_get_lrcred, mock_get_plus, mock_get_lrclib, mock_get_better, mock_get_genius
+        self, mock_get_lrcred, mock_get_plus, mock_get_lrclib, mock_get_better, mock_get_mega, mock_get_genius
     ):
         mock_lrcred = MagicMock()
         mock_lrcred.get_lyrics.return_value = {
@@ -1160,6 +1166,9 @@ class TestLyricsProviderChain(unittest.TestCase):
         mock_better = MagicMock()
         mock_get_better.return_value = mock_better
 
+        mock_mega = MagicMock()
+        mock_get_mega.return_value = mock_mega
+
         mock_genius = MagicMock()
         mock_get_genius.return_value = mock_genius
 
@@ -1169,15 +1178,17 @@ class TestLyricsProviderChain(unittest.TestCase):
         mock_plus.get_lyrics.assert_not_called()
         mock_lrclib.get_lyrics.assert_not_called()
         mock_better.get_lyrics.assert_not_called()
+        mock_mega.get_lyrics.assert_not_called()
         mock_genius.get_lyrics.assert_not_called()
 
     @patch("providers.lyrics.get_genius_provider")
+    @patch("providers.lyrics.get_megalobiz_provider")
     @patch("providers.lyrics.get_better_lyrics_provider")
     @patch("providers.lyrics.get_lrclib_provider")
     @patch("providers.lyrics.get_lyrics_plus_provider")
     @patch("providers.lyrics.get_lrc_red_provider")
     def test_chain_falls_back_to_lyrics_plus_when_lrcred_returns_none(
-        self, mock_get_lrcred, mock_get_plus, mock_get_lrclib, mock_get_better, mock_get_genius
+        self, mock_get_lrcred, mock_get_plus, mock_get_lrclib, mock_get_better, mock_get_mega, mock_get_genius
     ):
         mock_lrcred = MagicMock()
         mock_lrcred.get_lyrics.return_value = None
@@ -1196,6 +1207,9 @@ class TestLyricsProviderChain(unittest.TestCase):
         mock_better = MagicMock()
         mock_get_better.return_value = mock_better
 
+        mock_mega = MagicMock()
+        mock_get_mega.return_value = mock_mega
+
         mock_genius = MagicMock()
         mock_get_genius.return_value = mock_genius
 
@@ -1205,15 +1219,17 @@ class TestLyricsProviderChain(unittest.TestCase):
         mock_plus.get_lyrics.assert_called_once()
         mock_lrclib.get_lyrics.assert_not_called()
         mock_better.get_lyrics.assert_not_called()
+        mock_mega.get_lyrics.assert_not_called()
         mock_genius.get_lyrics.assert_not_called()
 
     @patch("providers.lyrics.get_genius_provider")
+    @patch("providers.lyrics.get_megalobiz_provider")
     @patch("providers.lyrics.get_better_lyrics_provider")
     @patch("providers.lyrics.get_lrclib_provider")
     @patch("providers.lyrics.get_lyrics_plus_provider")
     @patch("providers.lyrics.get_lrc_red_provider")
     def test_chain_falls_back_to_lrclib_when_lrcred_and_plus_return_none(
-        self, mock_get_lrcred, mock_get_plus, mock_get_lrclib, mock_get_better, mock_get_genius
+        self, mock_get_lrcred, mock_get_plus, mock_get_lrclib, mock_get_better, mock_get_mega, mock_get_genius
     ):
         mock_lrcred = MagicMock()
         mock_lrcred.get_lyrics.return_value = None
@@ -1233,6 +1249,9 @@ class TestLyricsProviderChain(unittest.TestCase):
         mock_better = MagicMock()
         mock_get_better.return_value = mock_better
 
+        mock_mega = MagicMock()
+        mock_get_mega.return_value = mock_mega
+
         mock_genius = MagicMock()
         mock_get_genius.return_value = mock_genius
 
@@ -1242,15 +1261,17 @@ class TestLyricsProviderChain(unittest.TestCase):
         mock_plus.get_lyrics.assert_called_once()
         mock_lrclib.get_lyrics.assert_called_once()
         mock_better.get_lyrics.assert_not_called()
+        mock_mega.get_lyrics.assert_not_called()
         mock_genius.get_lyrics.assert_not_called()
 
     @patch("providers.lyrics.get_genius_provider")
+    @patch("providers.lyrics.get_megalobiz_provider")
     @patch("providers.lyrics.get_better_lyrics_provider")
     @patch("providers.lyrics.get_lrclib_provider")
     @patch("providers.lyrics.get_lyrics_plus_provider")
     @patch("providers.lyrics.get_lrc_red_provider")
-    def test_chain_falls_back_to_better_lyrics_when_first_three_return_none(
-        self, mock_get_lrcred, mock_get_plus, mock_get_lrclib, mock_get_better, mock_get_genius
+    def test_chain_falls_back_to_megalobiz_when_first_three_return_none(
+        self, mock_get_lrcred, mock_get_plus, mock_get_lrclib, mock_get_better, mock_get_mega, mock_get_genius
     ):
         mock_lrcred = MagicMock()
         mock_lrcred.get_lyrics.return_value = None
@@ -1263,6 +1284,54 @@ class TestLyricsProviderChain(unittest.TestCase):
         mock_lrclib = MagicMock()
         mock_lrclib.get_lyrics.return_value = None
         mock_get_lrclib.return_value = mock_lrclib
+
+        mock_mega = MagicMock()
+        mock_mega.get_lyrics.return_value = {
+            "source": "Megalobiz",
+            "sync_type": "line",
+            "lines": [{"text": "Megalobiz line", "start_ms": 150}],
+        }
+        mock_get_mega.return_value = mock_mega
+
+        mock_better = MagicMock()
+        mock_get_better.return_value = mock_better
+
+        mock_genius = MagicMock()
+        mock_get_genius.return_value = mock_genius
+
+        res = providers.lyrics.get_lyrics({"title": "Test", "artist": "Artist"})
+        self.assertEqual(res["source"], "Megalobiz")
+        mock_lrcred.get_lyrics.assert_called_once()
+        mock_plus.get_lyrics.assert_called_once()
+        mock_lrclib.get_lyrics.assert_called_once()
+        mock_mega.get_lyrics.assert_called_once()
+        mock_better.get_lyrics.assert_not_called()
+        mock_genius.get_lyrics.assert_not_called()
+
+    @patch("providers.lyrics.get_genius_provider")
+    @patch("providers.lyrics.get_megalobiz_provider")
+    @patch("providers.lyrics.get_better_lyrics_provider")
+    @patch("providers.lyrics.get_lrclib_provider")
+    @patch("providers.lyrics.get_lyrics_plus_provider")
+    @patch("providers.lyrics.get_lrc_red_provider")
+    def test_chain_falls_back_to_better_lyrics_when_first_four_return_none(
+        self, mock_get_lrcred, mock_get_plus, mock_get_lrclib, mock_get_better, mock_get_mega, mock_get_genius
+    ):
+        mock_lrcred = MagicMock()
+        mock_lrcred.get_lyrics.return_value = None
+        mock_get_lrcred.return_value = mock_lrcred
+
+        mock_plus = MagicMock()
+        mock_plus.get_lyrics.return_value = None
+        mock_get_plus.return_value = mock_plus
+
+        mock_lrclib = MagicMock()
+        mock_lrclib.get_lyrics.return_value = None
+        mock_get_lrclib.return_value = mock_lrclib
+
+        mock_mega = MagicMock()
+        mock_mega.get_lyrics.return_value = None
+        mock_get_mega.return_value = mock_mega
 
         mock_better = MagicMock()
         mock_better.get_lyrics.return_value = {
@@ -1279,16 +1348,18 @@ class TestLyricsProviderChain(unittest.TestCase):
         mock_lrcred.get_lyrics.assert_called_once()
         mock_plus.get_lyrics.assert_called_once()
         mock_lrclib.get_lyrics.assert_called_once()
+        mock_mega.get_lyrics.assert_called_once()
         mock_better.get_lyrics.assert_called_once()
         mock_genius.get_lyrics.assert_not_called()
 
     @patch("providers.lyrics.get_genius_provider")
+    @patch("providers.lyrics.get_megalobiz_provider")
     @patch("providers.lyrics.get_better_lyrics_provider")
     @patch("providers.lyrics.get_lrclib_provider")
     @patch("providers.lyrics.get_lyrics_plus_provider")
     @patch("providers.lyrics.get_lrc_red_provider")
-    def test_chain_falls_back_to_genius_when_first_four_return_none(
-        self, mock_get_lrcred, mock_get_plus, mock_get_lrclib, mock_get_better, mock_get_genius
+    def test_chain_falls_back_to_genius_when_first_five_return_none(
+        self, mock_get_lrcred, mock_get_plus, mock_get_lrclib, mock_get_better, mock_get_mega, mock_get_genius
     ):
         mock_lrcred = MagicMock()
         mock_lrcred.get_lyrics.return_value = None
@@ -1301,6 +1372,10 @@ class TestLyricsProviderChain(unittest.TestCase):
         mock_lrclib = MagicMock()
         mock_lrclib.get_lyrics.return_value = None
         mock_get_lrclib.return_value = mock_lrclib
+
+        mock_mega = MagicMock()
+        mock_mega.get_lyrics.return_value = None
+        mock_get_mega.return_value = mock_mega
 
         mock_better = MagicMock()
         mock_better.get_lyrics.return_value = None
@@ -1319,16 +1394,18 @@ class TestLyricsProviderChain(unittest.TestCase):
         mock_lrcred.get_lyrics.assert_called_once()
         mock_plus.get_lyrics.assert_called_once()
         mock_lrclib.get_lyrics.assert_called_once()
+        mock_mega.get_lyrics.assert_called_once()
         mock_better.get_lyrics.assert_called_once()
         mock_genius.get_lyrics.assert_called_once()
 
     @patch("providers.lyrics.get_genius_provider")
+    @patch("providers.lyrics.get_megalobiz_provider")
     @patch("providers.lyrics.get_better_lyrics_provider")
     @patch("providers.lyrics.get_lrclib_provider")
     @patch("providers.lyrics.get_lyrics_plus_provider")
     @patch("providers.lyrics.get_lrc_red_provider")
     def test_chain_falls_back_when_providers_raise_exceptions(
-        self, mock_get_lrcred, mock_get_plus, mock_get_lrclib, mock_get_better, mock_get_genius
+        self, mock_get_lrcred, mock_get_plus, mock_get_lrclib, mock_get_better, mock_get_mega, mock_get_genius
     ):
         mock_lrcred = MagicMock()
         mock_lrcred.get_lyrics.side_effect = RuntimeError("Crash in lrc.red")
@@ -1346,6 +1423,10 @@ class TestLyricsProviderChain(unittest.TestCase):
         mock_better.get_lyrics.side_effect = RuntimeError("Crash in BetterLyrics")
         mock_get_better.return_value = mock_better
 
+        mock_mega = MagicMock()
+        mock_mega.get_lyrics.side_effect = RuntimeError("Crash in Megalobiz")
+        mock_get_mega.return_value = mock_mega
+
         mock_genius = MagicMock()
         mock_genius.get_lyrics.return_value = {
             "source": "Genius",
@@ -1359,15 +1440,17 @@ class TestLyricsProviderChain(unittest.TestCase):
         mock_plus.get_lyrics.assert_called_once()
         mock_lrclib.get_lyrics.assert_called_once()
         mock_better.get_lyrics.assert_called_once()
+        mock_mega.get_lyrics.assert_called_once()
         mock_genius.get_lyrics.assert_called_once()
 
     @patch("providers.lyrics.get_genius_provider")
+    @patch("providers.lyrics.get_megalobiz_provider")
     @patch("providers.lyrics.get_better_lyrics_provider")
     @patch("providers.lyrics.get_lrclib_provider")
     @patch("providers.lyrics.get_lyrics_plus_provider")
     @patch("providers.lyrics.get_lrc_red_provider")
-    def test_chain_returns_none_when_all_five_providers_fail(
-        self, mock_get_lrcred, mock_get_plus, mock_get_lrclib, mock_get_better, mock_get_genius
+    def test_chain_returns_none_when_all_six_providers_fail(
+        self, mock_get_lrcred, mock_get_plus, mock_get_lrclib, mock_get_better, mock_get_mega, mock_get_genius
     ):
         mock_lrcred = MagicMock()
         mock_lrcred.get_lyrics.return_value = None
@@ -1385,6 +1468,10 @@ class TestLyricsProviderChain(unittest.TestCase):
         mock_better.get_lyrics.return_value = None
         mock_get_better.return_value = mock_better
 
+        mock_mega = MagicMock()
+        mock_mega.get_lyrics.return_value = None
+        mock_get_mega.return_value = mock_mega
+
         mock_genius = MagicMock()
         mock_genius.get_lyrics.return_value = None
         mock_get_genius.return_value = mock_genius
@@ -1395,6 +1482,7 @@ class TestLyricsProviderChain(unittest.TestCase):
         mock_plus.get_lyrics.assert_called_once()
         mock_lrclib.get_lyrics.assert_called_once()
         mock_better.get_lyrics.assert_called_once()
+        mock_mega.get_lyrics.assert_called_once()
         mock_genius.get_lyrics.assert_called_once()
 
 
@@ -1767,6 +1855,192 @@ class TestGeniusProvider(unittest.TestCase):
     def test_get_lyrics_network_error(self):
         import requests
         self.mock_session.get.side_effect = requests.RequestException("Timeout connecting to Genius")
+        track = {"title": "Levitating", "artist": "Dua Lipa"}
+        self.assertIsNone(self.provider.get_lyrics(track))
+
+
+class TestMegalobizProvider(unittest.TestCase):
+    def setUp(self):
+        self.mock_session = MagicMock()
+        self.provider = MegalobizProvider(session=self.mock_session)
+
+    def test_provider_metadata(self):
+        self.assertEqual(self.provider.name, "Megalobiz")
+        self.assertEqual(self.provider.attribution, DEFAULT_MEGALOBIZ_ATTRIBUTION)
+        headers = self.provider._headers()
+        self.assertIn("ANSImuz", headers["User-Agent"])
+        self.assertNotIn("X-API-Key", headers)
+
+        key_provider = MegalobizProvider(api_key="mbz_secret_key", session=self.mock_session)
+        key_headers = key_provider._headers()
+        self.assertEqual(key_headers["X-API-Key"], "mbz_secret_key")
+
+    def test_score_candidate(self):
+        cand1 = {"title": "Levitating", "score": 1.0, "duration": 202.87, "duration_diff": 0.13}
+        cand2 = {"title": "Levitating (Remix)", "score": 0.9, "duration": 202.87, "duration_diff": 0.13}
+        cand3 = {"title": "Levitating", "score": 1.0, "duration": 260.0, "duration_diff": 57.0}
+
+        score1 = megalobiz_score_candidate(cand1, "Levitating", "Dua Lipa", 203.0)
+        score2 = megalobiz_score_candidate(cand2, "Levitating", "Dua Lipa", 203.0)
+        score3 = megalobiz_score_candidate(cand3, "Levitating", "Dua Lipa", 203.0)
+
+        # Canonical track should outscore unwanted remix and wrong duration
+        self.assertGreater(score1, score2)
+        self.assertGreater(score1, score3)
+
+    def test_get_lyrics_success_with_lrc_string(self):
+        search_resp = MagicMock()
+        search_resp.status_code = 200
+        search_resp.json.return_value = {
+            "count": 1,
+            "results": [
+                {
+                    "id": 194905,
+                    "title": "Levitating",
+                    "artist": "Dua Lipa",
+                    "duration": 202.87,
+                    "duration_diff": 0.13,
+                    "score": 1.0,
+                    "url": "https://megalobiz.com/lrc/194905/levitating",
+                }
+            ],
+        }
+
+        sheet_resp = MagicMock()
+        sheet_resp.status_code = 200
+        sheet_resp.json.return_value = {
+            "id": 194905,
+            "title": "Levitating",
+            "artist": "Dua Lipa",
+            "duration": 202.87,
+            "url": "https://megalobiz.com/lrc/194905/levitating",
+            "lrc": "[00:08.87]If you wanna run away with me, I know a galaxy\n[00:11.26]And I can take you for a ride",
+        }
+
+        self.mock_session.get.side_effect = [search_resp, sheet_resp]
+
+        track = {
+            "title": "Levitating",
+            "artist": "Dua Lipa",
+            "album": "Future Nostalgia",
+            "duration_ms": 203000,
+        }
+        res = self.provider.get_lyrics(track)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["source"], "Megalobiz")
+        self.assertEqual(res["sync_type"], "line")
+        self.assertEqual(res["title"], "Levitating")
+        self.assertEqual(res["artist"], "Dua Lipa")
+        self.assertEqual(res["url"], "https://megalobiz.com/lrc/194905/levitating")
+        self.assertEqual(res["attribution"], DEFAULT_MEGALOBIZ_ATTRIBUTION)
+        self.assertEqual(len(res["lines"]), 2)
+        self.assertEqual(res["lines"][0]["text"], "If you wanna run away with me, I know a galaxy")
+        self.assertEqual(res["lines"][0]["start_ms"], 8870)
+        self.assertEqual(res["lines"][0]["end_ms"], 11260)
+        self.assertEqual(res["lines"][1]["text"], "And I can take you for a ride")
+        self.assertEqual(res["lines"][1]["start_ms"], 11260)
+
+    def test_get_lyrics_success_with_lines_array(self):
+        search_resp = MagicMock()
+        search_resp.status_code = 200
+        search_resp.json.return_value = {
+            "count": 1,
+            "results": [
+                {
+                    "id": 88888,
+                    "title": "Starboy",
+                    "artist": "The Weeknd",
+                    "duration": 230.5,
+                    "score": 0.99,
+                    "url": "https://megalobiz.com/lrc/88888/starboy",
+                }
+            ],
+        }
+
+        sheet_resp = MagicMock()
+        sheet_resp.status_code = 200
+        sheet_resp.json.return_value = {
+            "id": 88888,
+            "title": "Starboy",
+            "artist": "The Weeknd",
+            "duration": 230.5,
+            "url": "https://megalobiz.com/lrc/88888/starboy",
+            "lrc": None,
+            "lines": [
+                {"time_ms": 16390, "text": "I'm tryna put you in that worst mood, ah"},
+                {"time_ms": 19500, "text": "P1 cleaner than your church shoes, ah"},
+            ],
+        }
+
+        self.mock_session.get.side_effect = [search_resp, sheet_resp]
+
+        track = {"title": "Starboy", "artist": "The Weeknd", "duration_ms": 230000}
+        res = self.provider.get_lyrics(track)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["source"], "Megalobiz")
+        self.assertEqual(res["sync_type"], "line")
+        self.assertEqual(len(res["lines"]), 2)
+        self.assertEqual(res["lines"][0]["start_ms"], 16390)
+        self.assertEqual(res["lines"][0]["end_ms"], 19500)
+        self.assertEqual(res["lines"][1]["start_ms"], 19500)
+
+    def test_get_lyrics_unescapes_html_entities(self):
+        search_resp = MagicMock()
+        search_resp.status_code = 200
+        search_resp.json.return_value = {
+            "count": 1,
+            "results": [
+                {
+                    "id": 11111,
+                    "title": "Sweet Child O&#039; Mine",
+                    "artist": "Guns N&amp; Roses",
+                    "score": 1.0,
+                    "url": "https://megalobiz.com/lrc/11111/sweet-child",
+                }
+            ],
+        }
+
+        sheet_resp = MagicMock()
+        sheet_resp.status_code = 200
+        sheet_resp.json.return_value = {
+            "id": 11111,
+            "title": "Sweet Child O&#039; Mine",
+            "artist": "Guns N&amp; Roses",
+            "url": "https://megalobiz.com/lrc/11111/sweet-child",
+            "lrc": "[00:10.00]She&#039;s got a smile that it seems to me\n[00:15.00]Reminds me of childhood memories &amp; love",
+        }
+
+        self.mock_session.get.side_effect = [search_resp, sheet_resp]
+
+        track = {"title": "Sweet Child O' Mine", "artist": "Guns N& Roses"}
+        res = self.provider.get_lyrics(track)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["title"], "Sweet Child O' Mine")
+        self.assertEqual(res["artist"], "Guns N& Roses")
+        self.assertEqual(res["lines"][0]["text"], "She's got a smile that it seems to me")
+        self.assertEqual(res["lines"][1]["text"], "Reminds me of childhood memories & love")
+
+    def test_get_lyrics_no_search_hits_returns_none(self):
+        search_resp = MagicMock()
+        search_resp.status_code = 200
+        search_resp.json.return_value = {"count": 0, "results": []}
+        self.mock_session.get.return_value = search_resp
+
+        track = {"title": "Nonexistent Track Title", "artist": "Unknown Artist"}
+        self.assertIsNone(self.provider.get_lyrics(track))
+
+    def test_get_lyrics_rate_limit_handled(self):
+        search_resp = MagicMock()
+        search_resp.status_code = 429
+        self.mock_session.get.return_value = search_resp
+
+        track = {"title": "Levitating", "artist": "Dua Lipa"}
+        self.assertIsNone(self.provider.get_lyrics(track))
+
+    def test_get_lyrics_network_error_handled(self):
+        import requests
+        self.mock_session.get.side_effect = requests.RequestException("Timeout connecting to Megalobiz")
+
         track = {"title": "Levitating", "artist": "Dua Lipa"}
         self.assertIsNone(self.provider.get_lyrics(track))
 
