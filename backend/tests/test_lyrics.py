@@ -1040,6 +1040,49 @@ class TestLyricsPlusProvider(unittest.TestCase):
         track = {"title": "Unknown Song", "artist": "Unknown Artist"}
         self.assertIsNone(self.provider.get_lyrics(track))
 
+    def test_shared_executor_is_bounded_and_reusable(self):
+        from providers.lyrics.lyrics_plus import get_shared_mirror_executor
+
+        exec1 = get_shared_mirror_executor()
+        exec2 = get_shared_mirror_executor()
+        self.assertIs(exec1, exec2, "Shared mirror executor must be a singleton")
+        self.assertEqual(exec1._max_workers, 8)
+
+    def test_thread_safe_last_good_mirror(self):
+        self.assertIsNone(self.provider.last_good_mirror)
+        self.provider.set_last_good_mirror("https://test.mirror")
+        self.assertEqual(self.provider.last_good_mirror, "https://test.mirror")
+
+    def test_mirror_race_cancels_losing_requests(self):
+        started_mirrors: list[str] = []
+
+        def slow_get(url, **kwargs):
+            started_mirrors.append(url)
+            mock_resp = MagicMock()
+            if "mirror1" in url:
+                mock_resp.status_code = 200
+                mock_resp.json.return_value = {
+                    "lyrics": [{"time": 1000, "text": "Line 1", "syllabus": []}]
+                }
+                return mock_resp
+            # mirror2 would be slow
+            import time
+
+            time.sleep(0.05)
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = {
+                "lyrics": [{"time": 1000, "text": "Slow Line", "syllabus": []}]
+            }
+            return mock_resp
+
+        self.mock_session.get.side_effect = slow_get
+        track = {"title": "Fast Song", "artist": "Artist"}
+        res = self.provider.get_lyrics(track)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["source"], "LyricsPlus")
+        self.assertEqual(res["url"], "https://mirror1.test")
+        self.assertIn("LyricsPlus", res["attribution"])
+
 
 class TestParseLyricsfile(unittest.TestCase):
     def test_parse_empty_or_invalid(self):
@@ -1484,6 +1527,143 @@ class TestLyricsProviderChain(unittest.TestCase):
         mock_better.get_lyrics.assert_called_once()
         mock_mega.get_lyrics.assert_called_once()
         mock_genius.get_lyrics.assert_called_once()
+
+
+class TestProviderHealthAndDeadline(unittest.TestCase):
+    def setUp(self):
+        providers.lyrics.reset_provider_health()
+
+    def tearDown(self):
+        providers.lyrics.reset_provider_health()
+
+    def test_provider_health_429_triggers_immediate_backoff(self):
+        tracker = providers.lyrics.ProviderHealthTracker(rate_limit_backoff_sec=60.0)
+        self.assertTrue(tracker.is_available("Megalobiz"))
+
+        res = providers.lyrics.ProviderResult(
+            error="Rate limit exceeded",
+            status_code=429,
+            provider_name="Megalobiz",
+        )
+        tracker.record_result(res)
+        self.assertFalse(tracker.is_available("Megalobiz"))
+        self.assertGreater(tracker.get_backoff_remaining("Megalobiz"), 0.0)
+
+        # Reset clears backoff
+        tracker.reset()
+        self.assertTrue(tracker.is_available("Megalobiz"))
+
+    def test_provider_health_consecutive_network_failures_trigger_backoff(self):
+        tracker = providers.lyrics.ProviderHealthTracker(
+            failure_threshold=2, base_backoff_sec=30.0
+        )
+        self.assertTrue(tracker.is_available("LRCLIB"))
+
+        # 1st failure does not trigger backoff yet
+        res1 = providers.lyrics.ProviderResult(
+            error="connection_error",
+            provider_name="LRCLIB",
+        )
+        tracker.record_result(res1)
+        self.assertTrue(tracker.is_available("LRCLIB"))
+
+        # 2nd failure hits threshold -> triggers backoff
+        res2 = providers.lyrics.ProviderResult(
+            error="connection_error",
+            provider_name="LRCLIB",
+        )
+        tracker.record_result(res2)
+        self.assertFalse(tracker.is_available("LRCLIB"))
+
+    def test_provider_health_404_not_found_does_not_trigger_backoff(self):
+        tracker = providers.lyrics.ProviderHealthTracker(failure_threshold=2)
+        res = providers.lyrics.ProviderResult(
+            error="not_found",
+            status_code=404,
+            provider_name="Genius",
+        )
+        for _ in range(5):
+            tracker.record_result(res)
+        self.assertTrue(tracker.is_available("Genius"))
+
+    @patch("providers.lyrics.get_genius_provider")
+    @patch("providers.lyrics.get_megalobiz_provider")
+    @patch("providers.lyrics.get_better_lyrics_provider")
+    @patch("providers.lyrics.get_lrclib_provider")
+    @patch("providers.lyrics.get_lyrics_plus_provider")
+    @patch("providers.lyrics.get_lrc_red_provider")
+    def test_chain_skips_backed_off_provider(
+        self,
+        mock_get_lrcred,
+        mock_get_plus,
+        mock_get_lrclib,
+        mock_get_better,
+        mock_get_mega,
+        mock_get_genius,
+    ):
+        mock_lrcred = MagicMock()
+        mock_get_lrcred.return_value = mock_lrcred
+
+        mock_plus = MagicMock()
+        mock_plus.get_lyrics.return_value = {
+            "source": "LyricsPlus",
+            "lines": [{"text": "Found on LyricsPlus", "start_ms": 100}],
+        }
+        mock_get_plus.return_value = mock_plus
+
+        # Put lrc.red into active backoff
+        health = providers.lyrics.get_provider_health()
+        health.record_result(
+            providers.lyrics.ProviderResult(
+                error="Rate limited", status_code=429, provider_name="lrc.red"
+            )
+        )
+        self.assertFalse(health.is_available("lrc.red"))
+
+        res = providers.lyrics.get_lyrics({"title": "Test", "artist": "Artist"})
+        self.assertIsNotNone(res)
+        self.assertEqual(res["source"], "LyricsPlus")
+        # lrc.red was skipped completely!
+        mock_lrcred.get_lyrics.assert_not_called()
+        mock_plus.get_lyrics.assert_called_once()
+
+    @patch("providers.lyrics.get_genius_provider")
+    @patch("providers.lyrics.get_megalobiz_provider")
+    @patch("providers.lyrics.get_better_lyrics_provider")
+    @patch("providers.lyrics.get_lrclib_provider")
+    @patch("providers.lyrics.get_lyrics_plus_provider")
+    @patch("providers.lyrics.get_lrc_red_provider")
+    def test_chain_aborts_when_retrieval_deadline_exceeded(
+        self,
+        mock_get_lrcred,
+        mock_get_plus,
+        mock_get_lrclib,
+        mock_get_better,
+        mock_get_mega,
+        mock_get_genius,
+    ):
+        import time
+
+        def slow_lrc_red(track):
+            time.sleep(0.06)
+            return None
+
+        mock_lrcred = MagicMock()
+        mock_lrcred.get_lyrics.side_effect = slow_lrc_red
+        mock_get_lrcred.return_value = mock_lrcred
+
+        mock_plus = MagicMock()
+        mock_get_plus.return_value = mock_plus
+
+        # Set a very tight deadline (0.05s)
+        res = providers.lyrics.get_lyrics(
+            {"title": "Test", "artist": "Artist"},
+            deadline_seconds=0.05,
+        )
+        self.assertIsNone(res)
+        mock_lrcred.get_lyrics.assert_called_once()
+        # LyricsPlus was not called because deadline expired during lrc.red!
+        mock_plus.get_lyrics.assert_not_called()
 
 
 class TestCleanTitleForSearch(unittest.TestCase):

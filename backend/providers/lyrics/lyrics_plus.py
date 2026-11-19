@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import threading
 from typing import Any
 import requests
 
@@ -31,6 +32,22 @@ DEFAULT_MIRRORS = [
     "https://lyrics-plus-backend.vercel.app",
 ]
 
+_SHARED_EXECUTOR: concurrent.futures.ThreadPoolExecutor | None = None
+_EXECUTOR_LOCK = threading.Lock()
+
+
+def get_shared_mirror_executor() -> concurrent.futures.ThreadPoolExecutor:
+    """Returns a bounded, reusable thread pool for concurrent mirror requests."""
+    global _SHARED_EXECUTOR
+    if _SHARED_EXECUTOR is None:
+        with _EXECUTOR_LOCK:
+            if _SHARED_EXECUTOR is None:
+                _SHARED_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=8,
+                    thread_name_prefix="LyricsPlusMirror",
+                )
+    return _SHARED_EXECUTOR
+
 
 class LyricsPlusProvider(LyricsProvider):
     """
@@ -38,8 +55,9 @@ class LyricsPlusProvider(LyricsProvider):
     Aggregates Apple Music, QQ Music, and Musixmatch lyrics with syllable splits.
 
     Because mirrors run on community/volunteer infrastructure and may experience rate limits
-    or downtime, this provider queries available mirrors concurrently and takes the first
-    usable result. The winning mirror is remembered so subsequent track queries prioritize
+    or downtime, this provider queries available mirrors concurrently using a bounded shared
+    thread pool and takes the first usable result, promptly cancelling remaining mirror tasks.
+    The winning mirror is remembered safely with locking so subsequent track queries prioritize
     the known-healthy host.
     """
 
@@ -57,6 +75,7 @@ class LyricsPlusProvider(LyricsProvider):
         self.timeout = timeout
         self.session = session or requests.Session()
         self._last_good: str | None = None
+        self._lock = threading.Lock()
 
     @property
     def name(self) -> str:
@@ -64,7 +83,12 @@ class LyricsPlusProvider(LyricsProvider):
 
     @property
     def last_good_mirror(self) -> str | None:
-        return self._last_good
+        with self._lock:
+            return self._last_good
+
+    def set_last_good_mirror(self, mirror: str | None) -> None:
+        with self._lock:
+            self._last_good = mirror
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -72,7 +96,15 @@ class LyricsPlusProvider(LyricsProvider):
             "Accept": "application/json",
         }
 
-    def _fetch_from_mirror(self, host: str, params: dict[str, str]) -> tuple[str, dict[str, Any]] | None:
+    def _fetch_from_mirror(
+        self,
+        host: str,
+        params: dict[str, str],
+        stop_event: threading.Event | None = None,
+    ) -> tuple[str, dict[str, Any]] | None:
+        if stop_event and stop_event.is_set():
+            return None
+
         url = f"{host.rstrip('/')}/v2/lyrics/get"
         try:
             resp = self.session.get(
@@ -81,6 +113,9 @@ class LyricsPlusProvider(LyricsProvider):
                 headers=self._headers(),
                 timeout=self.timeout,
             )
+            if stop_event and stop_event.is_set():
+                return None
+
             if resp.status_code == 200:
                 try:
                     data = resp.json()
@@ -95,15 +130,23 @@ class LyricsPlusProvider(LyricsProvider):
             logger.debug("LyricsPlus mirror %s connection error: %s", host, exc)
             return None
 
-    def _race_mirrors(self, params: dict[str, str]) -> dict[str, Any] | None:
+    def _race_mirrors(
+        self,
+        params: dict[str, str],
+        is_cancelled: Any = None,
+    ) -> tuple[str, dict[str, Any]] | None:
         """
-        Races all available mirrors in parallel, taking the first valid response.
+        Races available mirrors in parallel using a bounded shared executor,
+        taking the first valid response and cancelling remaining requests.
         Prioritizes the last known good host if available.
         """
+        with self._lock:
+            last_good = self._last_good
+
         hosts: list[str] = []
-        if self._last_good and self._last_good in self.mirrors:
-            hosts.append(self._last_good)
-            hosts.extend([m for m in self.mirrors if m != self._last_good])
+        if last_good and last_good in self.mirrors:
+            hosts.append(last_good)
+            hosts.extend([m for m in self.mirrors if m != last_good])
         else:
             hosts = list(self.mirrors)
 
@@ -114,31 +157,48 @@ class LyricsPlusProvider(LyricsProvider):
         if len(hosts) == 1:
             res = self._fetch_from_mirror(hosts[0], params)
             if res:
-                self._last_good = res[0]
-                return res[1]
+                with self._lock:
+                    self._last_good = res[0]
+                return res
             return None
 
-        executor = concurrent.futures.ThreadPoolExecutor(max_workers=min(len(hosts), 6))
+        stop_event = threading.Event()
+        executor = get_shared_mirror_executor()
+        futures: dict[concurrent.futures.Future, str] = {}
+
         try:
-            futures = {
-                executor.submit(self._fetch_from_mirror, host, params): host
-                for host in hosts
-            }
+            for host in hosts:
+                if stop_event.is_set() or (is_cancelled and is_cancelled()):
+                    break
+                f = executor.submit(self._fetch_from_mirror, host, params, stop_event)
+                futures[f] = host
+
             for future in concurrent.futures.as_completed(futures):
+                if is_cancelled and is_cancelled():
+                    stop_event.set()
+                    break
+
                 try:
                     res = future.result()
                     if res is not None:
                         winner_host, data = res
-                        self._last_good = winner_host
+                        # Stop losing mirror requests immediately
+                        stop_event.set()
+                        with self._lock:
+                            self._last_good = winner_host
                         logger.debug("LyricsPlus winner host: %s", winner_host)
-                        return data
+                        return res
                 except Exception as exc:
                     logger.debug("LyricsPlus mirror task exception: %s", exc)
+
             return None
         finally:
-            executor.shutdown(wait=False, cancel_futures=True)
+            stop_event.set()
+            for f in futures:
+                if not f.done():
+                    f.cancel()
 
-    def get_lyrics(self, track: dict[str, Any]) -> dict[str, Any] | None:
+    def get_lyrics(self, track: dict[str, Any], is_cancelled: Any = None) -> dict[str, Any] | None:
         """
         Retrieves syllable-level lyrics for the given track.
         Returns normalized lyrics dictionary or None if unavailable.
@@ -160,6 +220,9 @@ class LyricsPlusProvider(LyricsProvider):
             query_titles.append(cleaned_title)
 
         for q_title in query_titles:
+            if is_cancelled and is_cancelled():
+                return None
+
             params: dict[str, str] = {
                 "title": q_title,
                 "artist": artist,
@@ -171,8 +234,9 @@ class LyricsPlusProvider(LyricsProvider):
             if isrc and isrc.strip():
                 params["isrc"] = isrc.strip()
 
-            data = self._race_mirrors(params)
-            if data:
+            res = self._race_mirrors(params, is_cancelled=is_cancelled)
+            if res:
+                winner_host, data = res
                 sync_type, lines = parse_lyrics_plus(data)
                 if lines:
                     return {
@@ -189,7 +253,7 @@ class LyricsPlusProvider(LyricsProvider):
                         "raw_ttml": None,
                         "raw_lrc": None,
                         "attribution": self.attribution,
-                        "url": None,
+                        "url": winner_host,
                     }
 
         return None
