@@ -1,3 +1,6 @@
+use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use pyo3::prelude::*;
@@ -6,6 +9,29 @@ use pyo3::types::PyDict;
 use crate::lyrics::model::Lyrics;
 use crate::lyrics::types::LyricsError;
 use crate::music::track::Track;
+
+thread_local! {
+    /// Thread-local cancellation token for active lyrics fetch task.
+    pub static CURRENT_CANCEL_TOKEN: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+}
+
+/// PyO3 wrapper exposing cancellation checks directly to Python lyrics provider chains.
+#[pyclass]
+#[derive(Clone)]
+pub struct CancelTokenWrapper {
+    token: Arc<AtomicBool>,
+}
+
+#[pymethods]
+impl CancelTokenWrapper {
+    fn is_cancelled(&self) -> bool {
+        self.token.load(Ordering::Relaxed)
+    }
+
+    fn __call__(&self) -> bool {
+        self.token.load(Ordering::Relaxed)
+    }
+}
 
 /// Converts a Rust `Track` into a Python dictionary compatible with the backend bridge.
 pub fn track_to_py_dict<'py>(py: Python<'py>, track: &Track) -> PyResult<Bound<'py, PyDict>> {
@@ -66,9 +92,20 @@ pub fn fetch_lyrics(track: &Track) -> Result<Option<Lyrics>, LyricsError> {
         return Ok(Some(cached));
     }
 
+    let cancel_token = CURRENT_CANCEL_TOKEN.with(|c| c.borrow().clone());
+    if let Some(ref token) = cancel_token
+        && token.load(Ordering::Relaxed)
+    {
+        return Ok(None);
+    }
+
     let json_opt = crate::music::with_backend(|py, bridge| {
         let py_dict = track_to_py_dict(py, track)?;
-        let res = bridge.getattr("fetch_lyrics")?.call1((py_dict,))?;
+        let cancel_arg = match cancel_token {
+            Some(token) => Bound::new(py, CancelTokenWrapper { token })?.into_any(),
+            None => py.None().into_bound(py),
+        };
+        let res = bridge.getattr("fetch_lyrics")?.call1((py_dict, cancel_arg))?;
         if res.is_none() {
             Ok(None)
         } else {
@@ -78,6 +115,15 @@ pub fn fetch_lyrics(track: &Track) -> Result<Option<Lyrics>, LyricsError> {
         }
     })
     .map_err(|err_msg| classify_lyrics_error(&err_msg))?;
+
+    if CURRENT_CANCEL_TOKEN.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map(|t| t.load(Ordering::Relaxed))
+            .unwrap_or(false)
+    }) {
+        return Ok(None);
+    }
 
     match json_opt {
         Some(json_str) => {

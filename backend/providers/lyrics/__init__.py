@@ -95,7 +95,7 @@ def get_lrc_red_provider() -> LrcRedProvider:
 get_default_provider = get_lrc_red_provider
 
 
-def get_lyrics(track: dict[str, Any]) -> dict[str, Any] | None:
+def get_lyrics(track: dict[str, Any], is_cancelled: Any = None) -> dict[str, Any] | None:
     """
     Fetches normalized lyrics for a track dictionary using a tiered provider chain:
     1. lrc.red (LRCLIB ISRC provider with line/word-level sync)
@@ -104,8 +104,20 @@ def get_lyrics(track: dict[str, Any]) -> dict[str, Any] | None:
     4. Megalobiz (Megalobiz community synchronized LRC sheets via official REST API)
     5. BetterLyrics (Apple Music TTML syllable-timed & Portato QQ Music QRC fallback)
     6. Genius (Web scraper fallback providing unsynchronized plain lyrics with stanzas)
+
+    Optionally accepts `is_cancelled` callable to abort requests early between provider stages.
     """
+    def cancelled() -> bool:
+        if is_cancelled is None:
+            return False
+        try:
+            return bool(is_cancelled())
+        except Exception:
+            return False
+
     # 1. Attempt lrc.red first
+    if cancelled():
+        return None
     try:
         res = get_lrc_red_provider().get_lyrics(track)
         if res and res.get("lines"):
@@ -114,6 +126,8 @@ def get_lyrics(track: dict[str, Any]) -> dict[str, Any] | None:
         logger.debug("lrc.red retrieval failed, falling back to LyricsPlus: %s", exc)
 
     # 2. Attempt LyricsPlus second
+    if cancelled():
+        return None
     try:
         res = get_lyrics_plus_provider().get_lyrics(track)
         if res and res.get("lines"):
@@ -122,6 +136,8 @@ def get_lyrics(track: dict[str, Any]) -> dict[str, Any] | None:
         logger.debug("LyricsPlus retrieval failed, falling back to LRCLIB: %s", exc)
 
     # 3. Attempt LRCLIB.net third
+    if cancelled():
+        return None
     try:
         res = get_lrclib_provider().get_lyrics(track)
         if res and res.get("lines"):
@@ -130,6 +146,8 @@ def get_lyrics(track: dict[str, Any]) -> dict[str, Any] | None:
         logger.debug("LRCLIB.net retrieval failed, falling back to Megalobiz: %s", exc)
 
     # 4. Attempt Megalobiz fourth
+    if cancelled():
+        return None
     try:
         res = get_megalobiz_provider().get_lyrics(track)
         if res and res.get("lines"):
@@ -138,6 +156,8 @@ def get_lyrics(track: dict[str, Any]) -> dict[str, Any] | None:
         logger.debug("Megalobiz retrieval failed, falling back to BetterLyrics: %s", exc)
 
     # 5. Attempt BetterLyrics fifth
+    if cancelled():
+        return None
     try:
         res = get_better_lyrics_provider().get_lyrics(track)
         if res and res.get("lines"):
@@ -146,6 +166,8 @@ def get_lyrics(track: dict[str, Any]) -> dict[str, Any] | None:
         logger.debug("BetterLyrics retrieval failed, falling back to Genius: %s", exc)
 
     # 6. Fallback to Genius (last resort)
+    if cancelled():
+        return None
     try:
         return get_genius_provider().get_lyrics(track)
     except Exception as exc:

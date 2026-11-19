@@ -2045,5 +2045,36 @@ class TestMegalobizProvider(unittest.TestCase):
         self.assertIsNone(self.provider.get_lyrics(track))
 
 
+class TestTieredLyricsCancellation(unittest.TestCase):
+    def test_cancellation_callback_aborts_before_first_provider(self):
+        track = {"title": "Test Track", "artist": "Test Artist"}
+        is_cancelled = MagicMock(return_value=True)
+
+        with patch("providers.lyrics.get_lrc_red_provider") as mock_lrc:
+            res = providers.lyrics.get_lyrics(track, is_cancelled=is_cancelled)
+            self.assertIsNone(res)
+            mock_lrc.assert_not_called()
+
+    def test_cancellation_callback_aborts_between_providers(self):
+        track = {"title": "Test Track", "artist": "Test Artist"}
+        call_count = 0
+
+        def check_cancelled():
+            nonlocal call_count
+            call_count += 1
+            return call_count >= 2
+
+        with patch("providers.lyrics.get_lrc_red_provider") as mock_lrc, \
+             patch("providers.lyrics.get_lyrics_plus_provider") as mock_lp:
+            mock_lrc_inst = MagicMock()
+            mock_lrc_inst.get_lyrics.return_value = None
+            mock_lrc.return_value = mock_lrc_inst
+
+            res = providers.lyrics.get_lyrics(track, is_cancelled=check_cancelled)
+            self.assertIsNone(res)
+            mock_lrc_inst.get_lyrics.assert_called_once()
+            mock_lp.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

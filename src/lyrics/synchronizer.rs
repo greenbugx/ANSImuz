@@ -284,13 +284,10 @@ pub fn compute_sync_point(
 
         let line = &lyrics.lines[primary_idx];
         let start = line.start_ms.unwrap_or(0);
-        let next_start = lyrics.lines.get(primary_idx + 1).and_then(|l| l.start_ms);
-        let end = line
-            .end_ms
-            .or(next_start)
-            .or(duration_ms)
-            .unwrap_or(start + 5000);
-        let prog = ((position_ms - start) as f32 / (end - start).max(1) as f32).clamp(0.0, 1.0);
+        let end = effective_line_end(primary_idx, &lyrics.lines, duration_ms);
+        let prog = ((position_ms.saturating_sub(start)) as f32
+            / (end.saturating_sub(start)).max(1) as f32)
+            .clamp(0.0, 1.0);
 
         let mut indices = all_active;
         if let Some(pos) = indices.iter().position(|&i| i == primary_idx)
@@ -334,6 +331,40 @@ pub fn compute_sync_point(
     }
 }
 
+/// Determines the effective end timestamp (in ms) for the line at `idx`.
+///
+/// If explicit `end_ms` is present, it is used directly.
+/// Otherwise, determines the start timestamp of the next line belonging to the same vocal
+/// stream (i.e. for non-background lines, the next non-background line by the same singer).
+/// If no subsequent line for the same singer exists, falls back to the immediate next line's start,
+/// then to track `duration_ms`, and finally to a default 5-second duration.
+pub fn effective_line_end(idx: usize, lines: &[LyricLine], duration_ms: Option<u64>) -> u64 {
+    let line = match lines.get(idx) {
+        Some(l) => l,
+        None => return 0,
+    };
+    let start = line.start_ms.unwrap_or(0);
+
+    if let Some(end) = line.end_ms {
+        return end;
+    }
+
+    let next_start = if !line.is_background {
+        lines
+            .iter()
+            .skip(idx + 1)
+            .find(|l| !l.is_background && l.singer == line.singer)
+            .and_then(|l| l.start_ms)
+            .or_else(|| lines.get(idx + 1).and_then(|l| l.start_ms))
+    } else {
+        lines.get(idx + 1).and_then(|l| l.start_ms)
+    };
+
+    next_start
+        .or(duration_ms)
+        .unwrap_or(start + 5000)
+}
+
 /// Returns every line index whose `[start_ms, end_ms]` window contains `ms`.
 fn find_all_active_lines(ms: u64, lines: &[LyricLine], duration_ms: Option<u64>) -> Vec<usize> {
     lines
@@ -341,21 +372,7 @@ fn find_all_active_lines(ms: u64, lines: &[LyricLine], duration_ms: Option<u64>)
         .enumerate()
         .filter(|(i, line)| {
             if let Some(start) = line.start_ms {
-                let next_start = if !line.is_background {
-                    lines
-                        .iter()
-                        .skip(i + 1)
-                        .find(|l| !l.is_background && l.singer == line.singer)
-                        .and_then(|l| l.start_ms)
-                        .or_else(|| lines.get(i + 1).and_then(|l| l.start_ms))
-                } else {
-                    lines.get(i + 1).and_then(|l| l.start_ms)
-                };
-                let end = line
-                    .end_ms
-                    .or(next_start)
-                    .or(duration_ms)
-                    .unwrap_or(start + 5000);
+                let end = effective_line_end(*i, lines, duration_ms);
                 ms >= start && ms < end
             } else {
                 false
@@ -389,42 +406,36 @@ fn find_active_line(
     {
         let curr = &lines[hint];
         let curr_start = curr.start_ms.unwrap_or(0);
+        let curr_end = effective_line_end(hint, lines, duration_ms);
         let next_start = lines.get(hint + 1).and_then(|l| l.start_ms);
-        let curr_end = curr.end_ms.or(next_start);
 
         if ms >= curr_start {
-            if let Some(end_val) = curr_end {
-                if ms < end_val {
-                    let prog = ((ms - curr_start) as f32 / (end_val - curr_start).max(1) as f32)
-                        .clamp(0.0, 1.0);
-                    return (Some(hint), false, prog);
-                }
-                // Check if in gap between current line and next line
-                if let Some(nxt) = next_start
-                    && ms < nxt
-                {
-                    return (Some(hint), true, 1.0);
-                }
+            if ms < curr_end {
+                let prog = ((ms.saturating_sub(curr_start)) as f32
+                    / (curr_end.saturating_sub(curr_start)).max(1) as f32)
+                    .clamp(0.0, 1.0);
+                return (Some(hint), false, prog);
+            }
+            // Check if in gap between current line and next line
+            if let Some(nxt) = next_start
+                && ms < nxt
+            {
+                return (Some(hint), true, 1.0);
             }
             // Check immediate next line
             if hint + 1 < lines.len() {
                 let next_idx = hint + 1;
                 let next_line = &lines[next_idx];
                 let n_start = next_line.start_ms.unwrap_or(0);
-                let n_end = next_line
-                    .end_ms
-                    .or_else(|| lines.get(next_idx + 1).and_then(|l| l.start_ms));
+                let n_end = effective_line_end(next_idx, lines, duration_ms);
 
-                if ms >= n_start {
-                    if let Some(e) = n_end {
-                        if ms < e {
-                            let prog = ((ms - n_start) as f32 / (e - n_start).max(1) as f32)
-                                .clamp(0.0, 1.0);
-                            return (Some(next_idx), false, prog);
-                        }
-                    } else {
-                        return (Some(next_idx), false, 0.0);
-                    }
+                if ms >= n_start
+                    && ms < n_end
+                {
+                    let prog = ((ms.saturating_sub(n_start)) as f32
+                        / (n_end.saturating_sub(n_start)).max(1) as f32)
+                        .clamp(0.0, 1.0);
+                    return (Some(next_idx), false, prog);
                 }
             }
         }
@@ -447,14 +458,12 @@ fn find_active_line(
     let line = &lines[found_idx];
     let start = line.start_ms.unwrap_or(0);
     let next_start = lines.get(found_idx + 1).and_then(|l| l.start_ms);
-    let effective_end = line
-        .end_ms
-        .or(next_start)
-        .or(duration_ms)
-        .unwrap_or(start + 5000);
+    let effective_end = effective_line_end(found_idx, lines, duration_ms);
 
     if ms < effective_end {
-        let prog = ((ms - start) as f32 / (effective_end - start).max(1) as f32).clamp(0.0, 1.0);
+        let prog = ((ms.saturating_sub(start)) as f32
+            / (effective_end.saturating_sub(start)).max(1) as f32)
+            .clamp(0.0, 1.0);
         (Some(found_idx), false, prog)
     } else {
         // Line has finished
@@ -862,5 +871,50 @@ mod tests {
         assert_eq!(pt.active_line_indices, vec![0, 1]);
         assert_eq!(lyrics.lines[pt.active_line_indices[0]].singer, 0);
         assert_eq!(lyrics.lines[pt.active_line_indices[1]].singer, 1);
+    }
+
+    #[test]
+    fn test_duet_line_without_end_ms_progression_not_clamped() {
+        // Line 0: Singer 0 starts at 10s, no explicit end_ms
+        // Line 1: Singer 1 starts at 15s, no explicit end_ms
+        // Line 2: Singer 0 starts at 20s, no explicit end_ms
+        let lyrics = Lyrics {
+            lines: vec![
+                LyricLine::new("Lead line A", Some(10000), None).with_singer(0),
+                LyricLine::new("Duet response B", Some(15000), None).with_singer(1),
+                LyricLine::new("Lead line C", Some(20000), None).with_singer(0),
+            ],
+            sync_type: SyncType::Line,
+            ..Default::default()
+        };
+
+        // Check effective_line_end directly
+        assert_eq!(effective_line_end(0, &lyrics.lines, Some(30000)), 20000);
+        assert_eq!(effective_line_end(1, &lyrics.lines, Some(30000)), 20000);
+        assert_eq!(effective_line_end(2, &lyrics.lines, Some(30000)), 30000);
+
+        let mut sync = LyricsSynchronizer::new();
+
+        // At 17.5s (17500ms):
+        // Singer 0 is primary scroll anchor (lines[0])
+        // Without effective_line_end consistency, next_start was line 1 (15s), clamping prog to 1.0!
+        // With effective_line_end consistency, end is line 2 (20s), so prog is (17500-10000)/(20000-10000) = 0.75
+        let pt = sync.sync_position(1, 17.5, Some(30.0), &lyrics);
+        assert_eq!(pt.active_line_index, Some(0));
+        assert_eq!(pt.active_line_indices, vec![0, 1]);
+        assert!(
+            (pt.line_progress - 0.75).abs() < 0.001,
+            "Line progress at 17.5s must be 0.75 (75%), not clamped to 1.0. Got {}",
+            pt.line_progress
+        );
+
+        // At 15.0s (15000ms): exactly halfway through Singer 0's line
+        let pt_half = sync.sync_position(1, 15.0, Some(30.0), &lyrics);
+        assert_eq!(pt_half.active_line_index, Some(0));
+        assert!(
+            (pt_half.line_progress - 0.50).abs() < 0.001,
+            "Line progress at 15.0s must be 0.50. Got {}",
+            pt_half.line_progress
+        );
     }
 }

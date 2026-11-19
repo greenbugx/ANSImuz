@@ -55,13 +55,13 @@ def resolve_playable(track: TrackDict) -> TrackDict:
         raise classify_error("Track resolution failed", exc) from exc
 
 
-def fetch_lyrics(track: TrackDict) -> dict[str, Any] | None:
+def fetch_lyrics(track: TrackDict, is_cancelled: Any = None) -> dict[str, Any] | None:
     """
     Fetches normalized lyrics for the given track dictionary via lyrics providers.
     Invoked directly by Rust via PyO3.
     """
     try:
-        return _get_lyrics(track)
+        return _get_lyrics(track, is_cancelled=is_cancelled)
     except ProviderError:
         raise
     except Exception as exc:

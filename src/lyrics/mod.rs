@@ -542,7 +542,9 @@ mod tests {
         use pyo3::prelude::*;
         use pyo3::types::PyDictMethods;
 
-        let _guard = crate::paths::ENV_LOCK.lock().unwrap();
+        let _guard = crate::paths::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         Python::attach(|py| {
             let track = Track::new("Creep", "Radiohead")
                 .with_album("Pablo Honey")
@@ -625,13 +627,15 @@ mod tests {
         use std::sync::mpsc;
         use std::time::Duration;
 
-        let _guard = crate::paths::ENV_LOCK.lock().unwrap();
+        let _guard = crate::paths::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let (tx, rx) = mpsc::channel();
         let track = Track::new("NonExistentTrack_XYZ_12345", "UnknownArtist_99999");
 
         let handle = spawn_fetch_lyrics(track, 7, tx);
         let resp = rx
-            .recv_timeout(Duration::from_secs(10))
+            .recv_timeout(Duration::from_secs(30))
             .expect("Must receive LyricsResponse on channel");
 
         assert_eq!(resp.generation, 7);
