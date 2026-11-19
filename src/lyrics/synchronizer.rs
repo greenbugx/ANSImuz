@@ -93,6 +93,21 @@ pub struct LyricsSynchronizer {
     is_ended: bool,
 }
 
+/// Safely converts fractional seconds into milliseconds, rejecting NaN, infinities,
+/// negative values, and values that would overflow `u64`.
+pub fn seconds_to_ms(seconds: f64) -> Option<u64> {
+    if !seconds.is_finite() || seconds < 0.0 {
+        return None;
+    }
+
+    let millis = seconds * 1000.0;
+    if millis > u64::MAX as f64 {
+        return None;
+    }
+
+    Some(millis.round() as u64)
+}
+
 impl LyricsSynchronizer {
     /// Creates a new, uninitialized lyrics synchronizer.
     pub fn new() -> Self {
@@ -120,13 +135,24 @@ impl LyricsSynchronizer {
         duration_sec: Option<f64>,
         lyrics: &Lyrics,
     ) -> &LyricsSyncPoint {
-        let position_ms = (elapsed_sec.max(0.0) * 1000.0).round() as u64;
-        let duration_ms = duration_sec
-            .filter(|&d| d > 0.0)
-            .map(|d| (d * 1000.0).round() as u64);
+        let position_ms = match seconds_to_ms(elapsed_sec) {
+            Some(ms) => ms,
+            None => {
+                // Reject invalid float input (NaN, Inf, negatives, overflow) safely
+                return &self.last_sync_point;
+            }
+        };
+        let duration_ms = duration_sec.and_then(seconds_to_ms);
 
-        // Detect repeat-one or rewind (elapsed jumped backwards) or generation change
+        // Detect generation change or repeat-one/rewind
         let generation_changed = generation != self.last_generation;
+        if generation_changed {
+            self.last_generation = generation;
+            self.last_elapsed_sec = None;
+            self.last_duration_sec = None;
+            self.last_sync_point = LyricsSyncPoint::default();
+        }
+
         let rewound = self
             .last_elapsed_sec
             .map(|last| elapsed_sec < last)
@@ -187,10 +213,18 @@ impl LyricsSynchronizer {
 
     /// Marks the track as completed.
     pub fn sync_ended(&mut self, generation: u64, lyrics: &Lyrics) -> &LyricsSyncPoint {
+        let generation_changed = generation != self.last_generation;
+        if generation_changed {
+            self.last_generation = generation;
+            self.last_elapsed_sec = None;
+            self.last_duration_sec = None;
+            self.last_sync_point = LyricsSyncPoint::default();
+        }
+
         self.last_generation = generation;
         self.is_ended = true;
 
-        let duration_ms = self.last_duration_sec.map(|d| (d * 1000.0).round() as u64);
+        let duration_ms = self.last_duration_sec.and_then(seconds_to_ms);
         let final_pos_ms = duration_ms.unwrap_or(self.last_sync_point.position_ms);
 
         self.last_sync_point = compute_sync_point(
@@ -360,9 +394,7 @@ pub fn effective_line_end(idx: usize, lines: &[LyricLine], duration_ms: Option<u
         lines.get(idx + 1).and_then(|l| l.start_ms)
     };
 
-    next_start
-        .or(duration_ms)
-        .unwrap_or(start + 5000)
+    next_start.or(duration_ms).unwrap_or(start + 5000)
 }
 
 /// Returns every line index whose `[start_ms, end_ms]` window contains `ms`.
@@ -393,8 +425,9 @@ fn find_active_line(
         return (None, false, 0.0);
     }
 
-    // Intro gap check: before the first timed line
-    if let Some(first_start) = lines[0].start_ms
+    // Intro gap check: before the earliest timed line
+    let earliest_start = lines.iter().filter_map(|l| l.start_ms).min();
+    if let Some(first_start) = earliest_start
         && ms < first_start
     {
         return (None, true, 0.0);
@@ -429,9 +462,7 @@ fn find_active_line(
                 let n_start = next_line.start_ms.unwrap_or(0);
                 let n_end = effective_line_end(next_idx, lines, duration_ms);
 
-                if ms >= n_start
-                    && ms < n_end
-                {
+                if ms >= n_start && ms < n_end {
                     let prog = ((ms.saturating_sub(n_start)) as f32
                         / (n_end.saturating_sub(n_start)).max(1) as f32)
                         .clamp(0.0, 1.0);
@@ -444,7 +475,7 @@ fn find_active_line(
     // Fallback search via binary search for seeks / jumps
     let found_idx = match lines.binary_search_by(|line| match line.start_ms {
         Some(s) => s.cmp(&ms),
-        None => std::cmp::Ordering::Less,
+        None => std::cmp::Ordering::Greater,
     }) {
         Ok(exact) => exact,
         Err(insert) => {
@@ -491,18 +522,20 @@ fn find_active_word_and_syllable(
         return (None, line_progress, None, line_progress);
     }
 
-    // Find the word active at ms
+    // Find the word active at ms using centralized effective timing windows
     for (w_idx, word) in line.words.iter().enumerate() {
         if let Some(w_start) = word.start_ms {
-            let next_word_start = line.words.get(w_idx + 1).and_then(|w| w.start_ms);
-            let w_end = word.end_ms.or(next_word_start);
+            let w_end = line.effective_word_end(w_idx);
 
             if ms >= w_start {
                 if let Some(end_val) = w_end {
                     if ms < end_val {
                         // Word is active!
-                        let word_prog = ((ms - w_start) as f32 / (end_val - w_start).max(1) as f32)
-                            .clamp(0.0, 1.0);
+                        let word_prog = if end_val > w_start {
+                            ((ms - w_start) as f32 / (end_val - w_start) as f32).clamp(0.0, 1.0)
+                        } else {
+                            1.0
+                        };
 
                         // Find active syllable within this word
                         let (syl_idx, syl_prog) = find_active_syllable(ms, word, word_prog);
@@ -526,14 +559,16 @@ fn find_active_syllable(ms: u64, word: &LyricWord, fallback_prog: f32) -> (Optio
 
     for (s_idx, syl) in word.syllables.iter().enumerate() {
         if let Some(s_start) = syl.start_ms {
-            let next_syl_start = word.syllables.get(s_idx + 1).and_then(|s| s.start_ms);
-            let s_end = syl.end_ms.or(next_syl_start);
+            let s_end = word.effective_syllable_end(s_idx);
 
             if ms >= s_start {
                 if let Some(end_val) = s_end {
                     if ms < end_val {
-                        let syl_prog = ((ms - s_start) as f32 / (end_val - s_start).max(1) as f32)
-                            .clamp(0.0, 1.0);
+                        let syl_prog = if end_val > s_start {
+                            ((ms - s_start) as f32 / (end_val - s_start) as f32).clamp(0.0, 1.0)
+                        } else {
+                            1.0
+                        };
                         return (Some(s_idx), syl_prog);
                     }
                 } else {
@@ -916,5 +951,129 @@ mod tests {
             "Line progress at 15.0s must be 0.50. Got {}",
             pt_half.line_progress
         );
+    }
+
+    #[test]
+    fn test_seconds_to_ms_boundary_and_non_finite_handling() {
+        assert_eq!(seconds_to_ms(0.0), Some(0));
+        assert_eq!(seconds_to_ms(1.5), Some(1500));
+        assert_eq!(seconds_to_ms(12.3456), Some(12346));
+        assert_eq!(seconds_to_ms(-0.01), None);
+        assert_eq!(seconds_to_ms(f64::NAN), None);
+        assert_eq!(seconds_to_ms(f64::INFINITY), None);
+        assert_eq!(seconds_to_ms(f64::NEG_INFINITY), None);
+        assert_eq!(seconds_to_ms(f64::MAX), None);
+    }
+
+    #[test]
+    fn test_sync_position_handles_nan_and_infinity_safely() {
+        let lyrics = build_test_lyrics();
+        let mut sync = LyricsSynchronizer::new();
+
+        // Normal sync first
+        sync.sync_position(1, 10.5, Some(20.0), &lyrics);
+        assert_eq!(sync.current_sync_point().position_ms, 10500);
+
+        // NaN input must not panic and must return safe cached point
+        let pt_nan = sync.sync_position(1, f64::NAN, None, &lyrics);
+        assert_eq!(pt_nan.position_ms, 10500);
+
+        // Infinity input must not panic
+        let pt_inf = sync.sync_position(1, f64::INFINITY, None, &lyrics);
+        assert_eq!(pt_inf.position_ms, 10500);
+
+        // Negative input must not panic
+        let pt_neg = sync.sync_position(1, -5.0, None, &lyrics);
+        assert_eq!(pt_neg.position_ms, 10500);
+    }
+
+    #[test]
+    fn test_intro_gap_when_first_line_untimed() {
+        let lyrics = Lyrics {
+            lines: vec![
+                LyricLine::new("Untimed intro / metadata", None, None),
+                LyricLine::new("First timed line", Some(10000), Some(15000)),
+            ],
+            sync_type: SyncType::Line,
+            ..Default::default()
+        };
+
+        let mut sync = LyricsSynchronizer::new();
+
+        // At 5.0s (before first timed line at 10.0s): intro gap must be detected
+        let pt = sync.sync_position(1, 5.0, Some(30.0), &lyrics);
+        assert!(
+            pt.is_in_gap,
+            "Must be in intro gap before the earliest timed line"
+        );
+        assert_eq!(pt.active_line_index, None);
+
+        // At 11.0s: first timed line is active
+        let pt2 = sync.sync_position(1, 11.0, Some(30.0), &lyrics);
+        assert!(!pt2.is_in_gap);
+        assert_eq!(pt2.active_line_index, Some(1));
+    }
+
+    #[test]
+    fn test_sync_ended_resets_stale_duration_on_generation_change() {
+        let lyrics = build_test_lyrics();
+        let mut sync = LyricsSynchronizer::new();
+
+        // Generation 1: Track with duration 200s
+        sync.sync_position(1, 50.0, Some(200.0), &lyrics);
+        assert_eq!(sync.current_sync_point().duration_ms, Some(200000));
+
+        // Generation 2 arrives directly with Ended event (e.g. rapid switch or failed playback)
+        let pt_ended = sync.sync_ended(2, &lyrics);
+        assert_eq!(pt_ended.generation, 2);
+        // Must NOT use the 200s duration from generation 1!
+        assert_eq!(
+            pt_ended.duration_ms, None,
+            "Ended event on new generation must not retain stale duration from previous generation"
+        );
+    }
+
+    #[test]
+    fn test_word_and_syllable_timing_semantics_consistent() {
+        let syllables = vec![
+            LyricSyllable::new("ra", Some(10000), None), // implicit end at 10200
+            LyricSyllable::new("di", Some(10200), None), // implicit end at 10400
+            LyricSyllable::new("o", Some(10400), Some(10600)),
+        ];
+        let words = vec![
+            LyricWord::with_syllables("radio", Some(10000), None, syllables), // implicit end at 11000
+            LyricWord::new("head", Some(11000), Some(11500)),
+        ];
+        let line = LyricLine::with_words("radio head", Some(10000), Some(12000), words);
+        let lyrics = Lyrics {
+            lines: vec![line.clone()],
+            sync_type: SyncType::Word,
+            ..Default::default()
+        };
+
+        let mut sync = LyricsSynchronizer::new();
+
+        // At 10300ms:
+        // Model word_at_ms and synchronizer active_word must match (word 0 "radio")
+        let model_word = line.word_at_ms(10300);
+        assert_eq!(model_word.map(|(i, _)| i), Some(0));
+
+        let pt = sync.sync_position(1, 10.3, Some(20.0), &lyrics);
+        assert_eq!(pt.active_word_index, Some(0));
+
+        // Model syllable_at_ms and synchronizer active_syllable must match (syllable 1 "di")
+        let model_syl = line.words[0].syllable_at_ms(10300);
+        assert_eq!(model_syl.map(|(i, _)| i), Some(1));
+        assert_eq!(pt.active_syllable_index, Some(1));
+
+        // At 10700ms (gap between "radio" and "head"):
+        // Word 0 had implicit end at 11000, so word 0 is active, but syllables ended at 10600
+        let model_word_gap = line.word_at_ms(10700);
+        assert_eq!(model_word_gap.map(|(i, _)| i), Some(0));
+
+        let pt_gap = sync.sync_position(1, 10.7, Some(20.0), &lyrics);
+        assert_eq!(pt_gap.active_word_index, Some(0));
+        assert_eq!(pt_gap.active_syllable_index, None);
+        assert_eq!(line.words[0].syllable_at_ms(10700), None);
     }
 }

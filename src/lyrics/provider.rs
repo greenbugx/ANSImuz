@@ -1,6 +1,6 @@
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 
 use pyo3::prelude::*;
@@ -105,7 +105,9 @@ pub fn fetch_lyrics(track: &Track) -> Result<Option<Lyrics>, LyricsError> {
             Some(token) => Bound::new(py, CancelTokenWrapper { token })?.into_any(),
             None => py.None().into_bound(py),
         };
-        let res = bridge.getattr("fetch_lyrics")?.call1((py_dict, cancel_arg))?;
+        let res = bridge
+            .getattr("fetch_lyrics")?
+            .call1((py_dict, cancel_arg))?;
         if res.is_none() {
             Ok(None)
         } else {

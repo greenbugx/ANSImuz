@@ -465,6 +465,59 @@ mod tests {
     }
 
     #[test]
+    fn test_deserialization_normalizes_lines_in_stable_chronological_order() {
+        let json = r#"{
+            "sync_type": "line",
+            "title": "Out of Order Duet",
+            "artist": "Artist",
+            "lines": [
+                {
+                    "start_ms": 25000,
+                    "text": "Late line"
+                },
+                {
+                    "start_ms": 10000,
+                    "text": "Singer 0 early line",
+                    "singer": 0
+                },
+                {
+                    "start_ms": 10000,
+                    "text": "Singer 1 simultaneous line",
+                    "singer": 1
+                },
+                {
+                    "text": "Untimed credit line"
+                },
+                {
+                    "start_ms": 18000,
+                    "text": "Middle line"
+                }
+            ]
+        }"#;
+
+        let lyrics: Lyrics = serde_json::from_str(json).expect("Deserialization succeeds");
+        assert_eq!(lyrics.lines.len(), 5);
+
+        // Timed lines sorted ascending
+        assert_eq!(lyrics.lines[0].text, "Singer 0 early line");
+        assert_eq!(lyrics.lines[0].start_ms, Some(10000));
+
+        // Identical timestamps preserve original relative order
+        assert_eq!(lyrics.lines[1].text, "Singer 1 simultaneous line");
+        assert_eq!(lyrics.lines[1].start_ms, Some(10000));
+
+        assert_eq!(lyrics.lines[2].text, "Middle line");
+        assert_eq!(lyrics.lines[2].start_ms, Some(18000));
+
+        assert_eq!(lyrics.lines[3].text, "Late line");
+        assert_eq!(lyrics.lines[3].start_ms, Some(25000));
+
+        // Untimed line moved to end
+        assert_eq!(lyrics.lines[4].text, "Untimed credit line");
+        assert_eq!(lyrics.lines[4].start_ms, None);
+    }
+
+    #[test]
     fn test_classify_lyrics_error() {
         assert_eq!(
             classify_lyrics_error("Rate limit exceeded: HTTP 429 quota"),

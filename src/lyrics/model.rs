@@ -57,7 +57,22 @@ impl LyricWord {
         }
     }
 
+    /// Returns the effective end timestamp (in ms) of the syllable at `idx`.
+    /// Uses explicit `end_ms` if present; otherwise falls back to the next syllable's `start_ms`,
+    /// and finally to the word's own `end_ms`.
+    pub fn effective_syllable_end(&self, idx: usize) -> Option<u64> {
+        let syl = self.syllables.get(idx)?;
+        if let Some(end) = syl.end_ms {
+            return Some(end);
+        }
+        if let Some(next_start) = self.syllables.get(idx + 1).and_then(|s| s.start_ms) {
+            return Some(next_start);
+        }
+        self.end_ms
+    }
+
     /// Returns the active syllable at the given millisecond position, if available.
+    /// Uses centralized timing windows consistent with the synchronizer.
     pub fn syllable_at_ms(&self, ms: u64) -> Option<(usize, &LyricSyllable)> {
         if self.syllables.is_empty() {
             return None;
@@ -65,8 +80,8 @@ impl LyricWord {
 
         for (idx, syl) in self.syllables.iter().enumerate() {
             if let Some(start) = syl.start_ms {
-                let end = syl.end_ms.unwrap_or(u64::MAX);
-                if ms >= start && ms < end {
+                let end = self.effective_syllable_end(idx);
+                if ms >= start && end.map(|e| ms < e).unwrap_or(true) {
                     return Some((idx, syl));
                 }
             }
@@ -200,7 +215,22 @@ impl LyricLine {
         &self.text
     }
 
+    /// Returns the effective end timestamp (in ms) of the word at `idx`.
+    /// Uses explicit `end_ms` if present; otherwise falls back to the next word's `start_ms`,
+    /// and finally to the line's own `end_ms`.
+    pub fn effective_word_end(&self, idx: usize) -> Option<u64> {
+        let word = self.words.get(idx)?;
+        if let Some(end) = word.end_ms {
+            return Some(end);
+        }
+        if let Some(next_start) = self.words.get(idx + 1).and_then(|w| w.start_ms) {
+            return Some(next_start);
+        }
+        self.end_ms
+    }
+
     /// Finds the active word at a given timestamp in milliseconds.
+    /// Uses centralized timing windows consistent with the synchronizer.
     pub fn word_at_ms(&self, ms: u64) -> Option<(usize, &LyricWord)> {
         if self.words.is_empty() {
             return None;
@@ -208,8 +238,8 @@ impl LyricLine {
 
         for (idx, word) in self.words.iter().enumerate() {
             if let Some(start) = word.start_ms {
-                let end = word.end_ms.unwrap_or(u64::MAX);
-                if ms >= start && ms < end {
+                let end = self.effective_word_end(idx);
+                if ms >= start && end.map(|e| ms < e).unwrap_or(true) {
                     return Some((idx, word));
                 }
             }
@@ -260,7 +290,7 @@ impl<'de> Deserialize<'de> for Lyrics {
         D: serde::Deserializer<'de>,
     {
         let raw = LyricsRaw::deserialize(deserializer)?;
-        Ok(Lyrics {
+        let mut lyrics = Lyrics {
             source: raw.source.or(raw.provider),
             sync_type: raw.sync_type,
             title: raw.title.or(raw.track_title),
@@ -268,11 +298,25 @@ impl<'de> Deserialize<'de> for Lyrics {
             isrc: raw.isrc,
             lines: raw.lines,
             unavailable_reason: raw.unavailable_reason,
-        })
+        };
+        lyrics.normalize_lines();
+        Ok(lyrics)
     }
 }
 
 impl Lyrics {
+    /// Stably sorts lines in chronological order by `start_ms`.
+    /// Timed lines are ordered ascending; untimed lines (`None`) are placed at the end.
+    /// Lines with identical timestamps preserve their original relative order.
+    pub fn normalize_lines(&mut self) {
+        self.lines.sort_by(|a, b| match (a.start_ms, b.start_ms) {
+            (Some(sa), Some(sb)) => sa.cmp(&sb),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        });
+    }
+
     /// Constructs an empty lyrics instance.
     pub fn empty() -> Self {
         Self {
