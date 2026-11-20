@@ -172,3 +172,126 @@ void ansimuz_mpv_destroy(ansimuz_mpv *player) {
 
     free(player);
 }
+
+/*
+ * Loads an audio file or stream URL by issuing the loadfile command.
+ * Passes replace mode to stop current playback and swap the active track
+ * without creating an mpv internal playlist queue.
+ */
+int ansimuz_mpv_loadfile(ansimuz_mpv *player, const char *path) {
+    if (!player || !player->handle || !path || path[0] == '\0') {
+        return MPV_ERROR_INVALID_PARAMETER;
+    }
+
+    const char *args[] = {
+        "loadfile",
+        path,
+        "replace",
+        NULL
+    };
+
+    return mpv_command(player->handle, args);
+}
+
+/*
+ * Toggles playback pause state by writing to the pause property flag.
+ * Uses MPV_FORMAT_FLAG with integer 1 or 0 to map to internal boolean flags.
+ */
+int ansimuz_mpv_set_pause(ansimuz_mpv *player, int paused) {
+    if (!player || !player->handle) {
+        return MPV_ERROR_INVALID_PARAMETER;
+    }
+
+    int value = paused ? 1 : 0;
+
+    return mpv_set_property(
+        player->handle,
+        "pause",
+        MPV_FORMAT_FLAG,
+        &value
+    );
+}
+
+/*
+ * Issues the synchronous stop command.
+ * Clears the active stream and resets audio decoders back to idle state.
+ */
+int ansimuz_mpv_stop(ansimuz_mpv *player) {
+    if (!player || !player->handle) {
+        return MPV_ERROR_INVALID_PARAMETER;
+    }
+
+    const char *args[] = {
+        "stop",
+        NULL
+    };
+
+    return mpv_command(player->handle, args);
+}
+
+/*
+ * Performs an absolute seek by setting the time-pos property.
+ * Guard checks against negative values to fail fast before hitting the core.
+ */
+int ansimuz_mpv_seek(ansimuz_mpv *player, double seconds) {
+    if (!player || !player->handle || seconds < 0.0) {
+        return MPV_ERROR_INVALID_PARAMETER;
+    }
+
+    return mpv_set_property(
+        player->handle,
+        "time-pos",
+        MPV_FORMAT_DOUBLE,
+        &seconds
+    );
+}
+
+/*
+ * Reads the time-pos property as a double precision float.
+ * Note that this can fail with MPV_ERROR_PROPERTY_UNAVAILABLE during transitions
+ * or initial track buffering.
+ */
+int ansimuz_mpv_get_time_pos(
+    ansimuz_mpv *player,
+    double *out_seconds
+) {
+    if (!player || !player->handle || !out_seconds) {
+        return MPV_ERROR_INVALID_PARAMETER;
+    }
+
+    return mpv_get_property(
+        player->handle,
+        "time-pos",
+        MPV_FORMAT_DOUBLE,
+        out_seconds
+    );
+}
+
+/*
+ * Reads media duration from the container header metadata.
+ * Returns MPV_ERROR_PROPERTY_UNAVAILABLE until container parsing completes
+ * or when streaming endless live audio.
+ */
+int ansimuz_mpv_get_duration(
+    ansimuz_mpv *player,
+    double *out_seconds
+) {
+    if (!player || !player->handle || !out_seconds) {
+        return MPV_ERROR_INVALID_PARAMETER;
+    }
+
+    return mpv_get_property(
+        player->handle,
+        "duration",
+        MPV_FORMAT_DOUBLE,
+        out_seconds
+    );
+}
+
+/*
+ * Translates native libmpv status codes to human readable static strings.
+ * Keeps error formatting consistent across the FFI boundary.
+ */
+const char *ansimuz_mpv_error_string(int status) {
+    return mpv_error_string(status);
+}

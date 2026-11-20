@@ -23,6 +23,12 @@ int main(void) {
 
     printf("ANSImuz native backend initialized!\n");
 
+    /* Verify property write on initialized core */
+    status = ansimuz_mpv_set_pause(player, 1);
+    if (status != 0) {
+        fprintf(stderr, "Failed to set pause: %s\n", ansimuz_mpv_error_string(status));
+    }
+
     /* Ensure clean shutdown and thread termination */
     ansimuz_mpv_destroy(player);
 
