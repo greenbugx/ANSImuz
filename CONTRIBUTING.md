@@ -18,16 +18,37 @@ ANSImuz supports:
 - **Linux** (x86_64): Primary platform (tested on Arch Linux, Fedora). Uses Unix-domain sockets for MPV IPC.
 - **Windows** (x86_64): Native Windows 10/11 support via PowerShell installer (`scripts/install_windows.ps1`), native `mpv`/`yt-dlp`, and cross-platform IPC over Windows Named Pipes (`\\.\pipe\...`). Also supported through `WSL2`.
 
-Ensure the following tools are installed on your system:
+Ensure the following tools and development libraries are installed on your system:
 
+### Required Toolchains & Libraries
 - **Rust toolchain**: 1.85+ (compatible with the Rust 2024 edition).
-- **Python**: 3.10 or higher (with development headers for PyO3 linking).
+- **Python**: 3.10 or higher with development headers (`python3-dev` / `python3-devel`) for PyO3 linking.
+- **C Compiler & System Libraries**: `gcc` / `clang`, `glibc`, and OpenSSL development headers (`libssl-dev` / `openssl-devel`).
 - **[mpv](https://mpv.io/)**: Version 0.35+ recommended, with JSON IPC enabled (Unix-domain sockets on Linux, Named Pipes on Windows).
-- **[yt-dlp](https://github.com/yt-dlp/yt-dlp)**: For stream resolution and media extraction.
-- **OpenSSL / libssl-dev**: Required for native network operations.
+- **[yt-dlp](https://github.com/yt-dlp/yt-dlp)**: For stream URL resolution and media extraction.
+
 ---
 
-## Setting Up Your Environment
+## Setting Up Your Development Environment
+
+### Automated Setup (Recommended)
+
+Run the installer for your operating system. It verifies and installs all prerequisites (including `mpv` and `yt-dlp`), creates the Python virtual environment (`.venv`), installs Python packages, and compiles the project:
+
+**Linux:**
+```bash
+./scripts/install_linux.sh
+```
+
+**Windows (PowerShell):**
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\scripts\install_windows.ps1
+```
+
+---
+
+### Manual Setup
 
 1. **Clone the repository**:
    ```bash
@@ -49,6 +70,12 @@ Ensure the following tools are installed on your system:
    .\.venv\Scripts\Activate.ps1
    ```
 
+   **Windows (Command Prompt)**:
+   ```cmd
+   python -m venv .venv
+   .\.venv\Scripts\activate.bat
+   ```
+
 3. **Install Python dependencies**:
    ```bash
    pip install --upgrade pip
@@ -61,142 +88,228 @@ Ensure the following tools are installed on your system:
    cargo check --all-targets
    cargo clippy --all-targets -- -D warnings
    cargo test
+   python -m unittest discover -s backend/tests -p "test_*.py"
    ```
+
 5. **Run ANSImuz locally**:
    ```bash
    cargo run
    ```
 
+> [!IMPORTANT]
+> Because ANSImuz links dynamically against the Python runtime and uses Python libraries (`ytmusicapi`, `spotifyscraper`, etc.) via PyO3, you **must activate the virtual environment (`.venv`)** in your shell before running `cargo run`, `cargo test`, or compiled binaries during development.
+
+---
+
+## Source Builds vs. Packaged Installs
+
+- **Source Builds (`cargo run` / `cargo build`)**:
+  When developing from source, Python dependencies run inside the project-local `.venv`. The application dynamically resolves `backend/` and `assets/` directly from your repository root.
+- **Packaged Installs (Arch Linux & Fedora COPR)**:
+  System packages install the compiled binary to `/usr/bin/ansimuz` and static runtime resources (`backend/` and `assets/`) to `/usr/share/ansimuz/`. They link against system Python modules (`python-ytmusicapi`, `python-spotifyscraper`, etc.) and require no virtual environment.
+- **Windows Portable Release**:
+  Bundles `ansimuz.exe`, visual assets, backend bridge, and an isolated embedded Python 3.14 runtime with all site-packages included in `Lib/site-packages`.
+
+### Runtime Resource Directories (`data_dir`)
+
+ANSImuz locates its embedded Python bridge (`backend/`) and visual assets (`assets/`) via `crate::paths::data_dir()`. The path is resolved in the following priority order:
+
+1. `ANSIMUZ_DATA_DIR` environment variable set at runtime (explicit override).
+2. The current working directory (development from project root).
+3. The executable's parent directories (e.g. running from `target/debug/` or `target/release/`).
+4. `ANSIMUZ_DATA_DIR` configured at compile time via `option_env!("ANSIMUZ_DATA_DIR")`.
+5. `/usr/share/ansimuz` (standard system package install path).
+6. Fallback to current directory (`.`).
+
+---
+
+## Cache Storage & Lifecycle
+
+Runtime cache directories are stored under `$XDG_CACHE_HOME/ansimuz` (or `~/.cache/ansimuz` on Linux, `%LOCALAPPDATA%\ansimuz` on Windows):
+
+- `audio/`: Cached audio stream segments and prefetch dumps.
+- `artwork/`: Cached terminal album artwork thumbnails (`.img`).
+- `lyrics/`: Cached synchronized and plain lyrics (`index.json` + `entries/*.json`).
+- `discord/artwork/`: Cached Discord artwork images and upload records (`index.json`).
+
+### Cache Safeguards & Architecture
+- **Atomic Writes**: All cache entries are written to temporary `.part` files and renamed atomically upon completion.
+- **Stale Cleanup**: Any incomplete `.part` files leftover from unexpected process kills or crashes are automatically cleaned up on application startup.
+- **Bounded Disk Quota**: Cache directories are automatically pruned to configured thresholds (e.g. 512 MB for audio, 250 MB for Discord artwork, max byte quota for lyrics) on an LRU / least-recently-accessed basis.
+- **Epoch Invalidation**: Triggering **Clear Caches** in Settings (`S` → Clear Caches) atomically clears cache directories and increments a cache epoch, guaranteeing in-flight requests discard their results rather than repopulating cleared storage.
+
 ---
 
 ## Project Architecture
 
-The codebase is organized into modular boundaries:
+The codebase is organized into clean, modular boundaries:
 
-```
+```text
 ANSImuz/
 ├── src/
-│   ├── app/          # Application loop, state machine, and orchestration
-│   │   ├── runner.rs     # Main application event loop and terminal interaction
-│   │   ├── playback.rs   # Playback lifecycle, queue sequencing, history, and resolution
-│   │   ├── search.rs     # Search result handling, refetching, and pagination
-│   │   ├── events.rs     # Raw key event handling and input routing
-│   │   ├── commands.rs   # Command palette actions and dispatch
-│   │   ├── state.rs      # Authoritative PlaybackState and application state
-│   │   └── mod.rs        # App module re-exports
-│   ├── artwork/      # Image decoding, bounded memory cache, resize cache, renderer
-│   ├── config/       # Settings persistence (TOML), platform cache dirs, atomic writes
-│   ├── discord/      # Discord Rich Presence subsystem
-│   │   ├── activity.rs   # Listening activity formatting, timestamps, buttons, UTF-8 truncation
-│   │   ├── client.rs     # Low-level Discord IPC transport client wrapper
-│   │   ├── worker.rs     # Background worker actor, connection lifecycle & exponential backoff
-│   │   └── artwork/      # Discord artwork resolution, normalization, and upload pipeline
-│   │       ├── types.rs      # ArtworkRequest/Result, byte-level format detection, MIME types
-│   │       ├── downloader.rs # Async HTTPS download, aspect ratio preserving resize & bounds check
-│   │       ├── uploader.rs   # Multipart uploaders (Imgdb, Catbox, Litterbox), SSRF validation
-│   │       ├── cache.rs      # Persistent disk cache (index.json, images/), LRU pruning
-│   │       ├── manager.rs    # Orchestrator, request coalescing, provider cooldown matrix
-│   │       └── worker.rs     # Async artwork worker thread & channel forwarder
-│   ├── music/        # Track model, identity policy, backend PyO3 bridge execution
-│   ├── playback/     # MPV IPC process supervision, cross-platform transport (ipc.rs), audio prefetch
-│   │   ├── events.rs     # PlayerEvent enum (Position, Ended, Failed)
-│   │   ├── ipc.rs        # Cross-platform local IPC endpoints & streams (interprocess)
-│   │   ├── mpv.rs        # AudioPlayer implementation, observer loop, stream dumping
-│   │   ├── repeat.rs     # Repeat mode sequencing
-│   │   └── mod.rs        # Playback module exports
-│   ├── terminal/     # Terminal raw mode setup and clean teardown
-│   ├── ui/           # Ratatui components (queue_list, track_list), screens, theme
-│   ├── paths.rs      # Runtime data directory resolution (backend/ and assets/)
-│   ├── lib.rs        # Library interface for integration tests
-│   └── main.rs       # Application entry point (cleans stale caches, boots TUI)
+│   ├── app/              # Application loop, state machine, and orchestration
+│   │   ├── runner.rs         # Main event loop and terminal drawing
+│   │   ├── playback.rs       # Playback lifecycle, queue sequencing, history, and resolution
+│   │   ├── search.rs         # Search result handling, refetching, and pagination
+│   │   ├── events.rs         # Raw key event handling and input routing
+│   │   ├── commands.rs       # Command palette actions and dispatch
+│   │   ├── state.rs          # Authoritative PlaybackState and application state
+│   │   └── mod.rs            # App module re-exports
+│   ├── artwork/          # Terminal image decoding, memory cache, resize cache, renderer
+│   ├── config/           # Settings persistence (TOML), platform cache dirs, atomic writes
+│   ├── discord/          # Discord Rich Presence subsystem
+│   │   ├── activity.rs       # Activity builder, timestamps, buttons, UTF-8 truncation
+│   │   ├── client.rs         # Low-level Discord IPC transport wrapper
+│   │   ├── worker.rs         # Background worker actor, auto-reconnect backoff
+│   │   └── artwork/          # Discord artwork resolution, normalization, and upload pipeline
+│   ├── lyrics/           # Lyrics engine subsystem
+│   │   ├── types.rs          # Data structures (Lyrics, LyricLine, LyricWord, LyricSyllable)
+│   │   ├── worker.rs         # Dedicated lyrics worker thread, request deduplication & retry
+│   │   ├── cache.rs          # Persistent disk cache (index.json, entries/), LRU pruning
+│   │   ├── synchronizer.rs   # Real-time MPV playback synchronizer, duet/vocal separation
+│   │   ├── provider.rs       # Bridge to Python lyrics retrieval pipeline
+│   │   ├── model.rs          # Serialized lyrics models and converter helpers
+│   │   └── mod.rs            # Lyrics module exports
+│   ├── music/            # Track model, identity policy, backend PyO3 bridge execution
+│   ├── playback/         # MPV IPC process supervision, cross-platform transport (ipc.rs)
+│   │   ├── events.rs         # PlayerEvent enum (Position, Ended, Failed)
+│   │   ├── ipc.rs            # Cross-platform local IPC endpoints & streams (interprocess)
+│   │   ├── mpv.rs            # AudioPlayer implementation, observer loop, stream dumping
+│   │   ├── repeat.rs         # Repeat mode sequencing
+│   │   └── mod.rs            # Playback module exports
+│   ├── terminal/         # Terminal raw mode setup and clean teardown
+│   ├── ui/               # Ratatui components, screens, and themes
+│   │   ├── screens/
+│   │   │   ├── lyrics.rs         # Karaoke display, duet alignment, zero-alloc word views
+│   │   │   ├── player.rs         # Active playback display and visualizer
+│   │   │   ├── settings.rs       # In-app settings configuration
+│   │   │   └── search.rs         # Track search list and queue view
+│   │   └── theme.rs          # ANSI themes, colors, and truncation helpers
+│   ├── paths.rs          # Runtime data directory resolution (backend/ and assets/)
+│   ├── lib.rs            # Library interface for integration tests
+│   └── main.rs           # Application entry point (cleans stale caches, boots TUI)
 ├── backend/
-│   ├── bridge.py     # PyO3 integration boundary
-│   ├── exceptions.py # Structured provider exception hierarchy
-│   ├── artwork/      # Python thumbnail utilities and prewarming
-│   ├── providers/    # Music provider implementations (ytmusic, spotify)
-│   └── tests/        # Python backend unit and smoke tests
-├── assets/           # Logo and animation frames
-├── scripts/          # Linux and Windows installer scripts
-├── packaging/
-│   ├── arch/         # PKGBUILD for Arch Linux
-│   └── rpm/          # RPM specs for Fedora (COPR)
-├── vendor/
-│   └── presenceforge/ # Vendored cross-platform Discord IPC crate (Unix domain sockets & Windows named pipes)
-├── tests/            # Integration test suites:
-│   ├── queue.rs              # Queue manipulation and focus interactions
-│   ├── queue_playback.rs     # Queue priority, repeat modes, failure continuation
-│   ├── resolution.rs         # Generation tracking, slot identity, cancellation
-│   ├── lifecycle.rs          # Explicit Ended/Failed events, shutdown, track switching
-│   ├── memory_session.rs     # Long-session cache bounds, memory leakage, cache clearing
-│   ├── artwork.rs            # Disk cache persistence, corruption handling
-│   └── discord_connection.rs # Discord client connection lifecycle and reconnect contracts
-└── .github/          # CI workflows
+│   ├── bridge.py         # PyO3 integration boundary
+│   ├── exceptions.py     # Structured provider exception hierarchy
+│   ├── artwork/          # Python thumbnail utilities and prewarming
+│   ├── providers/        # Music and lyrics provider implementations
+│   │   ├── ytmusic/          # YouTube Music API integration
+│   │   ├── spotify/          # Spotify scraper integration
+│   │   └── lyrics/           # Multi-tier lyrics retrieval pipeline
+│   │       ├── base.py           # Base provider ABC and timing constants
+│   │       ├── lrc_red.py        # lrc.red provider (TTML & LRC)
+│   │       ├── lyrics_plus.py    # LyricsPlus mirror racing provider
+│   │       ├── lrclib.py         # LRCLIB REST API provider
+│   │       ├── megalobiz.py      # Megalobiz community LRC provider
+│   │       ├── better_lyrics.py  # BetterLyrics Apple Music TTML / Portato QRC
+│   │       ├── genius.py         # Genius web scraper unsynced lyrics fallback
+│   │       ├── matching.py       # Track similarity and candidate ranking
+│   │       ├── normalization.py  # Response payload formatting
+│   │       ├── timestamps.py     # Timestamp parsers and millisecond converters
+│   │       ├── parsers/          # Specialized format parsers
+│   │       │   ├── ttml.py           # Apple Music TTML with syllable & offset support
+│   │       │   ├── lrc.py            # Multi-timestamp and offset-aware LRC parser
+│   │       │   ├── qrc.py            # Portato QQ Music QRC parser
+│   │       │   └── lyricsfile.py     # LRCLIB YAML lyricsfile parser
+│   │       └── __init__.py       # Provider registry, health tracker, and get_lyrics
+│   └── tests/            # Python unit and mock test suites
+├── assets/               # Logo and visualizer animation frames
+├── scripts/              # Linux and Windows installer scripts
+├── packaging/            # Packaging specs (Arch Linux PKGBUILD, Fedora RPM specs)
+├── vendor/               # Vendored crates (presenceforge)
+└── tests/                # Rust integration test suites
 ```
 
 ---
 
 ## Code Guidelines & Best Practices
-- **Non-blocking TUI**: Never block the main TUI rendering thread. Long-running tasks (such as network requests or stream resolutions) must execute asynchronously in background threads and communicate via channels.
+
+- **Non-blocking TUI**: Never block the main TUI rendering thread. Long-running tasks (network fetches, PyO3 queries, stream resolutions) must execute asynchronously on background worker threads and communicate via channels.
 - **Queue & Playback Separation**: Search results (`app.tracks`) are strictly for track discovery. Playback sequencing (`Next`, `Previous`, `Shuffle`, `Repeat`) operates exclusively on the playback queue (`app.queue`) and session history (`app.history`), never cycling through search results.
-- **Queue Deduplication**: Use `app.enqueue()` or `app.queue_contains()` to prevent duplicate tracks from being added to the queue.
+- **Queue Deduplication**: Use `app.enqueue()` or `app.queue_contains()` to prevent duplicate tracks from being enqueued.
 - **Unicode Safety**: Never slice strings by raw byte offsets when displaying text in the TUI. Use character-based bounds or the project's `truncate` helper (`crate::ui::theme::truncate`) to prevent panics on multibyte characters.
-- **Runtime Data Paths**: Locate `backend/` and `assets/` only through `crate::paths::data_dir()`. Never use `env!("CARGO_MANIFEST_DIR")` or other compile-time paths for files needed at runtime, because that bakes the build directory into release binaries and breaks packaged installs. Use `option_env!` only for optional build-time overrides such as `ANSIMUZ_DATA_DIR`.
+- **Runtime Data Paths**: Locate `backend/` and `assets/` only through `crate::paths::data_dir()`. Never use `env!("CARGO_MANIFEST_DIR")` or other compile-time paths for runtime assets, because that bakes the build directory into release binaries and breaks packaged installs. Use `option_env!` only for optional build-time overrides such as `ANSIMUZ_DATA_DIR`.
 - **Cross-Platform IPC**: MPV communication uses `IpcEndpoint` and `IpcStream` (`crate::playback::ipc`). On Unix, endpoints use filesystem paths (`.sock`); on Windows, endpoints use named pipes (`\\.\pipe\...`). Never invoke filesystem existence checks or deletions (`Path::exists()`, `fs::remove_file()`) on Windows named pipes.
-- **Observer Thread Concurrency & Reaping**: The observer decouples periodic query writing from continuous response reading to support platforms (such as Windows named pipes) that lack socket-level read timeouts. Background writer threads must always be wrapped in a RAII guard (`WriterThreadGuard`) and joined when the observer exits, and `AudioPlayer::stop()` must join the observer thread.
-- **Test Concurrency & State Isolation**: Tests that mutate shared global caches (such as `RESIZE_CACHE` or `art_cache()`) must acquire `crate::artwork::ARTWORK_TEST_LOCK` to prevent race conditions during parallel test execution. Self-contained data structure tests (like `ResizeCache`) must instantiate local, isolated instances.
-- **Discord Isolation**: Discord RPC must never block the main TUI rendering thread or audio playback loop. All Discord activity formatting and IPC transmission run in `DiscordWorker`, while network downloads, image resizing, and uploads run in `ArtworkWorker`.
-- **Discord Playback Synchronization & Stale Event Rejection**: Player generation counters ensure rapid track skipping, cancellations, or out-of-order player events never publish stale presence to Discord. Presence must be cleared immediately when playback finishes, halts on error, or is manually stopped.
-- **Artwork Security & Format Validation**: Never infer image format from file extensions or URLs. Use `NormalizedImageFormat::from_bytes` to validate magic bytes. Reject private IPs, localhost, and non-HTTPS destinations before initiating upload requests.
-- **Style & Consistency**: Keep code formatting consistent. Avoid unnecessary abstractions or dead code.
-- **Comments**: Keep comments minimal and focused strictly on explaining non-obvious requirements.
+- **Observer Thread Concurrency & Reaping**: Decouple periodic query writing from continuous response reading. Background writer threads must always be wrapped in a RAII guard (`WriterThreadGuard`) and joined when the observer exits, and `AudioPlayer::stop()` must join the observer thread.
+- **Test Concurrency & State Isolation**: Tests that mutate shared global caches (such as `RESIZE_CACHE`, `art_cache()`, or `lyrics::cache`) must acquire their respective test locks (`ARTWORK_TEST_LOCK` or `LYRICS_CACHE_TEST_LOCK`) to prevent race conditions during parallel test runs. Self-contained data structure tests must instantiate local, isolated instances.
 
 ---
 
-## Discord Rich Presence (RPC) Architecture
+## Subsystem Architecture Deep Dives
+
+### 1. Synchronized Lyrics Subsystem
+
+The lyrics subsystem provides real-time word and syllable-synchronized lyrics with automatic fallback across 6 distinct services.
+
+#### A. Python Retrieval Pipeline (`backend/providers/lyrics/`)
+- **Tiered Provider Hierarchy**:
+  1. `lrc.red`: Apple Music TTML with syllable timing and duet channels, with LRC fallback.
+  2. `LyricsPlus`: Aggregated Apple Music, QQ Music, and Musixmatch syllable timings via bounded concurrent mirror racing.
+  3. `LRCLIB`: Official database with Lyricsfile word sync & LRC line sync.
+  4. `Megalobiz`: Community-synchronized LRC sheets via official REST API.
+  5. `BetterLyrics`: Apple Music TTML syllable-timed & Portato QQ Music QRC fallback.
+  6. `Genius`: Web scraper fallback providing unsynchronized plain lyrics with stanzas preserved.
+- **Provider Registry (`LyricsProviderRegistry`)**: Thread-safe registry eliminating duplicated global singletons while supporting lazy instantiation and unit test mocking.
+- **Resilient Health & Circuit Breakers (`ProviderHealthTracker`)**: Automatically tracks failures and enforces temporary backoffs (60s+ for HTTP 429, 30s+ for persistent network errors) to avoid blocking the retrieval chain.
+- **Intra-Provider Deadline Budgeting**: Dynamically caps each provider's `self.timeout` to the remaining global retrieval deadline budget (with a safety floor of 1.0s and guaranteed restoration in a `finally` block), ensuring slow sequential queries never exceed the overall timeout.
+- **Cooperative Cancellation**: Checks `CURRENT_CANCEL_TOKEN` before each provider and allows in-flight HTTP requests to terminate early when a track is skipped.
+- **Specialized Parsers (`backend/providers/lyrics/parsers/`)**:
+  - `ttml.py`: Preserves zero-millisecond timestamps (`is not None` vs falsy checks), handles container offset inheritance (`<body>`/`<div>`), supports parent-relative timings, and rejects invalid framerates.
+  - `lrc.py`: Correctly handles multi-timestamp lines (`[00:10.00][00:25.00]`), global offset tags (`[offset:+/-ms]`), and empty instrumental lines.
+  - `qrc.py` and `lyricsfile.py`: High-precision syllable and word timing parsers.
+
+#### B. Rust Lyrics Engine (`src/lyrics/`)
+- **Background Worker Actor (`worker.rs`)**:
+  - Runs in an isolated background thread receiving `LyricsCommand::Fetch`, `Clear`, and `Shutdown`.
+  - Dispatches requests using an atomic `generation` counter. Stale results from superseded tracks are dropped automatically.
+  - Deduplicates repeated `Fetch` requests for the active track while tracking transient failures (`last_track_failed`), explicitly allowing retries after a failure without getting stuck in `Failed`.
+- **Persistent Disk Cache (`cache.rs`)**:
+  - SHA-256 content-hashed files stored under `$XDG_CACHE_HOME/ansimuz/lyrics/entries/`.
+  - In-memory index (`index.json`) tracking LRU access and byte size.
+  - Self-healing recovery: Automatically rebuilds or resets if the index file is corrupted or version-mismatched.
+  - LRU pruning: Evicts oldest entries when total cache size exceeds configured bounds.
+- **State-Preserving Synchronizer (`synchronizer.rs`)**:
+  - Receives live playback position updates from MPV.
+  - Handles seeking forwards and backwards, pause/resume, and repeat-one loops without losing position.
+  - Enforces global chronological ordering across multi-vocal tracks (lead vocals, duets, and background channels).
+  - Explicit failure reset: Distinguishes `PlayerEvent::Ended` from `PlayerEvent::Failed`, immediately resetting sync on errors instead of marking songs as completed.
+- **Terminal UI (`src/ui/screens/lyrics.rs`)**:
+  - Multi-vocal layout: Lead vocals left-aligned (`▶`), secondary duet singer right-aligned (`◀`), and background vocals styled in dim italics (`▷`).
+  - Zero-allocation rendering: Uses borrowed `WordItem` and `WordSpan` slices rather than cloning word vectors every frame.
+  - Explicit scroll policy: Viewport automatically follows the active lyric. When manual scroll is triggered (`k`/`j`/`PageUp`/`PageDown`), an indicator badge is shown; pressing `c` re-centers and resumes auto-scroll.
+  - Transition guard: `resolve_sync_point` verifies track and generation identity to prevent flashing stale active lyrics across song changes.
+
+---
+
+### 2. Discord Rich Presence (RPC) Subsystem
 
 The Discord Rich Presence subsystem (`src/discord/`) integrates real-time playback state with Discord's desktop client over local Inter-Process Communication (IPC).
 
-### Subsystem Structure
-
 1. **Activity Builder (`src/discord/activity.rs`)**:
    - Constructs Discord `Activity` payloads (`ActivityType::Listening`).
-   - Details: Track title; State: Artist + Album (or ANSImuz fallback).
    - Timestamps: Live start and end timestamps calculated for playing tracks; timestamps omitted when paused.
    - Interactive Buttons: "Listen on YouTube Music" or "Listen on Spotify" (pointing to public canonical URLs) and "Get ANSImuz". Temporary streaming URLs are strictly rejected.
    - Truncation: Safe UTF-8 grapheme truncation preventing multibyte panic or Discord API rejection.
-
+   
 2. **IPC Client & Transport (`src/discord/client.rs` & `vendor/presenceforge/`)**:
-   - Thin wrapper around `presenceforge::DiscordIpcClient`.
    - Cross-platform local IPC: Unix-domain sockets (`/run/user/.../discord-ipc-0`) on Linux; Windows Named Pipes (`\\.\pipe\discord-ipc-0`) on Windows.
    - Offline safety: If Discord is closed or unreachable, calls return `DiscordError::NotConnected` safely without blocking the application.
 
 3. **Background Worker Actor (`src/discord/worker.rs`)**:
-   - Supervised background thread receiving `DiscordCommand` events (`TrackChanged`, `PositionChanged`, `Paused`, `Resumed`, `Clear`).
+   - Supervised background thread receiving `DiscordCommand` events.
    - Auto-reconnection with exponential backoff: 10s → 20s → 40s → capped at 60s. Backoff resets immediately upon successful handshake.
-   - Idempotent shutdown and graceful channel draining on application exit.
-
+   
 4. **Artwork Pipeline (`src/discord/artwork/`)**:
-   - **Format Detection (`types.rs`)**: Magic byte inspection for JPEG, PNG, WebP, GIF, and AVIF. Rejects corrupted, empty, or unsupported formats (BMP, SVG).
-   - **Downloader (`downloader.rs`)**: Asynchronous HTTPS downloader with dimension bounds checks ($10\times 10$ to $4096\times 4096$) and aspect-ratio preserving downscaling.
-   - **Uploader (`uploader.rs`)**: Multi-host multipart uploaders for Imgdb, Catbox, and Litterbox. Validates returned URLs, enforces SSRF protections (blocking localhost, RFC-1918 private IPs, and credentialed URLs), and parses `Retry-After` headers.
-   - **Cache (`cache.rs`)**: Persistent disk cache (`index.json` + `images/` directory) with SHA-256 content deduplication, LRU pruning to `cache_max_size_mb`, and file preservation across expiration cycles.
-   - **Manager (`manager.rs`)**: Orchestrates in-flight request coalescing, fallback chains (`Imgdb` → `Catbox` → `Litterbox` → default logo), and provider error cooldown matrices (5xx, timeouts, malformed responses apply cooldowns; invalid inputs do not penalize hosts).
-   - **Worker (`worker.rs`)**: Decoupled async worker thread and response forwarder.
+   - Format detection, dimensions checks, multipart uploaders (Imgdb, Catbox, Litterbox), SSRF validation, and persistent disk caching with LRU pruning.
 
 ---
 
-## Packaging (Arch Linux)
+## Packaging
 
-The `PKGBUILD` in `packaging/arch/` builds the latest `main` as `ansimuz-git`. It installs the binary to `/usr/bin/ansimuz` and `backend/` and `assets/` to `/usr/share/ansimuz/`, and builds with `ANSIMUZ_DATA_DIR=/usr/share/ansimuz`.
+### Arch Linux (`packaging/arch/`)
+The `PKGBUILD` builds the latest `main` as `ansimuz-git`. It installs the binary to `/usr/bin/ansimuz` and `backend/` and `assets/` to `/usr/share/ansimuz/` with `ANSIMUZ_DATA_DIR=/usr/share/ansimuz`.
 
-Update it when you:
-
-- add, remove, or rename a Python or system dependency (keep `depends` in sync with `requirements.txt`; `python-spotifyscraper` comes from the AUR)
-- change how runtime data is located, or add new top-level runtime directories that must be installed
-- change the license or add files that should be installed alongside the binary
-
-To test a change to the PKGBUILD:
-
+To test:
 ```bash
 cd packaging/arch
 makepkg -sf
@@ -205,246 +318,64 @@ sudo pacman -U ansimuz-git-*.pkg.tar.zst
 cd /tmp && ansimuz
 ```
 
-Run the installed binary from a directory outside the repository to confirm search, playback, and animation frames work without the source tree. `makepkg` should not print `Package contains reference to $srcdir`. Warnings from `namcap` about `providers.*` and `artwork.*` Python modules are expected; they are the app's own modules, not missing dependencies. Do not commit `src/`, `pkg/`, or built packages.
+### Fedora / COPR (`packaging/rpm/`)
+`packaging/rpm/` contains two RPM specs built in the [`greenbugx/ansimuz`](https://copr.fedorainfracloud.org/coprs/greenbugx/ansimuz/) COPR project:
+- `ansimuz.spec`: Builds ANSImuz from a pinned commit.
+- `python-spotifyscraper.spec`: Packages `spotifyscraper` for Fedora.
 
----
-
-## Packaging (Fedora / COPR)
-
-`packaging/rpm/` contains two RPM specs, built in the [`greenbugx/ansimuz`](https://copr.fedorainfracloud.org/coprs/greenbugx/ansimuz/) COPR project:
-
-- `ansimuz.spec` builds ANSImuz from a **pinned commit** (`%global commit`) matching the release version. It installs the binary to `/usr/bin/ansimuz` and `backend/` and `assets/` to `/usr/share/ansimuz/`, and builds with `ANSIMUZ_DATA_DIR=/usr/share/ansimuz`.
-- `python-spotifyscraper.spec` packages `spotifyscraper`, which is not in the Fedora repositories. `ansimuz` requires it as `python3dist(spotifyscraper)`.
-
-Update the specs when you:
-
-- add, remove, or rename a Python or system dependency (keep `Requires` in sync with `requirements.txt`)
-- change how runtime data is located, or add new top-level runtime directories that must be installed
-- change the license or add files that should be installed alongside the binary
-
-To move `ansimuz.spec` to a newer commit or release:
-
+To test locally with `mock`:
 ```bash
 cd packaging/rpm
-NEW=$(git rev-parse HEAD)
-sed -i "s/^%global commit .*/%global commit $NEW/" ansimuz.spec
-```
-
-Then update `Version: <new_version>`, add a `%changelog` entry, and reset `Release` to `1%{?dist}`.
-
-To test a spec before uploading to COPR:
-
-```bash
-rm -f ~/rpmbuild/SRPMS/ansimuz-*.src.rpm    # mock rejects a glob that matches several SRPMs
 spectool -g -R ansimuz.spec
 rpmbuild -bs ansimuz.spec
 mock -r fedora-rawhide-x86_64 --enable-network rebuild ~/rpmbuild/SRPMS/ansimuz-*.src.rpm
 ```
 
-Notes for maintainers:
-
-- The COPR project needs **"Enable internet access during builds"** turned on, because `ansimuz.spec` runs `cargo fetch`.
-- Build `python-spotifyscraper` before `ansimuz`, and build both for **every Fedora release enabled in the project**. Packages depend on that release's Python version, so a release missing a build fails to install with `nothing provides python(abi) = ...`.
-- Do not commit `*.rpm`, `*.src.rpm`, or source tarballs.
-
+### Windows Portable Release
+The Windows portable release embeds its own Python 3.14 runtime so users do not need Python installed:
+1. Compile release binary: `cargo build --release`.
+2. Extract the Python Windows Embeddable package into a staging directory.
+3. Install dependencies into `Lib\site-packages` using `pip install --target "$StagingDir\Lib\site-packages" -r requirements.txt`.
+4. Append `Lib\site-packages` to the `._pth` file.
+5. Copy `ansimuz.exe`, `backend\`, and `assets\` next to `python3XX.dll`.
+6. Package into `ansimuz-windows-v<version>-x64.rar`.
 
 ---
-
-## Packaging (Windows Portable Release)
-
-ANSImuz provides a portable Windows distribution with an embedded Python runtime (`ansimuz-windows-v<version>-x64.rar`) for Windows 10/11. Users do not need a separate Python installation. MPV and yt-dlp must be installed and available in `PATH`.
-
-### Bundle Structure
-
-```text
-ansimuz-windows-v<version>-x64/
-├── ansimuz.exe              # Release binary compiled with MSVC
-├── assets/                  # Logos and visualizer animation frames
-│   ├── frames/
-│   ├── logo_nobg.png 
-│   └── logo.png      
-├── backend/                 # PyO3 Python bridge and providers
-│   ├── bridge.py
-│   ├── exceptions.py
-│   ├── artwork/
-│   └── providers/
-├── python314.dll            # Python dynamic library (matching PyO3 build version)
-├── python3.dll              # Python stable ABI stub
-├── python314.zip            # Standard library archive from embeddable package
-├── python314._pth           # Module search path configuration
-├── *.pyd                    # Native C extension modules from embeddable package (_socket, _ssl, etc.)
-└── Lib/
-    └── site-packages/       # Organized dependencies (requests, ytmusicapi, spotifyscraper, pillow)
-```
-
-### Packaging Steps
-
-1. **Build the release binary**:
-   
-   ```powershell
-   cargo build --release
-   ```
-
-2. **Download the matching Python Windows Embeddable Package**:
-
-   Download `python-3.x.x-embed-amd64.zip` from [python.org](https://www.python.org/downloads/windows/) matching your build toolchain's Python version. Extract its contents into the staging directory.
-
-3. **Install Python dependencies into the organized `Lib\site-packages` subfolder**:
-
-   Run this command from your **ANSImuz repository root** using your development environment's `pip` (pip is not included in the embeddable `python.exe`):
-
-   ```powershell
-   # From the repository root using pip:
-   pip install --target "$StagingDir\Lib\site-packages" -r requirements.txt
-
-   # Or using your virtual environment Python:
-   .\.venv\Scripts\python.exe -m pip install --target "$StagingDir\Lib\site-packages" -r requirements.txt
-   ```
-4. **Append `Lib\site-packages` to the `._pth` file**:
-
-   Open the `._pth` file in the staging directory (e.g. `python314._pth`) and add:
-   
-   ```text
-   Lib\site-packages
-   ```
-   
-   *(Note: ANSImuz also auto-detects `Lib/site-packages` at startup).*
-
-5. **Copy assets and binaries**:
-
-   Copy `target\release\ansimuz.exe`, `backend\`, and `assets\` into the staging directory next to `python3XX.dll`.
-
-6. **Create the RAR archive**:
-   
-   Create the release archive using WinRAR or `rar.exe` CLI:
-
-   ```powershell
-   rar a -ep1 -r "ansimuz-windows-v<version>-x64.rar" "$StagingDir\*"
-   ```
-
-### Verifying the Portable Release
-
-To verify the portable bundle before publishing:
-1. Extract the `.rar` archive on a clean Windows machine (or in a sandbox/VM) without Python registered in system `PATH`.
-2. Ensure `mpv` and `yt-dlp` are installed in `PATH` (e.g. `winget install --id shinchiro.mpv -e` and `winget install --id yt-dlp.yt-dlp -e`).
-3. Run `ansimuz.exe` from the extracted directory and confirm search, playback, artwork decoding, and animation frames initialize properly.
----
-
-## Release Workflow
-
-ANSImuz produces releases through a combination of automated CI artifact generation and manual package distribution:
-
-### 1. GitHub Actions (Automated Package Generation)
-
-When a release tag is pushed (e.g. `v0.1.3`) or triggered manually via `workflow_dispatch` on [`.github/workflows/release.yml`](.github/workflows/release.yml):
-- **Validation**: Verifies that the tag format matches `Cargo.toml`, checks that `packaging/rpm/ansimuz.spec` references an ancestor commit of the tag, and verifies spec dependencies.
-- **Arch Linux Package (`arch-package`)**: Compiles the release binary in an `archlinux:latest` container and packages `ansimuz-git-*.pkg.tar.zst`.
-- **Fedora Source RPM (`fedora-srpm`)**: Uses `spectool` and `rpmbuild -bs` in a `fedora:45` container to build `ansimuz-*.src.rpm`.
-
-### 2. Manual Fedora COPR Publishing
-
-1. Download the generated `ansimuz-*.src.rpm` from the GitHub Actions run artifacts.
-2. Upload the SRPM to the [`greenbugx/ansimuz`](https://copr.fedorainfracloud.org/coprs/greenbugx/ansimuz/) COPR project (via the web UI or `copr-cli build greenbugx/ansimuz ansimuz-*.src.rpm`).
-3. Wait for COPR chroots (`fedora-43`, `fedora-44`, `fedora-45`, `fedora-rawhide`) to finish building.
-4. Download the compiled binary RPM packages (`ansimuz-*.rpm`).
-
-*(Note: `python-spotifyscraper` is maintained in the same COPR repository and does not need to be rebuilt unless its upstream package changes).*
-
-### 3. Windows Portable Bundle Creation
-
-Follow the [Packaging (Windows Portable Release)](#packaging-windows-portable-release) procedure to create `ansimuz-windows-v<version>-x64.rar`.
-
-### 4. Manual GitHub Release
-
-1. Create a GitHub Release corresponding to the version tag (e.g. `v0.1.x`).
-2. Generate SHA256 checksums across all distribution assets:
-
-```bash
-   sha256sum ansimuz-git-*.pkg.tar.zst ansimuz-*.rpm ansimuz-windows-*.rar > SHA256SUMS
-```
-
-3. Attach the release assets to the GitHub Release:
-   - Arch Linux package (`ansimuz-git-*.pkg.tar.zst`)
-   - Fedora binary RPM packages (`ansimuz-*.rpm`)
-   - Windows portable archive (`ansimuz-windows-v<version>-x64.rar`)
-   - `SHA256SUMS` checksum verification file
 
 ## Validation Before Submitting
 
 Before submitting a pull request, verify that all local checks pass cleanly:
 
 ```bash
-# Check formatting
+# 1. Check code formatting
 cargo fmt --check
 
-# Check compilation across all targets
+# 2. Check compilation across all targets
 cargo check --all-targets
 
-# Run Clippy lints (warnings treated as errors)
+# 3. Run Clippy lints (warnings treated as errors)
 cargo clippy --all-targets -- -D warnings
 
-# Run all unit and integration tests
+# 4. Run all Rust unit and integration tests
 cargo test
 
-# Run a specific integration test target:
+# 5. Run subsystem-specific test suites:
+cargo test lyrics                   # All 76 lyrics unit and integration tests
+cargo test --lib discord::          # Discord activity, worker, and cache tests
+cargo test --lib playback::         # MPV process supervision and IPC transport tests
 cargo test --test queue             # Queue operations and cursor focus
 cargo test --test queue_playback    # Queue priority, repeat modes, error recovery
 cargo test --test resolution        # Async track resolution, stale generation rejection
 cargo test --test lifecycle         # Explicit Ended/Failed lifecycle events, track switching
-cargo test --test memory_session    # Bounded cache capacities, long session memory stability
-cargo test --test artwork           # Disk caching, file format detection, corruption recovery
-cargo test --test discord_connection # Discord IPC client connection contracts
-cargo test --lib discord::          # Discord activity, worker, uploader, and cache unit tests
+cargo test --test memory_session    # Bounded cache capacities, memory stability
+cargo test --test artwork           # Disk caching, format detection, corruption recovery
 
-# Check Python syntax and run backend tests
-python -m py_compile backend/bridge.py backend/exceptions.py backend/artwork/thumbnails.py backend/providers/spotify/spotify.py backend/providers/ytmusic/ytmusic.py
+# 6. Verify Python syntax and run backend unit tests
+python -m py_compile backend/bridge.py backend/exceptions.py backend/providers/lyrics/*.py backend/providers/lyrics/parsers/*.py
 python -m unittest discover -s backend/tests -p "test_*.py" -v
 ```
 
-### Testing Discord Rich Presence (RPC) & IPC
-
-ANSImuz tests all 117 Discord RPC integration behaviors (activity formatting, worker reconnection backoff, byte format detection, SSRF protection, multi-provider fallbacks, cache invalidation, and playback lifecycle synchronization) offline using mock recorders and isolated temporary directories:
-
-```bash
-# Run all Discord-specific unit and integration tests:
-cargo test --lib discord::
-cargo test --test discord_connection
-
-# Run with an isolated cache directory if running in restricted environments:
-# Linux/macOS:
-XDG_CACHE_HOME=/tmp/ansimuz_test_cache cargo test --lib discord::
-# Windows (PowerShell):
-$env:XDG_CACHE_HOME='C:\Users\<user>\AppData\Local\Temp\ansimuz_test_cache'; cargo test --lib discord::
-```
-
-### Testing MPV Process Supervision & IPC
-
-ANSImuz separates player orchestration from system processes using `AudioPlayer::new_mock()`, allowing all test suites to run deterministically offline without requiring audio hardware.
-
-To test real MPV process lifecycle management, graceful shutdown, SIGKILL timeouts, and JSON IPC parsing:
-
-```bash
-# Run MPV supervision and cross-platform IPC transport unit tests:
-cargo test --lib playback::
-
-# Smoke test live audio playback and streaming (requires internet and active audio device):
-cargo run
-```
-
-### Network Access in Tests
-
-- **Offline Tests**: All Rust unit tests (`cargo test --lib`), integration suites (`cargo test --test <name>`), and Python unit tests run 100% offline using mock drivers.
-- **Online Operations**: Live searching, streaming, and artwork prefetching during `cargo run` require an active internet connection.
 ---
-
-## Continuous Integration (CI)
-
-Our GitHub Actions pipeline automatically checks every push and pull request targeting `main` across multiple platforms:
-
-- **Linux** (`ubuntu-latest`): Formatting, type checks, Clippy, unit and integration test suites, and build.
-- **Windows** (`windows-latest`): Python tests, format check, compilation, Clippy, verbose tests, and release build on native MSVC toolchain.
-
-CI automatically skips runs when only documentation (`*.md`), `LICENSE`, or `.gitignore` files are changed.
 
 ## Submitting Pull Requests
 
