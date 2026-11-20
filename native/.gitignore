@@ -37,6 +37,7 @@
 /mpv/test_mpv
 /mpv/test_bridge
 /mpv/test_playback
+/mpv/test_events
 
 # audio
 *mp3

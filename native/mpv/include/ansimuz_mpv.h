@@ -11,6 +11,52 @@ extern "C" {
  */
 typedef struct ansimuz_mpv ansimuz_mpv;
 
+/* Normalized ANSImuz event types */
+typedef enum ansimuz_mpv_event_type {
+    ANSIMUZ_MPV_EVENT_NONE = 0,
+    ANSIMUZ_MPV_EVENT_FILE_LOADED,
+    ANSIMUZ_MPV_EVENT_PLAYBACK_RESTART,
+    ANSIMUZ_MPV_EVENT_PROPERTY_CHANGE,
+    ANSIMUZ_MPV_EVENT_END_FILE,
+    ANSIMUZ_MPV_EVENT_ERROR
+} ansimuz_mpv_event_type;
+
+/* Observed playback properties */
+typedef enum ansimuz_mpv_property {
+    ANSIMUZ_MPV_PROPERTY_NONE = 0,
+    ANSIMUZ_MPV_PROPERTY_TIME_POS,
+    ANSIMUZ_MPV_PROPERTY_DURATION,
+    ANSIMUZ_MPV_PROPERTY_PAUSE,
+    ANSIMUZ_MPV_PROPERTY_VOLUME
+} ansimuz_mpv_property;
+
+/* Reasons why media playback stopped or ended */
+typedef enum ansimuz_mpv_end_reason {
+    ANSIMUZ_MPV_END_UNKNOWN = 0,
+    ANSIMUZ_MPV_END_EOF,
+    ANSIMUZ_MPV_END_STOP,
+    ANSIMUZ_MPV_END_QUIT,
+    ANSIMUZ_MPV_END_ERROR,
+    ANSIMUZ_MPV_END_REDIRECT
+} ansimuz_mpv_end_reason;
+
+/* Normalized event payload passed across the C ABI */
+typedef struct ansimuz_mpv_event {
+    ansimuz_mpv_event_type type;
+
+    /* Populated for PROPERTY_CHANGE */
+    ansimuz_mpv_property property;
+
+    /* Property value for numeric or boolean properties */
+    double value;
+
+    /* Populated for END_FILE */
+    ansimuz_mpv_end_reason end_reason;
+
+    /* Native libmpv error code, zero when not applicable */
+    int error_code;
+} ansimuz_mpv_event;
+
 /*
  * Allocates and initializes a dedicated mpv playback instance.
  *
@@ -105,6 +151,19 @@ int ansimuz_mpv_get_duration(
  * Useful for building diagnostics without pulling libmpv headers into Rust.
  */
 const char *ansimuz_mpv_error_string(int status);
+
+/*
+ * Retrieves the next pending event without blocking.
+ *
+ * Returns 1 if an event was retrieved, 0 if queue is empty,
+ * or negative mpv error code on invalid parameters.
+ *
+ * The caller owns the output structure and can reuse it after each call.
+ */
+int ansimuz_mpv_poll_event(
+    ansimuz_mpv *player,
+    ansimuz_mpv_event *out_event
+);
 
 #ifdef __cplusplus
 }

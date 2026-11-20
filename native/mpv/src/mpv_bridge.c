@@ -1,7 +1,9 @@
 #include "ansimuz_mpv.h"
 #include <mpv/client.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 /*
  * Internal handle holder. Keeping mpv_handle internal insulates callers
@@ -57,6 +59,36 @@ static int configure_option(
     }
 
     return status;
+}
+
+/*
+ * Registers property observation hooks on the initialized mpv instance.
+ * Uses discrete integer reply_userdata IDs to avoid string lookups in poll loop.
+ */
+static int observe_properties(mpv_handle *handle) {
+    int status;
+
+    status = mpv_observe_property(
+        handle, 1, "time-pos", MPV_FORMAT_DOUBLE
+    );
+    if (status < 0) return status;
+
+    status = mpv_observe_property(
+        handle, 2, "duration", MPV_FORMAT_DOUBLE
+    );
+    if (status < 0) return status;
+
+    status = mpv_observe_property(
+        handle, 3, "pause", MPV_FORMAT_FLAG
+    );
+    if (status < 0) return status;
+
+    status = mpv_observe_property(
+        handle, 4, "volume", MPV_FORMAT_DOUBLE
+    );
+    if (status < 0) return status;
+
+    return 0;
 }
 
 int ansimuz_mpv_create(
@@ -146,6 +178,25 @@ int ansimuz_mpv_create(
         );
 
         goto fail;
+    }
+
+    /*
+     * Register property observers immediately after initialize succeeds.
+     * If observer setup fails, tear down the initialized engine before exiting.
+     */
+    status = observe_properties(player->handle);
+
+    if (status < 0) {
+        set_error(
+            error_buffer,
+            error_buffer_size,
+            "observe_properties",
+            status
+        );
+
+        mpv_terminate_destroy(player->handle);
+        free(player);
+        return status;
     }
 
     *out_player = player;
@@ -294,4 +345,141 @@ int ansimuz_mpv_get_duration(
  */
 const char *ansimuz_mpv_error_string(int status) {
     return mpv_error_string(status);
+}
+
+/*
+ * Maps numeric observation userdata IDs to enum property identifiers.
+ */
+static ansimuz_mpv_property map_property_id(uint64_t id) {
+    switch (id) {
+        case 1:
+            return ANSIMUZ_MPV_PROPERTY_TIME_POS;
+        case 2:
+            return ANSIMUZ_MPV_PROPERTY_DURATION;
+        case 3:
+            return ANSIMUZ_MPV_PROPERTY_PAUSE;
+        case 4:
+            return ANSIMUZ_MPV_PROPERTY_VOLUME;
+        default:
+            return ANSIMUZ_MPV_PROPERTY_NONE;
+    }
+}
+
+/*
+ * Maps libmpv playback termination reasons to ANSImuz end reasons.
+ */
+static ansimuz_mpv_end_reason map_end_reason(mpv_end_file_reason reason) {
+    switch (reason) {
+        case MPV_END_FILE_REASON_EOF:
+            return ANSIMUZ_MPV_END_EOF;
+        case MPV_END_FILE_REASON_STOP:
+            return ANSIMUZ_MPV_END_STOP;
+        case MPV_END_FILE_REASON_QUIT:
+            return ANSIMUZ_MPV_END_QUIT;
+        case MPV_END_FILE_REASON_ERROR:
+            return ANSIMUZ_MPV_END_ERROR;
+        case MPV_END_FILE_REASON_REDIRECT:
+            return ANSIMUZ_MPV_END_REDIRECT;
+        default:
+            return ANSIMUZ_MPV_END_UNKNOWN;
+    }
+}
+
+/*
+ * Polls the native mpv event queue non blocking.
+ * Discards unexposed internal notifications until a relevant event is found
+ * or the event ring buffer is completely drained.
+ */
+int ansimuz_mpv_poll_event(
+    ansimuz_mpv *player,
+    ansimuz_mpv_event *out_event
+) {
+    if (!player || !player->handle || !out_event) {
+        return MPV_ERROR_INVALID_PARAMETER;
+    }
+
+    memset(out_event, 0, sizeof(*out_event));
+
+    for (;;) {
+        /* Zero timeout ensures this never blocks the calling thread */
+        mpv_event *event = mpv_wait_event(player->handle, 0);
+
+        if (!event || event->event_id == MPV_EVENT_NONE) {
+            out_event->type = ANSIMUZ_MPV_EVENT_NONE;
+            return 0;
+        }
+
+        switch (event->event_id) {
+            case MPV_EVENT_FILE_LOADED:
+                out_event->type = ANSIMUZ_MPV_EVENT_FILE_LOADED;
+                return 1;
+
+            case MPV_EVENT_PLAYBACK_RESTART:
+                out_event->type = ANSIMUZ_MPV_EVENT_PLAYBACK_RESTART;
+                return 1;
+
+            case MPV_EVENT_PROPERTY_CHANGE: {
+                mpv_event_property *property =
+                    (mpv_event_property *)event->data;
+
+                if (!property) {
+                    continue;
+                }
+
+                ansimuz_mpv_property id =
+                    map_property_id(event->reply_userdata);
+
+                /* Fallback to matching property name if userdata was unset */
+                if (id == ANSIMUZ_MPV_PROPERTY_NONE && property->name) {
+                    if (strcmp(property->name, "time-pos") == 0) {
+                        id = ANSIMUZ_MPV_PROPERTY_TIME_POS;
+                    } else if (strcmp(property->name, "duration") == 0) {
+                        id = ANSIMUZ_MPV_PROPERTY_DURATION;
+                    } else if (strcmp(property->name, "pause") == 0) {
+                        id = ANSIMUZ_MPV_PROPERTY_PAUSE;
+                    } else if (strcmp(property->name, "volume") == 0) {
+                        id = ANSIMUZ_MPV_PROPERTY_VOLUME;
+                    }
+                }
+
+                if (id == ANSIMUZ_MPV_PROPERTY_NONE) {
+                    continue;
+                }
+
+                out_event->property = id;
+
+                if (property->format == MPV_FORMAT_DOUBLE && property->data) {
+                    out_event->value = *(double *)property->data;
+                } else if (property->format == MPV_FORMAT_FLAG && property->data) {
+                    out_event->value = *(int *)property->data;
+                } else {
+                    /* Property value is temporarily unavailable */
+                    continue;
+                }
+
+                out_event->type = ANSIMUZ_MPV_EVENT_PROPERTY_CHANGE;
+                return 1;
+            }
+
+            case MPV_EVENT_END_FILE: {
+                mpv_event_end_file *end =
+                    (mpv_event_end_file *)event->data;
+
+                out_event->type = ANSIMUZ_MPV_EVENT_END_FILE;
+
+                if (end) {
+                    out_event->end_reason =
+                        map_end_reason(end->reason);
+
+                    out_event->error_code = end->error;
+                }
+
+                return 1;
+            }
+
+            default:
+                /* Discard unhandled native event and keep draining */
+                continue;
+        }
+    }
 }
