@@ -262,16 +262,45 @@ def reset_provider_health() -> None:
     _GLOBAL_HEALTH.reset()
 
 
+_MINIMUM_PROVIDER_TIMEOUT = 1.0  # Never shrink per-request timeout below this floor
+
+
 def _invoke_provider(
     provider_name: str,
     provider_getter: Callable[[], Any],
     track: dict[str, Any],
+    deadline: float | None = None,
 ) -> ProviderResult:
-    """Executes a single provider and returns a structured diagnostic ProviderResult."""
+    """Executes a single provider and returns a structured diagnostic ProviderResult.
+
+    When *deadline* is supplied the provider's per-request timeout is capped to
+    the remaining budget so that a slow provider cannot consume more wall-clock
+    time than the caller's global deadline allows.  A floor of
+    ``_MINIMUM_PROVIDER_TIMEOUT`` is applied so that the provider still gets a
+    fair chance even when the budget is nearly exhausted.
+    """
     t0 = time.monotonic()
     try:
         provider = provider_getter()
-        res = provider.get_lyrics(track)
+
+        # Temporarily cap the provider's per-request timeout to the remaining
+        # deadline budget so that individual HTTP calls cannot outlast it.
+        original_timeout: float | None = None
+        if deadline is not None and hasattr(provider, "timeout") and isinstance(
+            provider.timeout, (int, float)
+        ):
+            remaining = max(_MINIMUM_PROVIDER_TIMEOUT, deadline - t0)
+            if remaining < provider.timeout:
+                original_timeout = provider.timeout
+                provider.timeout = remaining
+
+        try:
+            res = provider.get_lyrics(track)
+        finally:
+            # Always restore the original timeout so shared provider instances
+            # don't leak a narrowed budget into subsequent requests.
+            if original_timeout is not None:
+                provider.timeout = original_timeout
         latency = (time.monotonic() - t0) * 1000.0
         if res and res.get("lines"):
             return ProviderResult(
@@ -422,7 +451,7 @@ def get_lyrics(
             )
             continue
 
-        result = _invoke_provider(name, getter, track)
+        result = _invoke_provider(name, getter, track, deadline=deadline)
         health.record_result(result)
 
         if result.lyrics:
