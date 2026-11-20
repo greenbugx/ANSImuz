@@ -24,3 +24,4 @@ Thumbs.db
 /artwork/cache/
 *.local.toml
 *.local.json
+*.obj
