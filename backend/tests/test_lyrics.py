@@ -2256,5 +2256,177 @@ class TestTieredLyricsCancellation(unittest.TestCase):
             mock_lp.assert_not_called()
 
 
+class TestParserEdgeCases(unittest.TestCase):
+    def test_ttml_zero_timestamp_preservation(self):
+        ttml = """<tt xmlns="http://www.w3.org/ns/ttml">
+          <body>
+            <div>
+              <p begin="00:00:00.000" end="00:00:05.000">
+                <span begin="00:00:00.000" end="00:00:02.000">
+                  <span begin="00:00:00.000" end="00:00:01.000">Zero</span>
+                  <span begin="00:00:01.000" end="00:00:02.000">start</span>
+                </span>
+              </p>
+            </div>
+          </body>
+        </tt>"""
+        sync, lines = parse_ttml(ttml)
+        self.assertEqual(sync, "syllable")
+        self.assertEqual(lines[0]["start_ms"], 0)
+        self.assertEqual(lines[0]["words"][0]["start_ms"], 0)
+        self.assertEqual(lines[0]["words"][0]["syllables"][0]["start_ms"], 0)
+
+    def test_ttml_container_offsets_and_relative_timing(self):
+        ttml = """<tt xmlns="http://www.w3.org/ns/ttml">
+          <body begin="00:00:10.000">
+            <div>
+              <p begin="00:00:02.000" end="00:00:08.000">
+                <span begin="+00:00:01.000" end="+00:00:03.000">Relative</span>
+              </p>
+            </div>
+          </body>
+        </tt>"""
+        sync, lines = parse_ttml(ttml)
+        self.assertEqual(lines[0]["start_ms"], 12000)
+        self.assertEqual(lines[0]["end_ms"], 18000)
+        self.assertEqual(lines[0]["words"][0]["start_ms"], 13000)
+        self.assertEqual(lines[0]["words"][0]["end_ms"], 15000)
+
+    def test_timestamp_framerate_and_rejection(self):
+        # Default 30 fps
+        self.assertEqual(parse_timestamp("00:01:00:15"), 60500)
+        # Explicit 24 fps
+        self.assertEqual(parse_timestamp("00:01:00:12", frame_rate=24.0), 60500)
+        # Explicit 25 fps
+        self.assertEqual(parse_timestamp("00:01:00:25", frame_rate=25.0), 61000)
+        # Rejection when frame_rate is None or <= 0
+        self.assertIsNone(parse_timestamp("00:01:00:15", frame_rate=None))
+        self.assertIsNone(parse_timestamp("00:01:00:15", frame_rate=0))
+        self.assertIsNone(parse_timestamp("00:01:00:15", frame_rate=-30))
+
+    def test_lrc_multiple_timestamps_on_one_line(self):
+        lrc = "[00:10.00][00:25.00]Chorus line sung twice"
+        sync, lines = parse_lrc(lrc)
+        self.assertEqual(sync, "line")
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(lines[0]["start_ms"], 10000)
+        self.assertEqual(lines[0]["text"], "Chorus line sung twice")
+        self.assertEqual(lines[1]["start_ms"], 25000)
+        self.assertEqual(lines[1]["text"], "Chorus line sung twice")
+
+    def test_lrc_metadata_tags_ignored(self):
+        lrc = """
+        [ti:Song Title]
+        [ar:Artist Name]
+        [al:Album Name]
+        [by:Creator]
+        [length:03:45]
+        [re:LrcMaker]
+        [00:05.00]First real line
+        """
+        sync, lines = parse_lrc(lrc)
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0]["text"], "First real line")
+        self.assertEqual(lines[0]["start_ms"], 5000)
+
+    def test_lrc_offset_applied_consistently_to_line_and_words(self):
+        lrc = """
+        [offset:+500]
+        [00:10.00]<00:10.00>Hello <00:11.00>World
+        """
+        sync, lines = parse_lrc(lrc)
+        self.assertEqual(sync, "word")
+        self.assertEqual(lines[0]["start_ms"], 10500)
+        self.assertEqual(lines[0]["words"][0]["start_ms"], 10500)
+        self.assertEqual(lines[0]["words"][1]["start_ms"], 11500)
+
+    def test_lrc_negative_offset_and_clamping(self):
+        lrc = """
+        [offset:-5000]
+        [00:02.00]Clamped to zero
+        [00:10.00]Shifted to five
+        """
+        sync, lines = parse_lrc(lrc)
+        self.assertEqual(lines[0]["start_ms"], 0)
+        self.assertEqual(lines[1]["start_ms"], 5000)
+
+    def test_lrc_empty_instrumental_timestamp(self):
+        lrc = """
+        [01:00.00]Verse line
+        [01:05.00]
+        [01:15.00]Next line
+        """
+        sync, lines = parse_lrc(lrc)
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(lines[0]["text"], "Verse line")
+        self.assertEqual(lines[0]["end_ms"], 65000)
+        # Empty instrumental gap
+        self.assertEqual(lines[1]["text"], "")
+        self.assertEqual(lines[1]["start_ms"], 65000)
+        self.assertEqual(lines[1]["end_ms"], 75000)
+        self.assertEqual(lines[1]["words"], [])
+        # Next line
+        self.assertEqual(lines[2]["text"], "Next line")
+        self.assertEqual(lines[2]["start_ms"], 75000)
+
+    def test_lrc_decimal_precision_and_hours(self):
+        lrc = """
+        [01:23]Zero decimals
+        [01:23.4]One decimal
+        [01:23.45]Two decimals
+        [01:23.456]Three decimals
+        [01:02:03.45]With hours
+        """
+        sync, lines = parse_lrc(lrc)
+        self.assertEqual(lines[0]["start_ms"], 83000)
+        self.assertEqual(lines[1]["start_ms"], 83400)
+        self.assertEqual(lines[2]["start_ms"], 83450)
+        self.assertEqual(lines[3]["start_ms"], 83456)
+        self.assertEqual(lines[4]["start_ms"], 3723450)
+
+    def test_plain_lyrics_preserves_stanza_breaks_and_section_headers(self):
+        plain = """
+        [Verse 1]
+        Line 1 of verse
+        Line 2 of verse
+
+        [Chorus]
+        Line 1 of chorus
+        """
+        sync, lines = parse_lrc(plain)
+        self.assertEqual(sync, "none")
+        texts = [l["text"] for l in lines]
+        self.assertEqual(texts, [
+            "[Verse 1]",
+            "Line 1 of verse",
+            "Line 2 of verse",
+            "",
+            "[Chorus]",
+            "Line 1 of chorus",
+        ])
+
+    def test_modular_imports(self):
+        from providers.lyrics.timestamps import parse_timestamp as pt, format_timestamp as ft
+        from providers.lyrics.normalization import normalize_text as nt, clean_title_for_search as cts
+        from providers.lyrics.matching import compute_similarity as cs
+        from providers.lyrics.parsers import (
+            parse_lrc as pl,
+            parse_ttml as pttml,
+            parse_qrc as pqrc,
+            parse_lyricsfile as plf,
+            parse_lyrics_plus as plp,
+        )
+        self.assertIsNotNone(pt)
+        self.assertIsNotNone(ft)
+        self.assertIsNotNone(nt)
+        self.assertIsNotNone(cts)
+        self.assertIsNotNone(cs)
+        self.assertIsNotNone(pl)
+        self.assertIsNotNone(pttml)
+        self.assertIsNotNone(pqrc)
+        self.assertIsNotNone(plf)
+        self.assertIsNotNone(plp)
+
+
 if __name__ == "__main__":
     unittest.main()
