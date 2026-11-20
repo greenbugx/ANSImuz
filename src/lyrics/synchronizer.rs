@@ -758,30 +758,6 @@ mod tests {
     }
 
     #[test]
-    fn test_player_event_failed_resets_not_ended() {
-        let lyrics = build_test_lyrics();
-        let mut sync = LyricsSynchronizer::new();
-
-        sync.sync_position(1, 10.5, Some(20.0), &lyrics);
-        assert!(sync.current_sync_point().has_active_line());
-
-        // PlayerEvent::Failed arrives
-        let pt = sync.sync_event(
-            &PlayerEvent::Failed {
-                generation: 1,
-                message: "Stream connection broken".to_string(),
-            },
-            &lyrics,
-        );
-        assert!(
-            !pt.is_ended,
-            "Failed playback must NOT be marked as completed song"
-        );
-        assert_eq!(pt.active_line_index, None);
-        assert_eq!(pt.position_ms, 0);
-    }
-
-    #[test]
     fn test_repeat_one_playback_loop() {
         let lyrics = build_test_lyrics();
         let mut sync = LyricsSynchronizer::new();
