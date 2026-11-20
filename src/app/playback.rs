@@ -50,28 +50,45 @@ pub fn play_queue_item(
         }
     }
 
-    if !entry.track.has_stream_url() {
+    let prefetched_slot = if index == 0 {
+        app.consume_prefetch(entry.id)
+    } else {
+        None
+    };
+
+    let (track_to_play, direct_url) = if let Some(slot) = prefetched_slot {
+        (slot.track, slot.direct_stream_url)
+    } else {
+        (entry.track, None)
+    };
+
+    if !track_to_play.has_stream_url() {
         play_track(
             app,
             player,
             player_tx,
             resolve_tx,
-            entry.track,
+            track_to_play,
             PlaybackSource::Queue { entry_id: entry.id },
         )
     } else {
         let Some(removed) = app.remove_queue_item(index) else {
             return false;
         };
-        play_track(
+        let mut final_track = track_to_play;
+        if final_track.spotify_id.is_none() {
+            final_track.spotify_id = removed.track.spotify_id;
+        }
+        play_track_with_direct(
             app,
             player,
             player_tx,
             resolve_tx,
-            removed.track,
+            final_track,
             PlaybackSource::Queue {
                 entry_id: removed.id,
             },
+            direct_url,
         )
     }
 }
@@ -205,6 +222,7 @@ pub fn handle_player_event(
             if generation != current {
                 return false;
             }
+            app.playback_generation = generation;
             let pos_dur = Duration::from_secs_f64(elapsed);
             let dur_opt = duration.filter(|&d| d > 0.0).map(Duration::from_secs_f64);
             if let Some(track) = app.current_track_mut()
@@ -219,6 +237,10 @@ pub fn handle_player_event(
             if let Some(worker) = &app.discord_worker {
                 worker.playback_progress(pos_dur, dur_opt);
             }
+            if let Some(lyrics) = &app.lyrics_state.lyrics {
+                app.lyrics_synchronizer
+                    .sync_position(generation, elapsed, duration, lyrics);
+            }
             true
         }
         PlayerEvent::Ended { generation } => {
@@ -227,6 +249,9 @@ pub fn handle_player_event(
             }
             app.current_position = None;
             *playback = None;
+            if let Some(lyrics) = &app.lyrics_state.lyrics {
+                app.lyrics_synchronizer.sync_ended(generation, lyrics);
+            }
             if app.is_resolving() {
                 retire_active_track_while_resolving(app);
             } else {
@@ -243,6 +268,7 @@ pub fn handle_player_event(
             }
             app.current_position = None;
             *playback = None;
+            app.lyrics_synchronizer.reset();
             if app.is_resolving() {
                 player.record_error(message.to_string());
                 retire_active_track_while_resolving(app);
@@ -262,6 +288,9 @@ pub fn handle_player_event(
 
 fn clear_discord_presence(app: &App) {
     if let Some(worker) = &app.discord_worker {
+        worker.clear();
+    }
+    if let Some(worker) = &app.lyrics_worker {
         worker.clear();
     }
 }
@@ -361,8 +390,20 @@ pub fn play_track(
     player: &mut AudioPlayer,
     player_tx: Sender<PlayerEvent>,
     resolve_tx: Sender<ResolveResponse>,
+    track: Track,
+    source: PlaybackSource,
+) -> bool {
+    play_track_with_direct(app, player, player_tx, resolve_tx, track, source, None)
+}
+
+pub fn play_track_with_direct(
+    app: &mut App,
+    player: &mut AudioPlayer,
+    player_tx: Sender<PlayerEvent>,
+    resolve_tx: Sender<ResolveResponse>,
     mut track: Track,
     source: PlaybackSource,
+    direct_url: Option<String>,
 ) -> bool {
     if let Some(cached) = crate::music::get_cached_track(&track) {
         track = cached.clone();
@@ -395,7 +436,7 @@ pub fn play_track(
     }
 
     app.cancel_pending_resolution();
-    match start_playback(app, player, player_tx.clone(), track, source) {
+    match start_playback_with_direct(app, player, player_tx.clone(), track, source, direct_url) {
         Ok(()) => true,
         Err(error) => {
             if let PlaybackSource::Queue { .. } = source {
@@ -415,9 +456,21 @@ pub fn start_playback(
     track: Track,
     source: PlaybackSource,
 ) -> Result<(), String> {
+    start_playback_with_direct(app, player, events, track, source, None)
+}
+
+pub fn start_playback_with_direct(
+    app: &mut App,
+    player: &mut AudioPlayer,
+    events: Sender<PlayerEvent>,
+    track: Track,
+    source: PlaybackSource,
+    direct_url: Option<String>,
+) -> Result<(), String> {
     let raw_stream = track.stream_url.as_deref().unwrap_or_default();
     let audio_source = AudioPlayer::cached_audio(raw_stream)
         .map(|path| path.to_string_lossy().into_owned())
+        .or(direct_url)
         .unwrap_or_else(|| raw_stream.to_string());
 
     match player.play(&audio_source, app.volume, events) {
@@ -442,16 +495,13 @@ pub fn start_playback(
                 }
             }
 
-            if let Some(next_queue) = app.queue.first() {
-                if app.settings.audio_cache
-                    && let Some(stream_url) = &next_queue.track.stream_url
-                {
-                    player.prefetch_later(stream_url, 25);
-                }
-                if let Some(art_url) = &next_queue.track.art_url {
-                    let _ = crate::artwork::prefetch(art_url);
-                }
+            if let Some(next_queue) = app.queue.first()
+                && let Some(art_url) = &next_queue.track.art_url
+            {
+                let _ = crate::artwork::prefetch(art_url);
             }
+
+            maybe_prefetch_next(app);
 
             if app.settings.audio_cache
                 && let Some(stream_url) = &track.stream_url
@@ -464,6 +514,13 @@ pub fn start_playback(
                 let artwork = crate::discord::artwork::ArtworkRequest::from_track(&track);
                 worker.track_changed(info, artwork);
             }
+            if let Some(worker) = &app.lyrics_worker {
+                worker.fetch(track.clone());
+            }
+            app.playback_generation = player.generation();
+            app.lyrics_synchronizer.reset();
+            app.lyrics_scroll_offset = 0;
+            app.lyrics_auto_scroll = true;
             Ok(())
         }
         Err(error) => {
@@ -477,7 +534,48 @@ pub fn start_playback(
             if let Some(worker) = &app.discord_worker {
                 worker.clear();
             }
+            if let Some(worker) = &app.lyrics_worker {
+                worker.clear();
+            }
             Err(error)
+        }
+    }
+}
+
+pub fn maybe_prefetch_next(app: &mut App) {
+    app.maybe_prefetch_next();
+}
+
+pub fn handle_prefetch_response(
+    app: &mut App,
+    player: &AudioPlayer,
+    resp: crate::music::PrefetchResolveResponse,
+) {
+    if resp.prefetch_generation != app.prefetch_generation {
+        return;
+    }
+
+    if app.prefetch_in_flight == Some(resp.entry_id) {
+        app.prefetch_in_flight = None;
+    }
+
+    match resp.result {
+        Ok((resolved, direct_url)) => {
+            if app.queue.first().map(|e| e.id) == Some(resp.entry_id) {
+                if app.settings.audio_cache
+                    && let Some(watch_url) = &resolved.stream_url
+                {
+                    player.prefetch_later(watch_url, 0);
+                }
+                app.prefetch_slot = Some(crate::app::state::PrefetchSlot {
+                    entry_id: resp.entry_id,
+                    track: resolved,
+                    direct_stream_url: direct_url,
+                });
+            }
+        }
+        Err(_) => {
+            // Silently ignore prefetch failures; normal resolve path handles fallbacks.
         }
     }
 }
@@ -981,5 +1079,142 @@ mod tests {
             resolve_tx.clone(),
         ));
         assert!(app.playback_state.is_stopped());
+    }
+
+    #[test]
+    fn test_handle_prefetch_response_stores_slot() {
+        let mut app = App::new();
+        let player = AudioPlayer::new_mock();
+        let track = Track::new("Queued Song", "Artist").with_provider("ytmusic");
+        let entry_id = app.enqueue(track).unwrap();
+
+        let resolved = Track::new("Queued Song", "Artist")
+            .with_provider("ytmusic")
+            .with_stream_url("https://example.com/stream");
+
+        let response = crate::music::PrefetchResolveResponse {
+            prefetch_generation: app.prefetch_generation,
+            entry_id,
+            result: Ok((resolved.clone(), Some("https://example.com/direct".into()))),
+        };
+
+        handle_prefetch_response(&mut app, &player, response);
+
+        assert_eq!(
+            app.prefetch_slot,
+            Some(crate::app::state::PrefetchSlot {
+                entry_id,
+                track: resolved,
+                direct_stream_url: Some("https://example.com/direct".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn test_handle_prefetch_response_discards_stale_generation() {
+        let mut app = App::new();
+        let player = AudioPlayer::new_mock();
+        let track = Track::new("Queued Song", "Artist").with_provider("ytmusic");
+        let entry_id = app.enqueue(track).unwrap();
+
+        let resolved = Track::new("Queued Song", "Artist")
+            .with_provider("ytmusic")
+            .with_stream_url("https://example.com/stream");
+
+        let stale_gen = app.prefetch_generation;
+        app.invalidate_prefetch(); // bumps generation
+
+        let response = crate::music::PrefetchResolveResponse {
+            prefetch_generation: stale_gen,
+            entry_id,
+            result: Ok((resolved, None)),
+        };
+
+        handle_prefetch_response(&mut app, &player, response);
+        assert!(app.prefetch_slot.is_none());
+    }
+
+    #[test]
+    fn test_handle_prefetch_response_discards_if_queue_entry_mismatch() {
+        let mut app = App::new();
+        let player = AudioPlayer::new_mock();
+        let track = Track::new("Queued Song", "Artist").with_provider("ytmusic");
+        let entry_id = app.enqueue(track).unwrap();
+
+        let resolved = Track::new("Queued Song", "Artist")
+            .with_provider("ytmusic")
+            .with_stream_url("https://example.com/stream");
+
+        let response = crate::music::PrefetchResolveResponse {
+            prefetch_generation: app.prefetch_generation,
+            entry_id: entry_id + 999,
+            result: Ok((resolved, None)),
+        };
+
+        handle_prefetch_response(&mut app, &player, response);
+        assert!(app.prefetch_slot.is_none());
+    }
+
+    #[test]
+    fn test_play_queue_item_consumes_prefetch_slot_starts_immediately() {
+        let mut app = App::new();
+        let mut player = AudioPlayer::new_mock();
+        let (player_tx, _player_rx) = channel();
+        let (resolve_tx, _resolve_rx) = channel();
+
+        let track = Track::new("Queue 1", "Artist 1").with_provider("spotify");
+        let entry_id = app.enqueue(track).unwrap();
+        assert!(!app.queue[0].track.has_stream_url());
+
+        let resolved = Track::new("Queue 1", "Artist 1")
+            .with_provider("spotify")
+            .with_stream_url("https://example.com/stream1");
+
+        app.prefetch_slot = Some(crate::app::state::PrefetchSlot {
+            entry_id,
+            track: resolved.clone(),
+            direct_stream_url: Some("https://example.com/direct1".into()),
+        });
+
+        // Playing queue item should consume prefetch slot, remove item, and start playing immediately
+        let played = play_queue_item(&mut app, &mut player, player_tx, resolve_tx, 0);
+        assert!(played);
+        assert!(app.prefetch_slot.is_none());
+        assert!(app.queue.is_empty());
+        assert!(app.is_playing());
+        assert!(!app.is_resolving());
+        assert_eq!(
+            app.current_track().and_then(|t| t.stream_url.as_deref()),
+            Some("https://example.com/stream1")
+        );
+    }
+
+    #[test]
+    fn test_play_queue_item_ytmusic_consumes_prefetch_slot() {
+        let mut app = App::new();
+        let mut player = AudioPlayer::new_mock();
+        let (player_tx, _player_rx) = channel();
+        let (resolve_tx, _resolve_rx) = channel();
+
+        let track = Track::new("YT Song", "Artist")
+            .with_provider("ytmusic")
+            .with_stream_url("https://youtube.com/watch?v=123");
+        let entry_id = app.enqueue(track.clone()).unwrap();
+
+        app.prefetch_slot = Some(crate::app::state::PrefetchSlot {
+            entry_id,
+            track: track.clone(),
+            direct_stream_url: Some("https://rr1.googlevideo.com/videoplayback?expire=999".into()),
+        });
+
+        let played = play_queue_item(&mut app, &mut player, player_tx, resolve_tx, 0);
+        assert!(played);
+        assert!(app.prefetch_slot.is_none());
+        assert!(app.queue.is_empty());
+        assert!(app.is_playing());
+        assert_eq!(
+            app.current_track().and_then(|t| t.stream_url.as_deref()),
+            Some("https://youtube.com/watch?v=123")
+        );
     }
 }

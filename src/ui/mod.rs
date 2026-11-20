@@ -6,8 +6,8 @@ use ratatui::{Frame, layout::Alignment, widgets::Paragraph};
 
 use crate::app::App;
 use screens::{
-    about::render_about, command_palette::render_command_palette, player::render_player,
-    quit_dialog::render_quit_dialog, settings::render_settings,
+    about::render_about, command_palette::render_command_palette, lyrics::render_lyrics,
+    player::render_player, quit_dialog::render_quit_dialog, settings::render_settings,
 };
 
 fn current_palette_color(app: &App) -> Option<(u8, u8, u8)> {
@@ -44,6 +44,8 @@ pub fn render(app: &App, frame: &mut Frame, playback: Option<(f64, Option<f64>)>
 
     if app.settings_open {
         render_settings(frame, area, &app.settings, app.settings_cursor, &theme);
+    } else if app.lyrics_open {
+        render_lyrics(frame, area, app, playback, &theme);
     } else {
         render_player(frame, area, app, playback, &theme);
     }

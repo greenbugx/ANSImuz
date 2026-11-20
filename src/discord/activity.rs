@@ -283,22 +283,20 @@ pub fn build_activity(info: &PlaybackInfo) -> Activity {
         .small_text(small_text);
 
     // Timestamps and playback status logic
-    if !info.is_paused {
+    if !info.is_paused
+        && let Some(pos) = info.position
+    {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
 
-        let start_ts = if let Some(pos) = info.position {
-            now.saturating_sub(pos.as_secs())
-        } else {
-            now
-        };
+        let start_ts = now.saturating_sub(pos.as_secs());
         builder = builder.start_timestamp(start_ts);
 
-        let is_finished = match (info.position, info.duration) {
-            (Some(pos), Some(dur)) => pos >= dur,
-            _ => false,
+        let is_finished = match info.duration {
+            Some(dur) => pos >= dur,
+            None => false,
         };
 
         if !is_finished

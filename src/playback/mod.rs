@@ -4,5 +4,5 @@ pub mod mpv;
 pub mod repeat;
 
 pub use events::PlayerEvent;
-pub use mpv::{AudioPlayer, PrefetchResult};
+pub use mpv::{AudioPlayer, PrefetchResult, resolve_stream};
 pub use repeat::Repeat;

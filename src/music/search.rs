@@ -27,6 +27,13 @@ pub struct ResolveResponse {
     pub result: Result<Track, String>,
 }
 
+#[derive(Debug)]
+pub struct PrefetchResolveResponse {
+    pub prefetch_generation: u64,
+    pub entry_id: u64,
+    pub result: Result<(Track, Option<String>), String>,
+}
+
 pub const MAX_RESOLVED_CACHE_ENTRIES: usize = 200;
 
 struct ResolvedCache {

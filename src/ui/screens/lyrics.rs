@@ -1,0 +1,1493 @@
+use ratatui::{
+    Frame,
+    layout::{Alignment, Constraint, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, Paragraph},
+};
+use unicode_width::UnicodeWidthStr;
+
+use crate::app::App;
+use crate::lyrics::synchronizer::compute_sync_point;
+use crate::lyrics::types::{LyricsStatus, SyncType};
+use crate::lyrics::{LyricLine, LyricSyllable, Lyrics, LyricsSyncPoint};
+use crate::ui::screens::player::{layout_player_panel, render_player_panel};
+use crate::ui::theme::{Theme, truncate};
+
+const FIRST_LINE_PREFIX: &str = "  ";
+const ACTIVE_LINE_PREFIX: &str = "▶ ";
+const BACKGROUND_ACTIVE_PREFIX: &str = "▷ ";
+const ACTIVE_LINE_SUFFIX: &str = " ◀";
+const BACKGROUND_ACTIVE_SUFFIX: &str = " ◁";
+const RIGHT_LINE_SUFFIX: &str = "  ";
+const HANGING_INDENT_PREFIX: &str = "    "; // 4 spaces hanging indent
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LyricsLayout {
+    pub col_lyrics: Rect,
+    pub col_player: Rect,
+}
+
+pub fn layout_lyrics(area: Rect) -> LyricsLayout {
+    let (player_w, lyrics_w) = if area.width >= 120 {
+        let p_w = (area.width * 36 / 100).clamp(38, 52);
+        (p_w, area.width.saturating_sub(p_w))
+    } else if area.width >= 85 {
+        let p_w = (area.width * 40 / 100).clamp(36, 46);
+        (p_w, area.width.saturating_sub(p_w))
+    } else {
+        let p_w = (area.width / 2).max(20);
+        (p_w, area.width.saturating_sub(p_w))
+    };
+
+    let cols = Layout::horizontal([Constraint::Length(lyrics_w), Constraint::Length(player_w)])
+        .split(area);
+
+    LyricsLayout {
+        col_lyrics: cols[0],
+        col_player: cols[1],
+    }
+}
+
+pub fn render_lyrics(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    playback: Option<(f64, Option<f64>)>,
+    theme: &Theme,
+) {
+    let layout = layout_lyrics(area);
+
+    // Right side: Player panel (without search bar)
+    let panel_layout = layout_player_panel(layout.col_player, false);
+    render_player_panel(
+        frame,
+        &panel_layout,
+        layout.col_player,
+        app,
+        playback,
+        theme,
+    );
+
+    let active_track = app
+        .current_track()
+        .or(app.pending_track())
+        .or(app.lyrics_state.current_track.as_ref())
+        .or_else(|| app.playing.and_then(|idx| app.tracks.get(idx)));
+
+    // Left / Center side: Lyrics panel
+    let title_line = if let Some(track) = active_track {
+        let title_text = format!(" LYRICS: {} — {} ", track.title, track.artist);
+        let max_w = (layout.col_lyrics.width as usize).saturating_sub(4);
+        Line::from(vec![Span::styled(
+            truncate(&title_text, max_w),
+            theme.bold_primary,
+        )])
+    } else {
+        Line::from(vec![Span::styled(" LYRICS ", theme.bold_primary)])
+    };
+
+    let source_name = app
+        .lyrics_state
+        .lyrics
+        .as_ref()
+        .and_then(|l| l.source.as_deref())
+        .unwrap_or("lrc.red");
+
+    let mut bottom_spans = vec![Span::styled(format!(" via {source_name} "), theme.dim)];
+    if !app.lyrics_auto_scroll {
+        bottom_spans.push(Span::styled(
+            " [MANUAL SCROLL (C to center)] ",
+            theme.bold_primary,
+        ));
+    }
+
+    let lyrics_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.primary)
+        .title(title_line)
+        .title_bottom(Line::from(bottom_spans).alignment(Alignment::Right));
+
+    let inner = lyrics_block.inner(layout.col_lyrics);
+    frame.render_widget(lyrics_block, layout.col_lyrics);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    // State handling:
+    // Actively loading lyrics
+    if app.lyrics_state.status.is_loading() {
+        render_centered_notice(
+            frame,
+            inner,
+            "LOADING LYRICS...",
+            "Searching for synchronized lyrics...",
+            theme,
+        );
+        return;
+    }
+
+    // Error state
+    if let LyricsStatus::Failed(ref err) = app.lyrics_state.status {
+        render_centered_notice(frame, inner, "LYRICS RETRIEVAL FAILED", err, theme);
+        return;
+    }
+
+    // Not found or marked unavailable
+    if app.lyrics_state.status.is_not_found()
+        || app
+            .lyrics_state
+            .lyrics
+            .as_ref()
+            .map(|l| l.unavailable_reason.is_some() || l.lines.is_empty())
+            .unwrap_or(false)
+    {
+        let reason = app
+            .lyrics_state
+            .lyrics
+            .as_ref()
+            .and_then(|l| l.unavailable_reason.as_deref())
+            .unwrap_or("No lyrics available for this song.");
+        render_centered_notice(frame, inner, "NO LYRICS AVAILABLE", reason, theme);
+        return;
+    }
+
+    // Available lyrics
+    if let Some(lyrics) = &app.lyrics_state.lyrics {
+        render_lyrics_content(frame, inner, app, lyrics, playback, theme);
+        return;
+    }
+
+    // No track currently active
+    if active_track.is_none() {
+        render_centered_notice(
+            frame,
+            inner,
+            "NO TRACK PLAYING",
+            "Select and play a song to view lyrics.",
+            theme,
+        );
+    } else {
+        render_centered_notice(
+            frame,
+            inner,
+            "LYRICS IDLE",
+            "Press 'l' or play a track to fetch lyrics.",
+            theme,
+        );
+    }
+}
+
+fn render_lyrics_content(
+    frame: &mut Frame,
+    inner: Rect,
+    app: &App,
+    lyrics: &Lyrics,
+    playback: Option<(f64, Option<f64>)>,
+    theme: &Theme,
+) {
+    // Determine active synchronization point
+    let sync_point = resolve_sync_point(app, lyrics, playback);
+    let is_timed = lyrics.is_timed() && lyrics.sync_type != SyncType::Unsynced;
+    let max_w = (inner.width as usize).saturating_sub(1).max(10);
+
+    let mut rendered_lines: Vec<Line<'static>> = Vec::with_capacity(lyrics.lines.len() * 2);
+    let mut active_visual_row: Option<usize> = None;
+
+    if is_timed {
+        for (idx, line) in lyrics.lines.iter().enumerate() {
+            let is_current = sync_point.active_line_indices.contains(&idx);
+            let is_past = match sync_point.active_line_index {
+                Some(curr) => idx < curr && !is_current,
+                None => false,
+            };
+
+            if is_current {
+                if sync_point.active_line_index == Some(idx) || active_visual_row.is_none() {
+                    active_visual_row = Some(rendered_lines.len());
+                }
+                if is_right_aligned(line) {
+                    let suffix = if line.is_background {
+                        BACKGROUND_ACTIVE_SUFFIX
+                    } else {
+                        ACTIVE_LINE_SUFFIX
+                    };
+                    wrap_right_aligned_line(
+                        line,
+                        Some(&sync_point),
+                        theme,
+                        theme.bold_primary,
+                        Some(suffix),
+                        max_w,
+                        &mut rendered_lines,
+                    );
+                } else {
+                    wrap_active_timed_line(line, &sync_point, theme, max_w, &mut rendered_lines);
+                }
+            } else {
+                let style = if is_past {
+                    theme.dim.add_modifier(Modifier::ITALIC)
+                } else {
+                    Style::default().fg(Color::Gray)
+                };
+                if is_right_aligned(line) {
+                    wrap_right_aligned_line(
+                        line,
+                        None,
+                        theme,
+                        style,
+                        Some(RIGHT_LINE_SUFFIX),
+                        max_w,
+                        &mut rendered_lines,
+                    );
+                } else {
+                    wrap_plain_line(line.display_text(), style, None, max_w, &mut rendered_lines);
+                }
+            }
+        }
+    } else {
+        let unsynced_style = Style::default().fg(Color::Gray);
+        for line in &lyrics.lines {
+            if is_right_aligned(line) {
+                wrap_right_aligned_line(
+                    line,
+                    None,
+                    theme,
+                    unsynced_style,
+                    Some(RIGHT_LINE_SUFFIX),
+                    max_w,
+                    &mut rendered_lines,
+                );
+            } else {
+                wrap_plain_line(
+                    line.display_text(),
+                    unsynced_style,
+                    None,
+                    max_w,
+                    &mut rendered_lines,
+                );
+            }
+        }
+    }
+
+    // Calculate vertical scroll offset according to explicit scroll policy (Auto vs Manual)
+    let visible_height = inner.height as usize;
+    let total_lines = rendered_lines.len();
+    let max_scroll = total_lines.saturating_sub(visible_height);
+
+    let scroll_y = calculate_lyrics_scroll(
+        app.lyrics_auto_scroll,
+        app.lyrics_scroll_offset,
+        if is_timed { active_visual_row } else { None },
+        visible_height,
+        max_scroll,
+    );
+
+    let paragraph = Paragraph::new(rendered_lines).scroll((scroll_y as u16, 0));
+
+    frame.render_widget(paragraph, inner);
+}
+
+/// Scroll policy:
+/// - Playback position strictly controls the active lyric.
+/// - Auto-scroll determines whether the viewport follows that active lyric row.
+/// - Manual scrolling modifies only the viewport scroll offset
+//    it NEVER alters synchronization state.
+#[inline]
+pub fn calculate_lyrics_scroll(
+    auto_scroll: bool,
+    manual_offset: usize,
+    active_visual_row: Option<usize>,
+    visible_height: usize,
+    max_scroll: usize,
+) -> usize {
+    if auto_scroll {
+        if let Some(active_row) = active_visual_row {
+            let center_offset = visible_height / 3;
+            active_row.saturating_sub(center_offset).min(max_scroll)
+        } else {
+            0
+        }
+    } else {
+        manual_offset.min(max_scroll)
+    }
+}
+
+fn resolve_sync_point(
+    app: &App,
+    lyrics: &Lyrics,
+    playback: Option<(f64, Option<f64>)>,
+) -> LyricsSyncPoint {
+    let cached = app.lyrics_synchronizer.current_sync_point();
+
+    // Explicitly verify cached sync point belongs to the currently active playback generation and track
+    let is_valid_generation = cached.generation == app.playback_generation;
+    let track_matches = match (app.current_track(), app.lyrics_state.current_track.as_ref()) {
+        (Some(curr), Some(lyr)) => curr.same_identity(lyr),
+        (None, None) => true,
+        _ => true,
+    };
+
+    if is_valid_generation
+        && track_matches
+        && (cached.position_ms > 0 || cached.has_active_line() || cached.is_ended)
+    {
+        cached.clone()
+    } else if let Some((elapsed, duration)) = playback {
+        let pos_ms = (elapsed.max(0.0) * 1000.0).round() as u64;
+        let dur_ms = duration.map(|d| (d * 1000.0).round() as u64);
+        compute_sync_point(
+            pos_ms,
+            dur_ms,
+            app.playback_generation,
+            app.is_paused(),
+            false,
+            lyrics,
+            None,
+        )
+    } else {
+        compute_sync_point(
+            0,
+            None,
+            app.playback_generation,
+            app.is_paused(),
+            false,
+            lyrics,
+            None,
+        )
+    }
+}
+
+fn wrap_plain_line(
+    text: &str,
+    style: Style,
+    prefix_override: Option<&'static str>,
+    max_width: usize,
+    out: &mut Vec<Line<'static>>,
+) {
+    let first_prefix = prefix_override.unwrap_or(FIRST_LINE_PREFIX);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        out.push(Line::from(vec![Span::raw(first_prefix)]));
+        return;
+    }
+
+    let first_prefix_w = first_prefix.width();
+    let cont_prefix_w = HANGING_INDENT_PREFIX.width();
+
+    let mut cur_spans: Vec<Span<'static>> = Vec::new();
+    let mut cur_width: usize = 0;
+    let mut is_first_line = true;
+
+    for word in trimmed.split_whitespace() {
+        let word_w = word.width();
+
+        if cur_spans.is_empty() {
+            let prefix_style = if prefix_override.is_some() && is_first_line {
+                style
+            } else {
+                Style::default()
+            };
+            cur_spans.push(Span::styled(first_prefix, prefix_style));
+            cur_spans.push(Span::styled(word.to_string(), style));
+            cur_width = first_prefix_w + word_w;
+        } else if cur_width + 1 + word_w > max_width {
+            out.push(Line::from(std::mem::take(&mut cur_spans)));
+            is_first_line = false;
+            cur_spans.push(Span::raw(HANGING_INDENT_PREFIX));
+            cur_spans.push(Span::styled(word.to_string(), style));
+            cur_width = cont_prefix_w + word_w;
+        } else {
+            cur_spans.push(Span::raw(" "));
+            cur_spans.push(Span::styled(word.to_string(), style));
+            cur_width += 1 + word_w;
+        }
+    }
+
+    if !cur_spans.is_empty() {
+        out.push(Line::from(cur_spans));
+    }
+}
+
+fn wrap_active_timed_line(
+    line: &LyricLine,
+    sync_point: &LyricsSyncPoint,
+    theme: &Theme,
+    max_width: usize,
+    out: &mut Vec<Line<'static>>,
+) {
+    let is_bg = line.is_background;
+    let prefix = if is_bg {
+        BACKGROUND_ACTIVE_PREFIX
+    } else {
+        ACTIVE_LINE_PREFIX
+    };
+    let active_style = if is_bg {
+        theme.primary.add_modifier(Modifier::ITALIC)
+    } else {
+        theme.bold_primary
+    };
+    let upcoming_word_style = if is_bg {
+        Style::default()
+            .fg(Color::Gray)
+            .add_modifier(Modifier::ITALIC)
+    } else {
+        Style::default()
+            .fg(Color::Gray)
+            .add_modifier(Modifier::BOLD)
+    };
+
+    let has_word_timing = line.words.iter().any(|w| w.start_ms.is_some());
+    if !has_word_timing {
+        wrap_plain_line(
+            line.display_text(),
+            active_style,
+            Some(prefix),
+            max_width,
+            out,
+        );
+        return;
+    }
+
+    let first_prefix_w = prefix.width();
+    let cont_prefix_w = HANGING_INDENT_PREFIX.width();
+
+    let mut cur_spans: Vec<Span<'static>> = Vec::new();
+    let mut cur_width: usize = 0;
+    let mut is_first_line = true;
+
+    for (w_idx, word) in line.words.iter().enumerate() {
+        let word_w = word.text.width();
+
+        if !cur_spans.is_empty() && cur_width + 1 + word_w > max_width {
+            out.push(Line::from(std::mem::take(&mut cur_spans)));
+            is_first_line = false;
+            cur_spans.push(Span::raw(HANGING_INDENT_PREFIX));
+            cur_width = cont_prefix_w;
+        } else if cur_spans.is_empty() {
+            if is_first_line {
+                cur_spans.push(Span::styled(prefix, active_style));
+                cur_width = first_prefix_w;
+            } else {
+                cur_spans.push(Span::raw(HANGING_INDENT_PREFIX));
+                cur_width = cont_prefix_w;
+            }
+        } else {
+            cur_spans.push(Span::raw(" "));
+            cur_width += 1;
+        }
+
+        let w_start = word
+            .start_ms
+            .or_else(|| {
+                line.words
+                    .get(w_idx.saturating_sub(1))
+                    .and_then(|prev| prev.end_ms)
+            })
+            .unwrap_or(line.start_ms.unwrap_or(0));
+        let has_word_started = sync_point.position_ms >= w_start;
+
+        if !has_word_started {
+            cur_spans.push(Span::styled(word.text.clone(), upcoming_word_style));
+        } else if !word.syllables.is_empty() && word.syllables.iter().any(|s| s.start_ms.is_some())
+        {
+            for syl in &word.syllables {
+                let s_start = syl.start_ms.unwrap_or(w_start);
+                let syl_style = if sync_point.position_ms >= s_start {
+                    active_style
+                } else {
+                    upcoming_word_style
+                };
+                cur_spans.push(Span::styled(syl.text.clone(), syl_style));
+            }
+        } else {
+            cur_spans.push(Span::styled(word.text.clone(), active_style));
+        }
+        cur_width += word_w;
+    }
+
+    if !cur_spans.is_empty() {
+        out.push(Line::from(cur_spans));
+    }
+}
+
+#[inline]
+fn is_right_aligned(line: &LyricLine) -> bool {
+    line.singer > 0
+}
+
+fn wrap_right_aligned_line(
+    line: &LyricLine,
+    sync_point: Option<&LyricsSyncPoint>,
+    theme: &Theme,
+    fallback_style: Style,
+    suffix: Option<&'static str>,
+    max_width: usize,
+    out: &mut Vec<Line<'static>>,
+) {
+    let is_bg = line.is_background;
+    let active_style = if is_bg {
+        theme.primary.add_modifier(Modifier::ITALIC)
+    } else {
+        theme.bold_primary
+    };
+    let upcoming_word_style = if is_bg {
+        Style::default()
+            .fg(Color::Gray)
+            .add_modifier(Modifier::ITALIC)
+    } else {
+        Style::default()
+            .fg(Color::Gray)
+            .add_modifier(Modifier::BOLD)
+    };
+
+    let first_suffix = suffix.unwrap_or("");
+    let first_suffix_w = first_suffix.width();
+    let cont_indent_w = HANGING_INDENT_PREFIX.width();
+
+    struct WordItem<'a> {
+        text: &'a str,
+        start_ms: Option<u64>,
+        syllables: &'a [LyricSyllable],
+    }
+
+    struct WordSpan<'a> {
+        text: &'a str,
+        style: Style,
+        width: usize,
+    }
+
+    let raw_words: Vec<WordItem> = if line.words.is_empty() {
+        line.display_text()
+            .split_whitespace()
+            .map(|tok| WordItem {
+                text: tok,
+                start_ms: None,
+                syllables: &[],
+            })
+            .collect()
+    } else {
+        line.words
+            .iter()
+            .map(|w| WordItem {
+                text: w.text.as_str(),
+                start_ms: w.start_ms,
+                syllables: w.syllables.as_slice(),
+            })
+            .collect()
+    };
+
+    if raw_words.is_empty() {
+        let pad_left = max_width.saturating_sub(first_suffix_w);
+        let suf_style = if sync_point.is_some() {
+            active_style
+        } else {
+            fallback_style
+        };
+        out.push(Line::from(vec![
+            Span::raw(" ".repeat(pad_left)),
+            Span::styled(first_suffix, suf_style),
+        ]));
+        return;
+    }
+
+    let mut word_spans: Vec<Vec<WordSpan>> = Vec::with_capacity(raw_words.len());
+    for (w_idx, word) in raw_words.iter().enumerate() {
+        let mut spans = Vec::new();
+        if let Some(sp) = sync_point {
+            let w_start = word
+                .start_ms
+                .or_else(|| {
+                    raw_words
+                        .get(w_idx.saturating_sub(1))
+                        .and_then(|prev| prev.start_ms)
+                })
+                .unwrap_or(line.start_ms.unwrap_or(0));
+            let has_word_started = sp.position_ms >= w_start;
+
+            if !has_word_started {
+                spans.push(WordSpan {
+                    text: word.text,
+                    style: upcoming_word_style,
+                    width: word.text.width(),
+                });
+            } else if !word.syllables.is_empty()
+                && word.syllables.iter().any(|s| s.start_ms.is_some())
+            {
+                for syl in word.syllables {
+                    let s_start = syl.start_ms.unwrap_or(w_start);
+                    let syl_style = if sp.position_ms >= s_start {
+                        active_style
+                    } else {
+                        upcoming_word_style
+                    };
+                    spans.push(WordSpan {
+                        text: syl.text.as_str(),
+                        style: syl_style,
+                        width: syl.text.width(),
+                    });
+                }
+            } else {
+                spans.push(WordSpan {
+                    text: word.text,
+                    style: active_style,
+                    width: word.text.width(),
+                });
+            }
+        } else {
+            spans.push(WordSpan {
+                text: word.text,
+                style: fallback_style,
+                width: word.text.width(),
+            });
+        }
+        word_spans.push(spans);
+    }
+
+    let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut cur_row_spans: Vec<Span<'static>> = Vec::new();
+    let mut cur_row_content_w: usize = 0;
+    let mut is_first_line = true;
+
+    for (w_idx, word) in raw_words.iter().enumerate() {
+        let w_len = word.text.width();
+        let max_content_w = if is_first_line {
+            max_width.saturating_sub(first_suffix_w)
+        } else {
+            max_width.saturating_sub(cont_indent_w)
+        };
+
+        if !cur_row_spans.is_empty() && cur_row_content_w + 1 + w_len > max_content_w {
+            rows.push(std::mem::take(&mut cur_row_spans));
+            is_first_line = false;
+            cur_row_content_w = 0;
+        }
+
+        if !cur_row_spans.is_empty() {
+            cur_row_spans.push(Span::raw(" "));
+            cur_row_content_w += 1;
+        }
+
+        for ws in &word_spans[w_idx] {
+            cur_row_spans.push(Span::styled(ws.text.to_string(), ws.style));
+            cur_row_content_w += ws.width;
+        }
+    }
+
+    if !cur_row_spans.is_empty() {
+        rows.push(cur_row_spans);
+    }
+
+    for (i, mut row_spans) in rows.into_iter().enumerate() {
+        let row_content_w: usize = row_spans.iter().map(|s| s.content.width()).sum();
+        let is_first = i == 0;
+        let pad_left = if is_first {
+            max_width.saturating_sub(row_content_w + first_suffix_w)
+        } else {
+            max_width.saturating_sub(row_content_w + cont_indent_w)
+        };
+
+        let mut final_spans = Vec::with_capacity(row_spans.len() + 2);
+        if pad_left > 0 {
+            final_spans.push(Span::raw(" ".repeat(pad_left)));
+        }
+        final_spans.append(&mut row_spans);
+
+        if is_first {
+            if first_suffix_w > 0 {
+                let suf_style = if sync_point.is_some() {
+                    active_style
+                } else {
+                    fallback_style
+                };
+                final_spans.push(Span::styled(first_suffix, suf_style));
+            }
+        } else if cont_indent_w > 0 {
+            final_spans.push(Span::raw(HANGING_INDENT_PREFIX));
+        }
+
+        out.push(Line::from(final_spans));
+    }
+}
+
+fn render_centered_notice(
+    frame: &mut Frame,
+    area: Rect,
+    headline: &str,
+    subtext: &str,
+    theme: &Theme,
+) {
+    let vertical_pad = (area.height.saturating_sub(3) / 2) as usize;
+    let mut lines = Vec::with_capacity(vertical_pad + 3);
+    for _ in 0..vertical_pad {
+        lines.push(Line::raw(""));
+    }
+    lines.push(
+        Line::from(vec![Span::styled(headline.to_string(), theme.bold_primary)])
+            .alignment(Alignment::Center),
+    );
+    lines.push(Line::raw(""));
+    lines.push(
+        Line::from(vec![Span::styled(subtext.to_string(), theme.dim)]).alignment(Alignment::Center),
+    );
+
+    let p = Paragraph::new(lines).alignment(Alignment::Center);
+    frame.render_widget(p, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lyrics::{LyricSyllable, LyricWord};
+    use crate::music::Track;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    #[test]
+    fn test_layout_lyrics_proportions_wide() {
+        for width in [120, 140, 160, 200] {
+            let area = Rect::new(0, 0, width, 30);
+            let layout = layout_lyrics(area);
+
+            assert!(layout.col_player.width >= 38 && layout.col_player.width <= 52);
+            assert!(layout.col_lyrics.width >= 70);
+            assert_eq!(
+                layout.col_lyrics.width + layout.col_player.width,
+                width,
+                "Columns must sum to total width at {width}"
+            );
+            assert_eq!(layout.col_lyrics.x, 0);
+            assert_eq!(layout.col_player.x, layout.col_lyrics.width);
+        }
+    }
+
+    #[test]
+    fn test_layout_lyrics_proportions_medium() {
+        for width in [85, 90, 100, 110] {
+            let area = Rect::new(0, 0, width, 30);
+            let layout = layout_lyrics(area);
+
+            assert!(layout.col_player.width >= 36 && layout.col_player.width <= 46);
+            assert!(layout.col_lyrics.width >= 45);
+            assert_eq!(
+                layout.col_lyrics.width + layout.col_player.width,
+                width,
+                "Columns must sum to total width at {width}"
+            );
+            assert_eq!(layout.col_lyrics.x, 0);
+            assert_eq!(layout.col_player.x, layout.col_lyrics.width);
+        }
+    }
+
+    #[test]
+    fn test_layout_lyrics_proportions_compact() {
+        for width in [40, 50, 60, 70, 80] {
+            let area = Rect::new(0, 0, width, 24);
+            let layout = layout_lyrics(area);
+
+            assert_eq!(
+                layout.col_lyrics.width + layout.col_player.width,
+                width,
+                "Columns must sum to total width at {width}"
+            );
+            assert!(layout.col_player.width >= 20);
+            assert!(layout.col_lyrics.width >= 20);
+            assert_eq!(layout.col_lyrics.x, 0);
+            assert_eq!(layout.col_player.x, layout.col_lyrics.width);
+        }
+    }
+
+    #[test]
+    fn test_render_lyrics_no_track_state() {
+        let app = App::new();
+        let theme = Theme::new(None);
+        let area = Rect::new(0, 0, 120, 30);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                render_lyrics(frame, area, &app, None, &theme);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let text: String = (0..area.height)
+            .flat_map(|y| (0..area.width).map(move |x| buffer[(x, y)].symbol()))
+            .collect();
+
+        assert!(text.contains("NO TRACK PLAYING"));
+        assert!(text.contains("Select and play a song"));
+    }
+
+    #[test]
+    fn test_render_lyrics_loading_state() {
+        let mut app = App::new();
+        app.tracks.push(Track::new("Creep", "Radiohead"));
+        app.playing = Some(0);
+        app.lyrics_state.status = LyricsStatus::Loading;
+
+        let theme = Theme::new(None);
+        let area = Rect::new(0, 0, 120, 30);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                render_lyrics(frame, area, &app, None, &theme);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let text: String = (0..area.height)
+            .flat_map(|y| (0..area.width).map(move |x| buffer[(x, y)].symbol()))
+            .collect();
+
+        assert!(text.contains("LOADING LYRICS..."));
+        assert!(text.contains("Searching for synchronized lyrics"));
+    }
+
+    #[test]
+    fn test_render_lyrics_not_found_and_failed_states() {
+        let mut app = App::new();
+        app.tracks.push(Track::new("Creep", "Radiohead"));
+        app.playing = Some(0);
+
+        let theme = Theme::new(None);
+        let area = Rect::new(0, 0, 120, 30);
+
+        // NotFound
+        app.lyrics_state.status = LyricsStatus::NotFound;
+        let backend1 = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend1).unwrap();
+        terminal
+            .draw(|frame| {
+                render_lyrics(frame, area, &app, None, &theme);
+            })
+            .unwrap();
+        let buffer1 = terminal.backend().buffer();
+        let text1: String = (0..area.height)
+            .flat_map(|y| (0..area.width).map(move |x| buffer1[(x, y)].symbol()))
+            .collect();
+        assert!(text1.contains("NO LYRICS AVAILABLE"));
+
+        // Failed
+        app.lyrics_state.status = LyricsStatus::Failed("Network timeout".to_string());
+        let backend2 = TestBackend::new(area.width, area.height);
+        let mut terminal2 = Terminal::new(backend2).unwrap();
+        terminal2
+            .draw(|frame| {
+                render_lyrics(frame, area, &app, None, &theme);
+            })
+            .unwrap();
+        let buffer2 = terminal2.backend().buffer();
+        let text2: String = (0..area.height)
+            .flat_map(|y| (0..area.width).map(move |x| buffer2[(x, y)].symbol()))
+            .collect();
+        assert!(text2.contains("LYRICS RETRIEVAL FAILED"));
+        assert!(text2.contains("Network timeout"));
+    }
+
+    #[test]
+    fn test_render_unsynchronized_lyrics() {
+        let mut app = App::new();
+        app.tracks.push(Track::new("Plain Song", "Artist"));
+        app.playing = Some(0);
+        app.lyrics_state.status = LyricsStatus::Available;
+        app.lyrics_state.lyrics = Some(Lyrics::from_plain_text(
+            Some("Plain Song".to_string()),
+            Some("Artist".to_string()),
+            "First unsynced line\nSecond unsynced line",
+        ));
+
+        let theme = Theme::new(None);
+        let area = Rect::new(0, 0, 120, 30);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                render_lyrics(frame, area, &app, None, &theme);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let text: String = (0..area.height)
+            .flat_map(|y| (0..area.width).map(move |x| buffer[(x, y)].symbol()))
+            .collect();
+
+        assert!(text.contains("First unsynced line"));
+        assert!(text.contains("Second unsynced line"));
+    }
+
+    #[test]
+    fn test_render_line_and_word_synchronized_lyrics() {
+        let mut app = App::new();
+        app.tracks.push(Track::new("Timed Song", "Queen"));
+        app.playing = Some(0);
+        app.lyrics_state.status = LyricsStatus::Available;
+
+        let lyrics = Lyrics {
+            source: Some("lrc.red".to_string()),
+            sync_type: SyncType::Word,
+            title: Some("Timed Song".to_string()),
+            artist: Some("Queen".to_string()),
+            isrc: None,
+            lines: vec![
+                LyricLine::with_words(
+                    "Is this the real life?",
+                    Some(2000),
+                    Some(5000),
+                    vec![
+                        LyricWord::new("Is", Some(2000), Some(2500)),
+                        LyricWord::new("this", Some(2500), Some(3000)),
+                        LyricWord::new("the", Some(3000), Some(3500)),
+                        LyricWord::new("real", Some(3500), Some(4200)),
+                        LyricWord::new("life?", Some(4200), Some(5000)),
+                    ],
+                ),
+                LyricLine::with_words(
+                    "Is this just fantasy?",
+                    Some(6000),
+                    Some(9000),
+                    vec![
+                        LyricWord::new("Is", Some(6000), Some(6500)),
+                        LyricWord::with_syllables(
+                            "fantasy?",
+                            Some(7000),
+                            Some(9000),
+                            vec![
+                                LyricSyllable::new("fan", Some(7000), Some(7600)),
+                                LyricSyllable::new("ta", Some(7600), Some(8200)),
+                                LyricSyllable::new("sy?", Some(8200), Some(9000)),
+                            ],
+                        ),
+                    ],
+                ),
+            ],
+            unavailable_reason: None,
+        };
+        app.lyrics_state.lyrics = Some(lyrics);
+
+        let theme = Theme::new(None);
+        let area = Rect::new(0, 0, 120, 30);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // Position at 3.2s -> active line 0, active word "the"
+        terminal
+            .draw(|frame| {
+                render_lyrics(frame, area, &app, Some((3.2, Some(180.0))), &theme);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let text: String = (0..area.height)
+            .flat_map(|y| (0..area.width).map(move |x| buffer[(x, y)].symbol()))
+            .collect();
+
+        // Must display the active line marker
+        assert!(text.contains("▶"));
+        assert!(text.contains("Is this the real life?"));
+        assert!(text.contains("Is this just fantasy?"));
+        assert!(text.contains("via lrc.red"));
+
+        // At 3.2s: line 0 active, line 1 upcoming (dim gray)
+        // Check that upcoming line 1 has gray cells
+        let has_gray_upcoming = (0..area.height).any(|y| {
+            (0..area.width).any(|x| {
+                let cell = &buffer[(x, y)];
+                cell.symbol() == "f" && cell.fg == Color::Gray
+            })
+        });
+        assert!(has_gray_upcoming, "Upcoming lyrics must be dim gray");
+
+        // Now test later position at 7.5s -> line 0 is past (dimmed/italic), line 1 is active
+        let mut terminal2 = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal2
+            .draw(|frame| {
+                render_lyrics(frame, area, &app, Some((7.5, Some(180.0))), &theme);
+            })
+            .unwrap();
+        let buffer2 = terminal2.backend().buffer();
+
+        // Check that past line 0 has dimmed italic cells
+        let has_dim_italic_past = (0..area.height).any(|y| {
+            (0..area.width).any(|x| {
+                let cell = &buffer2[(x, y)];
+                cell.symbol() == "r"
+                    && cell.fg == Color::DarkGray
+                    && cell.modifier.contains(Modifier::ITALIC)
+            })
+        });
+        assert!(
+            has_dim_italic_past,
+            "Past gone lyrics must be dimmer with italic modifier"
+        );
+    }
+
+    #[test]
+    fn test_render_manual_scroll_badge() {
+        let mut app = App::new();
+        app.tracks.push(Track::new("Song", "Artist"));
+        app.playing = Some(0);
+        app.lyrics_auto_scroll = false;
+        app.lyrics_scroll_offset = 5;
+
+        let theme = Theme::new(None);
+        let area = Rect::new(0, 0, 120, 30);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                render_lyrics(frame, area, &app, None, &theme);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let text: String = (0..area.height)
+            .flat_map(|y| (0..area.width).map(move |x| buffer[(x, y)].symbol()))
+            .collect();
+
+        assert!(text.contains("MANUAL SCROLL"));
+    }
+
+    #[test]
+    fn test_render_long_lines_wrap_with_hanging_indent() {
+        let mut app = App::new();
+        app.tracks.push(Track::new("Song", "Artist"));
+        app.playing = Some(0);
+
+        let long_line_1 = "Bigaadu teri piya ki vastu top 5 ko vipaasna ka VIP pass du like a D.I.D. dance crew, big moves only by my bandhus";
+        let long_line_2 = "Second very long lyric line that definitely wraps onto a second row with hanging indent";
+
+        let lyrics = Lyrics {
+            source: Some("lrc.red".to_string()),
+            sync_type: SyncType::Line,
+            title: Some("Song".to_string()),
+            artist: Some("Artist".to_string()),
+            isrc: None,
+            lines: vec![
+                LyricLine::new(long_line_1, Some(1000), Some(4000)),
+                LyricLine::new(long_line_2, Some(5000), Some(8000)),
+            ],
+            unavailable_reason: None,
+        };
+        app.lyrics_state.lyrics = Some(lyrics);
+
+        let theme = Theme::new(None);
+        // Using narrow area width of 80 so inner width of lyrics panel is around 40-45 chars
+        let area = Rect::new(0, 0, 80, 20);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // Position at 2.0s -> line 0 is active (wrapped), line 1 is upcoming (wrapped)
+        terminal
+            .draw(|frame| {
+                render_lyrics(frame, area, &app, Some((2.0, Some(60.0))), &theme);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let mut rows: Vec<String> = Vec::new();
+        for y in 0..area.height {
+            let row: String = (0..area.width).map(|x| buffer[(x, y)].symbol()).collect();
+            if !row.trim().is_empty() {
+                rows.push(row);
+            }
+        }
+
+        // Active line must have ▶ prefix
+        assert!(rows.iter().any(|r| r.contains("▶")));
+        // Must contain words from both the start and end of the wrapped line
+        assert!(rows.iter().any(|r| r.contains("Bigaadu")));
+        assert!(rows.iter().any(|r| r.contains("bandhus")));
+
+        // Continuation row must be indented with 4 spaces hanging indent
+        let has_hanging_indent = rows.iter().any(|r| r.contains("    "));
+        assert!(
+            has_hanging_indent,
+            "Continuation line must be indented with hanging indent (4 spaces)"
+        );
+    }
+
+    #[test]
+    fn test_render_lyrics_gap_between_lines_does_not_jump_to_top() {
+        let mut app = App::new();
+        app.tracks.push(Track::new("Song", "Artist"));
+        app.playing = Some(0);
+
+        let lines: Vec<LyricLine> = (0..20)
+            .map(|i| {
+                let start = i * 10_000; // 0s, 10s, 20s...
+                let end = start + 5_000; // 5s, 15s, 25s... (5-second song gap between lines)
+                LyricLine::new(format!("Song Line Number {i}"), Some(start), Some(end))
+            })
+            .collect();
+
+        let lyrics = Lyrics {
+            source: Some("lrc.red".to_string()),
+            sync_type: SyncType::Line,
+            title: Some("Song".to_string()),
+            artist: Some("Artist".to_string()),
+            isrc: None,
+            lines,
+            unavailable_reason: None,
+        };
+        app.lyrics_state.lyrics = Some(lyrics);
+
+        let theme = Theme::new(None);
+        let area = Rect::new(0, 0, 100, 12); // Small height (12) so only a few lines fit
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // Position at 103.0s (playing Line 10)
+        terminal
+            .draw(|frame| {
+                render_lyrics(frame, area, &app, Some((103.0, Some(200.0))), &theme);
+            })
+            .unwrap();
+
+        let buffer_active = terminal.backend().buffer().clone();
+        let rows_active: Vec<String> = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buffer_active[(x, y)].symbol())
+                    .collect()
+            })
+            .collect();
+
+        // Line 10 must be active with ▶ and visible
+        assert!(
+            rows_active
+                .iter()
+                .any(|r| r.contains("▶") && r.contains("Song Line Number 10")),
+            "Line 10 must be active and visible"
+        );
+        // Line 0 must NOT be visible since viewport scrolled down
+        assert!(
+            !rows_active.iter().any(|r| r.contains("Song Line Number 0")),
+            "Line 0 must not be visible when scrolled to Line 10"
+        );
+
+        // Position at 107.0s (in the 5-second gap between Line 10 and Line 11)
+        terminal
+            .draw(|frame| {
+                render_lyrics(frame, area, &app, Some((107.0, Some(200.0))), &theme);
+            })
+            .unwrap();
+
+        let buffer_gap = terminal.backend().buffer().clone();
+        let rows_gap: Vec<String> = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buffer_gap[(x, y)].symbol())
+                    .collect()
+            })
+            .collect();
+
+        // During the gap, lyrics must NOT jump to the top!
+        // Line 0 must STILL NOT be visible
+        assert!(
+            !rows_gap.iter().any(|r| r.contains("Song Line Number 0")),
+            "Lyrics must not jump to top (Line 0) during gap between lines"
+        );
+        // Line 10 must remain visible and active
+        assert!(
+            rows_gap
+                .iter()
+                .any(|r| r.contains("▶") && r.contains("Song Line Number 10")),
+            "Line 10 must remain visible and active during gap"
+        );
+    }
+
+    #[test]
+    fn test_render_lyrics_gap_between_words_does_not_color_full_line() {
+        let mut app = App::new();
+        app.tracks.push(Track::new("Song", "Artist"));
+        app.playing = Some(0);
+
+        let lyrics = Lyrics {
+            source: Some("lrc.red".to_string()),
+            sync_type: SyncType::Word,
+            title: Some("Song".to_string()),
+            artist: Some("Artist".to_string()),
+            isrc: None,
+            lines: vec![LyricLine::with_words(
+                "First Second",
+                Some(1000),
+                Some(5000),
+                vec![
+                    LyricWord::new("First", Some(1000), Some(2000)),
+                    LyricWord::new("Second", Some(3000), Some(4000)),
+                ],
+            )],
+            unavailable_reason: None,
+        };
+        app.lyrics_state.lyrics = Some(lyrics);
+
+        let theme = Theme::new(None);
+        let area = Rect::new(0, 0, 80, 10);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // Position at 2.5s (2500ms): in the gap between "First" (ended at 2000ms) and "Second" (starts at 3000ms)
+        terminal
+            .draw(|frame| {
+                render_lyrics(frame, area, &app, Some((2.5, Some(60.0))), &theme);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+
+        // Find cell for "F" in "First" -> should be bold_primary (Cyan)
+        let first_is_colored = (0..area.height).any(|y| {
+            (0..area.width).any(|x| {
+                let cell = &buffer[(x, y)];
+                cell.symbol() == "F" && cell.fg == theme.bold_primary.fg.unwrap()
+            })
+        });
+        assert!(
+            first_is_colored,
+            "Finished word 'First' must remain colored in bold_primary"
+        );
+
+        // Find cell for "S" in "Second" -> must NOT be bold_primary, must be Gray (upcoming)
+        let second_is_upcoming_gray = (0..area.height).any(|y| {
+            (0..area.width).any(|x| {
+                let cell = &buffer[(x, y)];
+                cell.symbol() == "S" && cell.fg == Color::Gray
+            })
+        });
+        assert!(
+            second_is_upcoming_gray,
+            "Upcoming word 'Second' during word gap must remain dim Gray, NOT colored full line"
+        );
+    }
+
+    #[test]
+    fn test_render_lyrics_gap_between_syllables_does_not_color_full_word() {
+        let mut app = App::new();
+        app.tracks.push(Track::new("Song", "Artist"));
+        app.playing = Some(0);
+
+        let lyrics = Lyrics {
+            source: Some("lrc.red".to_string()),
+            sync_type: SyncType::Syllable,
+            title: Some("Song".to_string()),
+            artist: Some("Artist".to_string()),
+            isrc: None,
+            lines: vec![LyricLine::with_words(
+                "fantasy",
+                Some(1000),
+                Some(5000),
+                vec![LyricWord::with_syllables(
+                    "fantasy",
+                    Some(1000),
+                    Some(4000),
+                    vec![
+                        LyricSyllable::new("fan", Some(1000), Some(2000)),
+                        LyricSyllable::new("ta", Some(2500), Some(3000)),
+                        LyricSyllable::new("sy", Some(3200), Some(4000)),
+                    ],
+                )],
+            )],
+            unavailable_reason: None,
+        };
+        app.lyrics_state.lyrics = Some(lyrics);
+
+        let theme = Theme::new(None);
+        let area = Rect::new(0, 0, 80, 10);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // Position at 2.2s (2200ms): in the gap between "fan" (ended at 2000ms) and "ta" (starts at 2500ms)
+        terminal
+            .draw(|frame| {
+                render_lyrics(frame, area, &app, Some((2.2, Some(60.0))), &theme);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+
+        // "f" in "fan" must be bold_primary
+        let fan_is_colored = (0..area.height).any(|y| {
+            (0..area.width).any(|x| {
+                let cell = &buffer[(x, y)];
+                cell.symbol() == "f" && cell.fg == theme.bold_primary.fg.unwrap()
+            })
+        });
+        assert!(
+            fan_is_colored,
+            "Finished syllable 'fan' must remain colored"
+        );
+
+        // "t" in "ta" must be Gray (upcoming)
+        let ta_is_gray = (0..area.height).any(|y| {
+            (0..area.width).any(|x| {
+                let cell = &buffer[(x, y)];
+                cell.symbol() == "t" && cell.fg == Color::Gray
+            })
+        });
+        assert!(
+            ta_is_gray,
+            "Upcoming syllable 'ta' during gap must remain dim Gray, NOT colored"
+        );
+    }
+
+    #[test]
+    fn test_render_dual_active_lead_and_background_lines() {
+        let mut app = App::new();
+        app.tracks.push(Track::new("Bohemian Rhapsody", "Queen"));
+        app.playing = Some(0);
+
+        let lyrics = Lyrics {
+            source: Some("lrc.red".to_string()),
+            sync_type: SyncType::Line,
+            title: Some("Bohemian Rhapsody".to_string()),
+            artist: Some("Queen".to_string()),
+            isrc: None,
+            lines: vec![
+                LyricLine::new("Mama, just killed a man", Some(10000), Some(14000)),
+                LyricLine::new("(Galileo)", Some(12000), Some(15000)),
+                LyricLine::new("Put a gun against his head", Some(16000), Some(20000)),
+            ],
+            unavailable_reason: None,
+        };
+        app.lyrics_state.lyrics = Some(lyrics);
+
+        let theme = Theme::new(None);
+        let area = Rect::new(0, 0, 80, 10);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // At 13.0s (13000ms): both Line 0 (10000..14000) and Line 1 (12000..15000) are concurrently active
+        terminal
+            .draw(|frame| {
+                render_lyrics(frame, area, &app, Some((13.0, Some(200.0))), &theme);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer().clone();
+        let rows: Vec<String> = (0..area.height)
+            .map(|y| (0..area.width).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect();
+
+        // Lead vocal must have '▶' prefix
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("▶") && r.contains("Mama, just killed a man")),
+            "Lead active line must be displayed with '▶'"
+        );
+        // Background vocal must have '▷' prefix
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("▷") && r.contains("(Galileo)")),
+            "Background active line must be displayed with '▷'"
+        );
+    }
+
+    #[test]
+    fn test_render_duet_second_singer_right_aligned() {
+        let mut app = App::new();
+        app.tracks
+            .push(Track::new("A Whole New World", "Aladdin & Jasmine"));
+        app.playing = Some(0);
+
+        let lyrics = Lyrics {
+            source: Some("lrc.red".to_string()),
+            sync_type: SyncType::Line,
+            title: Some("A Whole New World".to_string()),
+            artist: Some("Aladdin & Jasmine".to_string()),
+            isrc: None,
+            lines: vec![
+                LyricLine::new("I can show you the world", Some(10000), Some(14000)).with_singer(0),
+                LyricLine::new("Shining, shimmering, splendid", Some(12000), Some(15000))
+                    .with_singer(1),
+            ],
+            unavailable_reason: None,
+        };
+        app.lyrics_state.lyrics = Some(lyrics);
+
+        let theme = Theme::new(None);
+        let area = Rect::new(0, 0, 80, 10);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // At 13.0s: both lines active
+        terminal
+            .draw(|frame| {
+                render_lyrics(frame, area, &app, Some((13.0, Some(200.0))), &theme);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer().clone();
+        let rows: Vec<String> = (0..area.height)
+            .map(|y| (0..area.width).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect();
+
+        // Singer 0 (left-aligned) has '▶' prefix
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("▶") && r.contains("I can show you the world")),
+            "Singer 0 line must be left-aligned with '▶' prefix"
+        );
+
+        // Singer 1 (right-aligned) has '◀' suffix
+        assert!(
+            rows.iter()
+                .any(|r| { r.contains("Shining, shimmering, splendid") && r.contains("◀") }),
+            "Singer 1 line must be right-aligned with '◀' suffix"
+        );
+    }
+
+    #[test]
+    fn test_calculate_lyrics_scroll_policy() {
+        // Auto scroll with active row centers at 1/3 viewport
+        assert_eq!(calculate_lyrics_scroll(true, 5, Some(10), 30, 50), 0);
+        assert_eq!(calculate_lyrics_scroll(true, 5, Some(20), 30, 50), 10);
+        // Auto scroll with no active row sits at top (0)
+        assert_eq!(calculate_lyrics_scroll(true, 5, None, 30, 50), 0);
+
+        // Manual scroll uses manual_offset clamped to max_scroll
+        assert_eq!(calculate_lyrics_scroll(false, 15, Some(20), 30, 50), 15);
+        assert_eq!(calculate_lyrics_scroll(false, 999, Some(20), 30, 50), 50);
+    }
+
+    #[test]
+    fn test_resolve_sync_point_rejects_stale_generation() {
+        let mut app = App::new();
+        let track_a = Track::new("Song A", "Artist");
+        app.tracks.push(track_a.clone());
+        app.playing = Some(0);
+        app.playback_generation = 2;
+
+        let lyrics = Lyrics {
+            source: Some("test".into()),
+            sync_type: SyncType::Line,
+            title: Some("Song A".into()),
+            artist: Some("Artist".into()),
+            isrc: None,
+            lines: vec![LyricLine::new("Line 1", Some(1000), Some(4000))],
+            unavailable_reason: None,
+        };
+
+        // Populate synchronizer with stale generation (gen 1 from a previous track)
+        app.lyrics_synchronizer
+            .sync_position(1, 2.0, Some(10.0), &lyrics);
+        assert_eq!(app.lyrics_synchronizer.current_sync_point().generation, 1);
+        assert!(
+            app.lyrics_synchronizer
+                .current_sync_point()
+                .has_active_line()
+        );
+
+        // resolve_sync_point with playback at 0.5s on generation 2 must NOT return the stale gen 1 point
+        let pt = resolve_sync_point(&app, &lyrics, Some((0.5, Some(10.0))));
+        assert_eq!(pt.generation, 2);
+        assert_eq!(pt.position_ms, 500);
+        assert_eq!(pt.active_line_index, None); // Before line 1 start (1000ms)
+    }
+}

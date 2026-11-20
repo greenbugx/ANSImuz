@@ -113,7 +113,7 @@ impl AudioPlayer {
     }
 
     pub fn prefetch_later(&self, url: &str, delay_secs: u64) {
-        if url.trim().is_empty() || Self::cached_audio(url).is_some() {
+        if self.is_mock || url.trim().is_empty() || Self::cached_audio(url).is_some() {
             return;
         }
 
@@ -226,11 +226,18 @@ impl AudioPlayer {
         cmd.arg("--no-video")
             .arg("--idle=no")
             .arg("--force-window=no")
-            .arg(format!("--input-ipc-server={}", self.endpoint.as_str()))
-            .arg(format!(
+            .arg(format!("--input-ipc-server={}", self.endpoint.as_str()));
+
+        let is_direct_or_local = !url.contains("youtube.com") && !url.contains("youtu.be");
+        if is_direct_or_local {
+            cmd.arg("--ytdl=no");
+        } else {
+            cmd.arg(format!(
                 "--ytdl-raw-options-append=extractor-args=youtube:player_client={YTDL_PLAYER_CLIENTS}"
-            ))
-            .arg(url)
+            ));
+        }
+
+        cmd.arg(url)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
@@ -779,9 +786,7 @@ pub fn start_dump_cancellable(
         .arg("--no-video")
         .arg("--no-audio")
         .arg("--really-quiet")
-        .arg(format!(
-            "--ytdl-raw-options-append=extractor-args=youtube:player_client={YTDL_PLAYER_CLIENTS}"
-        ))
+        .arg("--ytdl=no")
         .arg(format!("--stream-dump={}", part.display()))
         .arg(&media)
         .stdin(Stdio::null())
@@ -918,7 +923,7 @@ pub fn start_dump_cancellable(
     PrefetchResult::Cached(final_path)
 }
 
-fn resolve_stream(url: &str) -> Result<String, String> {
+pub fn resolve_stream(url: &str) -> Result<String, String> {
     // Try with comprehensive player client fallback chain
     match resolve_stream_with_client(url, Some(YTDL_PLAYER_CLIENTS)) {
         Ok(media) if !media.is_empty() => Ok(media),

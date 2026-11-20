@@ -170,6 +170,7 @@ fn run_worker_loop(
     connected_flag.store(connected, Ordering::Relaxed);
     let mut current_playback: Option<PlaybackInfo> = None;
     let mut current_generation: u64 = 0;
+    let mut last_sync: Option<(Instant, Duration)> = None;
 
     // Dedicated artwork worker keeping network operations off the playback path
     let mut artwork_worker = if config.artwork_enabled {
@@ -230,16 +231,6 @@ fn run_worker_loop(
                         playback.title, playback.artist
                     ));
 
-                    // Publish initial activity immediately using default fallback asset ("logo")
-                    apply_playback(
-                        &mut client,
-                        &mut connected,
-                        &connected_flag,
-                        &mut next_reconnect_at,
-                        &mut current_backoff,
-                        &playback,
-                    );
-
                     // Request artwork resolution in parallel without blocking if enabled
                     if config.artwork_enabled
                         && let Some(req) = artwork
@@ -247,6 +238,36 @@ fn run_worker_loop(
                         && let Some(ref aw) = artwork_worker
                     {
                         aw.resolve(generation, req);
+                    }
+
+                    // Only publish activity immediately if playback position is already established
+                    // (e.g. playback was already running or restored at a specific position).
+                    // If position is None, the track is loading/buffering in MPV (yt-dlp client negotiation),
+                    // so we defer publishing until the first position update arrives when audio actually starts playing.
+                    if playback.position.is_some() {
+                        apply_playback(
+                            &mut client,
+                            &mut connected,
+                            &connected_flag,
+                            &mut next_reconnect_at,
+                            &mut current_backoff,
+                            &playback,
+                        );
+                        last_sync = Some((Instant::now(), playback.position.unwrap_or_default()));
+                    } else if current_playback.is_some() && connected {
+                        // Clear previous track's activity from Discord while the new track is buffering
+                        if client.clear_activity().is_err() {
+                            mark_disconnected(
+                                &mut client,
+                                &mut connected,
+                                &connected_flag,
+                                &mut next_reconnect_at,
+                                &mut current_backoff,
+                            );
+                        }
+                        last_sync = None;
+                    } else {
+                        last_sync = None;
                     }
 
                     current_playback = Some(*playback);
@@ -267,16 +288,22 @@ fn run_worker_loop(
                                 art_res.hosted_url
                             ));
                             if let Some(info) = &mut current_playback {
-                                // Update the activity's large_image with the hosted URL and re-publish
+                                // Update the activity's large_image with the hosted URL
                                 info.large_image = Some(art_res.hosted_url);
-                                apply_playback(
-                                    &mut client,
-                                    &mut connected,
-                                    &connected_flag,
-                                    &mut next_reconnect_at,
-                                    &mut current_backoff,
-                                    info,
-                                );
+                                // Only publish if track is already playing (has position).
+                                // If still buffering/loading, it will be published when the first position event arrives.
+                                if info.position.is_some() {
+                                    apply_playback(
+                                        &mut client,
+                                        &mut connected,
+                                        &connected_flag,
+                                        &mut next_reconnect_at,
+                                        &mut current_backoff,
+                                        info,
+                                    );
+                                    last_sync =
+                                        Some((Instant::now(), info.position.unwrap_or_default()));
+                                }
                             }
                         }
                         Err(e) => {
@@ -297,6 +324,7 @@ fn run_worker_loop(
                         &mut next_reconnect_at,
                         &mut current_backoff,
                         &mut current_playback,
+                        &mut last_sync,
                         pos,
                         maybe_dur,
                     );
@@ -306,6 +334,7 @@ fn run_worker_loop(
                         && !info.is_paused
                     {
                         info.is_paused = true;
+                        last_sync = None;
                         apply_playback(
                             &mut client,
                             &mut connected,
@@ -330,11 +359,13 @@ fn run_worker_loop(
                             &mut current_backoff,
                             info,
                         );
+                        last_sync = Some((Instant::now(), info.position.unwrap_or(pos)));
                     }
                 }
                 DiscordCommand::Clear => {
                     current_generation += 1;
                     current_playback = None;
+                    last_sync = None;
                     if connected && client.clear_activity().is_err() {
                         mark_disconnected(
                             &mut client,
@@ -392,12 +423,13 @@ fn handle_position_changed(
     next_reconnect_at: &mut Option<Instant>,
     current_backoff: &mut Duration,
     current_playback: &mut Option<PlaybackInfo>,
+    last_sync: &mut Option<(Instant, Duration)>,
     pos: Duration,
     maybe_dur: Option<Duration>,
 ) {
     let mut reconnected = false;
     if let Some(info) = current_playback {
-        let old_pos = info.position.unwrap_or(Duration::ZERO);
+        let was_unstarted = info.position.is_none();
         info.position = Some(pos);
         let duration_updated = if info.duration.is_none() && maybe_dur.is_some() {
             info.duration = maybe_dur;
@@ -421,12 +453,26 @@ fn handle_position_changed(
                 Some(info),
             );
             reconnected = *connected;
+            if reconnected {
+                *last_sync = Some((Instant::now(), pos));
+            }
         }
 
-        // Discord automatically client-side interpolates start/end timestamps.
-        // Refresh activity if duration was newly discovered or if a seek caused a jump > 2s
-        let seeked = pos.abs_diff(old_pos) > Duration::from_secs(2);
-        if (duration_updated || seeked) && !info.is_paused && !reconnected {
+        // Check whether Discord presence needs to be updated or resynced:
+        // 1) First position event after track changed (playback has actually begun!)
+        // 2) Duration was newly discovered from player
+        // 3) Significant drift between Discord's client-side interpolated position and actual audio (> 2s)
+        let needs_sync = if was_unstarted || duration_updated {
+            true
+        } else if let Some((last_instant, last_pos)) = *last_sync {
+            let elapsed_real = last_instant.elapsed();
+            let expected_discord_pos = last_pos + elapsed_real;
+            pos.abs_diff(expected_discord_pos) > Duration::from_secs(2)
+        } else {
+            true
+        };
+
+        if needs_sync && !info.is_paused && !reconnected {
             apply_playback(
                 client,
                 connected,
@@ -435,6 +481,7 @@ fn handle_position_changed(
                 current_backoff,
                 info,
             );
+            *last_sync = Some((Instant::now(), pos));
         }
     } else if !*connected
         && let Some(next_at) = *next_reconnect_at
@@ -733,6 +780,7 @@ mod tests {
         // Case 1: Reconnect deadline has NOT yet arrived (in future)
         let mut next_at = Some(Instant::now() + Duration::from_secs(30));
         let mut backoff = Duration::from_secs(10);
+        let mut last_sync = Some((Instant::now(), Duration::from_secs(10)));
         handle_position_changed(
             &mut client,
             &mut connected,
@@ -740,6 +788,7 @@ mod tests {
             &mut next_at,
             &mut backoff,
             &mut current_playback,
+            &mut last_sync,
             Duration::from_secs(11),
             Some(Duration::from_secs(200)),
         );
@@ -760,6 +809,7 @@ mod tests {
             &mut next_at_past,
             &mut backoff,
             &mut current_playback,
+            &mut last_sync,
             Duration::from_secs(12),
             Some(Duration::from_secs(200)),
         );
@@ -772,5 +822,39 @@ mod tests {
             current_playback.as_ref().unwrap().position,
             Some(Duration::from_secs(12))
         );
+    }
+
+    #[test]
+    fn test_track_changed_defers_activity_until_first_position_and_syncs_drift() {
+        let mut client = DiscordClient::new("dummy");
+        let mut connected = false;
+        let flag = Arc::new(AtomicBool::new(false));
+        let mut next_at = None;
+        let mut backoff = Duration::from_secs(10);
+        // When track begins loading in player, position is None
+        let track = PlaybackInfo::new("Song", "Artist").with_duration(Duration::from_secs(200));
+        assert!(track.position.is_none());
+        let mut current_playback = Some(track);
+        let mut last_sync = None;
+
+        // Position event arrives when player actually starts (e.g. at 0.05s)
+        handle_position_changed(
+            &mut client,
+            &mut connected,
+            &flag,
+            &mut next_at,
+            &mut backoff,
+            &mut current_playback,
+            &mut last_sync,
+            Duration::from_millis(50),
+            Some(Duration::from_secs(200)),
+        );
+
+        // Player position must be updated and last_sync established
+        assert_eq!(
+            current_playback.as_ref().unwrap().position,
+            Some(Duration::from_millis(50))
+        );
+        assert!(last_sync.is_some());
     }
 }

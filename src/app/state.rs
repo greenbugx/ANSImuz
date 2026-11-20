@@ -5,7 +5,7 @@ use std::{
 pub const MAX_HISTORY_SIZE: usize = 100;
 
 use crate::config::Settings;
-use crate::music::{PlaybackSource, Track};
+use crate::music::{PlaybackSource, PrefetchResolveResponse, Track};
 use crate::playback::Repeat;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,6 +106,13 @@ pub struct QueueEntry {
     pub track: Track,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrefetchSlot {
+    pub entry_id: u64,
+    pub track: Track,
+    pub direct_stream_url: Option<String>,
+}
+
 pub struct App {
     pub mode: Mode,
     pub list_focus: ListFocus,
@@ -124,6 +131,7 @@ pub struct App {
     pub settings: Settings,
     pub settings_open: bool,
     pub settings_cursor: usize,
+    pub lyrics_open: bool,
     pub should_quit: bool,
     pub quit_dialog_open: bool,
     pub quit_dialog_choice: QuitChoice,
@@ -132,6 +140,7 @@ pub struct App {
     pub command_palette_query: String,
     pub command_palette_cursor: usize,
     pub resolve_generation: u64,
+    pub playback_generation: u64,
     pub search_generation: u64,
     pub queue: Vec<QueueEntry>,
     pub queue_selected: usize,
@@ -141,6 +150,15 @@ pub struct App {
     pub playback_state: PlaybackState,
     pub current_position: Option<Duration>,
     pub discord_worker: Option<crate::discord::DiscordWorker>,
+    pub lyrics_state: crate::lyrics::LyricsState,
+    pub lyrics_synchronizer: crate::lyrics::LyricsSynchronizer,
+    pub lyrics_scroll_offset: usize,
+    pub lyrics_auto_scroll: bool,
+    pub lyrics_worker: Option<crate::lyrics::LyricsWorker>,
+    pub prefetch_slot: Option<PrefetchSlot>,
+    pub prefetch_generation: u64,
+    pub prefetch_in_flight: Option<u64>,
+    pub prefetch_tx: Option<std::sync::mpsc::Sender<PrefetchResolveResponse>>,
 }
 
 impl App {
@@ -167,6 +185,7 @@ impl App {
             settings: Settings::load(),
             settings_open: false,
             settings_cursor: 0,
+            lyrics_open: false,
             quit_dialog_open: false,
             quit_dialog_choice: QuitChoice::Yes,
             should_quit: false,
@@ -175,6 +194,7 @@ impl App {
             command_palette_query: String::new(),
             command_palette_cursor: 0,
             resolve_generation: 0,
+            playback_generation: 0,
             search_generation: 0,
             queue: Vec::new(),
             queue_selected: 0,
@@ -184,6 +204,15 @@ impl App {
             playback_state: PlaybackState::Stopped,
             current_position: None,
             discord_worker: None,
+            lyrics_state: crate::lyrics::LyricsState::new(),
+            lyrics_synchronizer: crate::lyrics::LyricsSynchronizer::new(),
+            lyrics_scroll_offset: 0,
+            lyrics_auto_scroll: true,
+            lyrics_worker: None,
+            prefetch_slot: None,
+            prefetch_generation: 0,
+            prefetch_in_flight: None,
+            prefetch_tx: None,
         }
     }
 
@@ -366,12 +395,94 @@ impl App {
         }
     }
 
+    pub fn toggle_lyrics(&mut self) {
+        self.lyrics_open = !self.lyrics_open;
+        if self.lyrics_open {
+            self.settings_open = false;
+            self.command_palette_open = false;
+            self.about_open = false;
+            if self.lyrics_state.status.is_idle()
+                && let Some(track) = self.current_track().cloned()
+                && let Some(worker) = &self.lyrics_worker
+            {
+                worker.fetch(track);
+            }
+        }
+    }
+
+    pub fn open_lyrics(&mut self) {
+        self.lyrics_open = true;
+        self.settings_open = false;
+        self.command_palette_open = false;
+        self.about_open = false;
+        if self.lyrics_state.status.is_idle()
+            && let Some(track) = self.current_track().cloned()
+            && let Some(worker) = &self.lyrics_worker
+        {
+            worker.fetch(track);
+        }
+    }
+
+    pub fn close_lyrics(&mut self) {
+        self.lyrics_open = false;
+    }
+
+    pub fn scroll_lyrics_up(&mut self) {
+        self.lyrics_auto_scroll = false;
+        self.lyrics_scroll_offset = self.lyrics_scroll_offset.saturating_sub(1);
+    }
+
+    pub fn scroll_lyrics_down(&mut self) {
+        self.lyrics_auto_scroll = false;
+        self.lyrics_scroll_offset = self.lyrics_scroll_offset.saturating_add(1);
+    }
+
+    pub fn scroll_lyrics_page_up(&mut self) {
+        self.lyrics_auto_scroll = false;
+        self.lyrics_scroll_offset = self.lyrics_scroll_offset.saturating_sub(10);
+    }
+
+    pub fn scroll_lyrics_page_down(&mut self) {
+        self.lyrics_auto_scroll = false;
+        self.lyrics_scroll_offset = self.lyrics_scroll_offset.saturating_add(10);
+    }
+
+    pub fn resume_lyrics_auto_scroll(&mut self) {
+        self.lyrics_auto_scroll = true;
+    }
+
+    pub fn handle_lyrics_event(&mut self, event: crate::lyrics::LyricsEvent) {
+        // Discard responses that do not match the current playback track
+        if let Some(event_track) = event.track() {
+            if let Some(current_track) = self.current_track() {
+                if !current_track.same_identity(event_track) {
+                    return;
+                }
+            } else {
+                return;
+            }
+        }
+
+        if let crate::lyrics::LyricsEvent::Success { ref lyrics, .. } = event
+            && let Some(pos) = self.current_position
+        {
+            self.lyrics_synchronizer.sync_position(
+                self.playback_generation,
+                pos.as_secs_f64(),
+                None,
+                lyrics,
+            );
+        }
+        self.lyrics_state.apply_event(event);
+    }
+
     pub fn open_quit_dialog(&mut self) {
         self.quit_dialog_open = true;
         self.quit_dialog_choice = QuitChoice::Yes;
         self.command_palette_open = false;
         self.about_open = false;
         self.settings_open = false;
+        self.lyrics_open = false;
     }
 
     pub fn close_quit_dialog(&mut self) {
@@ -513,6 +624,11 @@ impl App {
             self.queue_selected = 0;
         }
 
+        self.invalidate_prefetch();
+        if self.is_playing() {
+            self.maybe_prefetch_next();
+        }
+
         id
     }
 
@@ -526,6 +642,10 @@ impl App {
             self.queue.swap(i, j);
         }
         self.queue_selected = 0;
+        self.invalidate_prefetch();
+        if self.is_playing() {
+            self.maybe_prefetch_next();
+        }
     }
 
     pub fn enqueue(&mut self, track: Track) -> Option<u64> {
@@ -535,6 +655,9 @@ impl App {
         let id = self.next_queue_id;
         self.next_queue_id = self.next_queue_id.wrapping_add(1);
         self.queue.push(QueueEntry { id, track });
+        if self.queue.len() == 1 && self.is_playing() {
+            self.maybe_prefetch_next();
+        }
         Some(id)
     }
 
@@ -556,6 +679,16 @@ impl App {
         if self.is_resolving() && self.pending_queue_entry_id == Some(entry.id) {
             self.cancel_pending_resolution();
             self.set_status("RESOLVE CANCELLED");
+        }
+
+        if index == 0
+            || self
+                .prefetch_slot
+                .as_ref()
+                .is_some_and(|s| s.entry_id == entry.id)
+            || self.prefetch_in_flight == Some(entry.id)
+        {
+            self.invalidate_prefetch();
         }
 
         Some(entry)
@@ -580,6 +713,13 @@ impl App {
             self.queue_selected = self.queue_selected.saturating_add(1);
         }
 
+        if from == 0 || to == 0 {
+            self.invalidate_prefetch();
+            if self.is_playing() {
+                self.maybe_prefetch_next();
+            }
+        }
+
         true
     }
 
@@ -594,6 +734,99 @@ impl App {
     pub fn clear_queue(&mut self) {
         self.queue.clear();
         self.queue_selected = 0;
+        self.invalidate_prefetch();
+    }
+
+    pub fn consume_prefetch(&mut self, entry_id: u64) -> Option<PrefetchSlot> {
+        if self
+            .prefetch_slot
+            .as_ref()
+            .is_some_and(|s| s.entry_id == entry_id)
+        {
+            self.prefetch_slot.take()
+        } else {
+            None
+        }
+    }
+
+    pub fn invalidate_prefetch(&mut self) {
+        self.prefetch_generation = self.prefetch_generation.wrapping_add(1);
+        self.prefetch_slot = None;
+        self.prefetch_in_flight = None;
+    }
+
+    pub fn maybe_prefetch_next(&mut self) {
+        if self.prefetch_slot.is_some() {
+            return;
+        }
+        let Some(prefetch_tx) = &self.prefetch_tx else {
+            return;
+        };
+        let Some(next) = self.queue.first() else {
+            return;
+        };
+        if self.prefetch_in_flight == Some(next.id) {
+            return;
+        }
+
+        let entry_id = next.id;
+        self.prefetch_in_flight = Some(entry_id);
+        let track = next.track.clone();
+        let generation = self.prefetch_generation;
+        let tx = prefetch_tx.clone();
+
+        std::thread::spawn(move || {
+            let resolved_track = if !track.has_stream_url() {
+                match crate::music::resolve_playable(&track) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        let _ = tx.send(PrefetchResolveResponse {
+                            prefetch_generation: generation,
+                            entry_id,
+                            result: Err(e),
+                        });
+                        return;
+                    }
+                }
+            } else {
+                track
+            };
+
+            let Some(watch_url) = resolved_track.stream_url.clone() else {
+                let _ = tx.send(PrefetchResolveResponse {
+                    prefetch_generation: generation,
+                    entry_id,
+                    result: Err("No stream URL available".into()),
+                });
+                return;
+            };
+
+            if crate::playback::AudioPlayer::cached_audio(&watch_url).is_some() {
+                let _ = tx.send(PrefetchResolveResponse {
+                    prefetch_generation: generation,
+                    entry_id,
+                    result: Ok((resolved_track, None)),
+                });
+                return;
+            }
+
+            match crate::playback::resolve_stream(&watch_url) {
+                Ok(direct_url) => {
+                    let _ = tx.send(PrefetchResolveResponse {
+                        prefetch_generation: generation,
+                        entry_id,
+                        result: Ok((resolved_track, Some(direct_url))),
+                    });
+                }
+                Err(_) => {
+                    let _ = tx.send(PrefetchResolveResponse {
+                        prefetch_generation: generation,
+                        entry_id,
+                        result: Ok((resolved_track, None)),
+                    });
+                }
+            }
+        });
     }
 }
 
@@ -944,5 +1177,197 @@ mod tests {
         // Calling again does not duplicate history entry
         app.finish_active_track_while_resolving();
         assert_eq!(app.history.len(), 1);
+    }
+
+    #[test]
+    fn test_prefetch_slot_consumed_on_advance() {
+        let mut app = App::new();
+        let track = sample_track("Track Next");
+        let id = app.enqueue(track.clone()).unwrap();
+
+        let mut resolved = track.clone();
+        resolved.stream_url = Some("https://stream/track-next".into());
+        app.prefetch_slot = Some(PrefetchSlot {
+            entry_id: id,
+            track: resolved.clone(),
+            direct_stream_url: Some("https://direct/track-next".into()),
+        });
+
+        let consumed = app.consume_prefetch(id);
+        assert_eq!(
+            consumed,
+            Some(PrefetchSlot {
+                entry_id: id,
+                track: resolved,
+                direct_stream_url: Some("https://direct/track-next".into()),
+            })
+        );
+        assert!(app.prefetch_slot.is_none());
+
+        // Consuming again returns None
+        assert_eq!(app.consume_prefetch(id), None);
+    }
+
+    #[test]
+    fn test_prefetch_slot_ignored_if_entry_id_mismatch() {
+        let mut app = App::new();
+        let track = sample_track("Track Next");
+        let id = app.enqueue(track.clone()).unwrap();
+
+        let mut resolved = track;
+        resolved.stream_url = Some("https://stream/track-next".into());
+        app.prefetch_slot = Some(PrefetchSlot {
+            entry_id: id,
+            track: resolved,
+            direct_stream_url: None,
+        });
+
+        // Requesting prefetch for wrong entry_id
+        assert_eq!(app.consume_prefetch(id + 999), None);
+        // Slot is preserved
+        assert!(app.prefetch_slot.is_some());
+    }
+
+    #[test]
+    fn test_prefetch_invalidated_on_remove() {
+        let mut app = App::new();
+        let id0 = app.enqueue(sample_track("Track 0")).unwrap();
+        let _id1 = app.enqueue(sample_track("Track 1")).unwrap();
+
+        app.prefetch_slot = Some(PrefetchSlot {
+            entry_id: id0,
+            track: sample_track("Resolved Track 0"),
+            direct_stream_url: None,
+        });
+        app.prefetch_in_flight = Some(id0);
+        let generation = app.prefetch_generation;
+
+        // Removing item at index 0 invalidates prefetch
+        app.remove_queue_item(0);
+        assert!(app.prefetch_slot.is_none());
+        assert!(app.prefetch_in_flight.is_none());
+        assert_eq!(app.prefetch_generation, generation + 1);
+    }
+
+    #[test]
+    fn test_prefetch_invalidated_on_push_front() {
+        let mut app = App::new();
+        let id0 = app.enqueue(sample_track("Track 0")).unwrap();
+
+        app.prefetch_slot = Some(PrefetchSlot {
+            entry_id: id0,
+            track: sample_track("Resolved Track 0"),
+            direct_stream_url: None,
+        });
+        let generation = app.prefetch_generation;
+
+        app.push_front_queue(sample_track("New Front"));
+        assert!(app.prefetch_slot.is_none());
+        assert_eq!(app.prefetch_generation, generation + 1);
+    }
+
+    #[test]
+    fn test_prefetch_invalidated_on_move() {
+        let mut app = App::new();
+        let id0 = app.enqueue(sample_track("Track 0")).unwrap();
+        let _id1 = app.enqueue(sample_track("Track 1")).unwrap();
+
+        app.prefetch_slot = Some(PrefetchSlot {
+            entry_id: id0,
+            track: sample_track("Resolved Track 0"),
+            direct_stream_url: None,
+        });
+        let generation = app.prefetch_generation;
+
+        // Moving index 0 to 1 invalidates
+        app.move_queue_item(0, 1);
+        assert!(app.prefetch_slot.is_none());
+        assert_eq!(app.prefetch_generation, generation + 1);
+    }
+
+    #[test]
+    fn test_prefetch_invalidated_on_clear_and_shuffle() {
+        let mut app = App::new();
+        let id0 = app.enqueue(sample_track("Track 0")).unwrap();
+        let _id1 = app.enqueue(sample_track("Track 1")).unwrap();
+
+        app.prefetch_slot = Some(PrefetchSlot {
+            entry_id: id0,
+            track: sample_track("Resolved Track 0"),
+            direct_stream_url: None,
+        });
+        let generation = app.prefetch_generation;
+
+        app.shuffle_queue();
+        assert!(app.prefetch_slot.is_none());
+        assert_eq!(app.prefetch_generation, generation + 1);
+
+        app.prefetch_slot = Some(PrefetchSlot {
+            entry_id: id0,
+            track: sample_track("Resolved Track 0"),
+            direct_stream_url: None,
+        });
+        let generation2 = app.prefetch_generation;
+
+        app.clear_queue();
+        assert!(app.prefetch_slot.is_none());
+        assert_eq!(app.prefetch_generation, generation2 + 1);
+    }
+
+    #[test]
+    fn test_handle_lyrics_event_rejects_mismatched_track_and_uses_playback_generation() {
+        let mut app = App::new();
+        let track_a = sample_track("Song A");
+        let track_b = sample_track("Song B");
+
+        app.set_playing(track_a.clone());
+        app.playback_generation = 42;
+        app.resolve_generation = 999;
+        app.current_position = Some(Duration::from_secs(5));
+
+        // Event for Track B should be rejected
+        let lyrics_b = Box::new(crate::lyrics::Lyrics::from_plain_text(
+            Some("Song B".into()),
+            Some("Artist".into()),
+            "Words for Song B",
+        ));
+        app.handle_lyrics_event(crate::lyrics::LyricsEvent::Success {
+            generation: 1,
+            track: track_b,
+            lyrics: lyrics_b,
+        });
+
+        assert_eq!(app.lyrics_state.status, crate::lyrics::LyricsStatus::Idle);
+        assert!(app.lyrics_state.lyrics.is_none());
+
+        // Event for Track A should be accepted and synced using playback_generation (42), not resolve_generation (999)
+        let lyrics_a = Box::new(crate::lyrics::Lyrics {
+            source: Some("test".into()),
+            sync_type: crate::lyrics::SyncType::Line,
+            title: Some("Song A".into()),
+            artist: Some("Artist".into()),
+            isrc: None,
+            lines: vec![crate::lyrics::LyricLine::new(
+                "Line",
+                Some(4000),
+                Some(8000),
+            )],
+            unavailable_reason: None,
+        });
+        app.handle_lyrics_event(crate::lyrics::LyricsEvent::Success {
+            generation: 1,
+            track: track_a,
+            lyrics: lyrics_a,
+        });
+
+        assert_eq!(
+            app.lyrics_state.status,
+            crate::lyrics::LyricsStatus::Available
+        );
+        assert!(app.lyrics_state.lyrics.is_some());
+        let sync_point = app.lyrics_synchronizer.current_sync_point();
+        assert_eq!(sync_point.generation, 42);
+        assert_eq!(sync_point.position_ms, 5000);
+        assert_eq!(sync_point.active_line_index, Some(0));
     }
 }
