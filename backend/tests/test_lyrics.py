@@ -2427,6 +2427,58 @@ class TestParserEdgeCases(unittest.TestCase):
         self.assertIsNotNone(plf)
         self.assertIsNotNone(plp)
 
+    def test_build_lyrics_response_builder(self):
+        from providers.lyrics.base import build_lyrics_response
+
+        lines = [
+            {"start_ms": 1000, "end_ms": 3000, "text": "Line one"},
+            {"start_ms": 3000, "end_ms": 5000, "text": "Line two"},
+        ]
+        resp = build_lyrics_response(
+            source="TestProvider",
+            sync_type="line",
+            lines=lines,
+            title="Song",
+            artist="Artist",
+            album="Album",
+            isrc="US123",
+            duration_seconds=240.0,
+            custom_extra=123,
+        )
+        self.assertEqual(resp["source"], "TestProvider")
+        self.assertEqual(resp["sync_type"], "line")
+        self.assertEqual(resp["title"], "Song")
+        self.assertEqual(resp["plain_lyrics"], "Line one\nLine two")
+        self.assertEqual(resp["custom_extra"], 123)
+
+    def test_lyrics_provider_registry(self):
+        from providers.lyrics import (
+            LyricsProviderRegistry,
+            get_provider_registry,
+            get_lrc_red_provider,
+        )
+
+        reg = get_provider_registry()
+        self.assertIn("lrc.red", reg.registered_names)
+        self.assertIn("LyricsPlus", reg.registered_names)
+        self.assertIn("LRCLIB", reg.registered_names)
+        self.assertIn("Megalobiz", reg.registered_names)
+        self.assertIn("BetterLyrics", reg.registered_names)
+        self.assertIn("Genius", reg.registered_names)
+
+        # Lazy instantiation returns provider
+        prov = get_lrc_red_provider()
+        self.assertEqual(prov.name, "lrc.red")
+
+        # Custom registry instance for testing
+        test_reg = LyricsProviderRegistry()
+        mock_prov = object()
+        test_reg.register("custom", lambda: mock_prov)
+        self.assertIs(test_reg.get("custom"), mock_prov)
+        test_reg.reset()
+        self.assertNotIn("custom", test_reg._instances)
+
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -128,3 +128,41 @@ def get_xml_attr(elem: ET.Element, name: str) -> str | None:
             return v
     return None
 
+
+def build_lyrics_response(
+    source: str,
+    sync_type: str,
+    lines: list[dict[str, Any]],
+    title: str = "",
+    artist: str = "",
+    album: str = "",
+    isrc: str | None = None,
+    duration_seconds: float | None = None,
+    language: str | None = None,
+    plain_lyrics: str | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    """
+    Constructs a canonical, normalized lyrics response dictionary across all providers.
+    Automatically generates plain_lyrics from line texts if not explicitly provided.
+    """
+    if plain_lyrics is None and lines:
+        plain_lyrics = "\n".join(l.get("text", "") for l in lines)
+
+    payload: dict[str, Any] = {
+        "source": source,
+        "sync_type": sync_type,
+        "title": title,
+        "artist": artist,
+        "isrc": isrc,
+        "lines": lines,
+        "album": album,
+        "duration_seconds": duration_seconds,
+        "language": language,
+        "plain_lyrics": plain_lyrics,
+    }
+    payload.update(extra)
+    return payload
+
+
+

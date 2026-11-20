@@ -9,7 +9,9 @@ pub use cache::{
     LyricsCache, LyricsIndex, LyricsIndexEntry, clear_lyrics_cache, clear_memory_cache,
     flush_lyrics_cache, get_lyrics_from_cache, invalidate_track_in_cache, store_lyrics_in_cache,
 };
-pub use model::{LyricLine, LyricSyllable, LyricWord, Lyrics};
+pub use model::{
+    LyricLine, LyricSyllable, LyricWord, Lyrics, is_in_time_window, time_window_progress,
+};
 pub use provider::{
     LyricsResponse, classify_lyrics_error, fetch_lyrics, spawn_fetch_lyrics, track_to_py_dict,
 };
@@ -282,6 +284,37 @@ mod tests {
         let (idx2, line_two) = lyrics.line_at_ms(3500).expect("Line 2 expected");
         assert_eq!(idx2, 1);
         assert_eq!(line_two.text, "Line 2");
+    }
+
+    #[test]
+    fn test_shared_timing_helpers_and_word_progression() {
+        assert_eq!(time_window_progress(500, 1000, 2000), 0.0);
+        assert_eq!(time_window_progress(1500, 1000, 2000), 0.5);
+        assert_eq!(time_window_progress(2500, 1000, 2000), 1.0);
+
+        assert!(is_in_time_window(1500, 1000, Some(2000)));
+        assert!(!is_in_time_window(999, 1000, Some(2000)));
+        assert!(!is_in_time_window(2000, 1000, Some(2000)));
+        assert!(is_in_time_window(5000, 1000, None));
+
+        let mut word = LyricWord::new("Testing", Some(1000), Some(2000));
+        word.syllables = vec![
+            LyricSyllable::new("Test", Some(1000), Some(1500)),
+            LyricSyllable::new("ing", Some(1500), Some(2000)),
+        ];
+
+        let mut line = LyricLine::new("Testing", Some(1000), Some(3000));
+        line.words = vec![word];
+
+        let (w_idx, _, w_prog) = line.active_word_at_ms(1250).expect("word active");
+        assert_eq!(w_idx, 0);
+        assert!((w_prog - 0.25).abs() < 1e-4);
+
+        let (s_idx, _, s_prog) = line.words[0]
+            .active_syllable_at_ms(1250)
+            .expect("syllable active");
+        assert_eq!(s_idx, 0);
+        assert!((s_prog - 0.5).abs() < 1e-4);
     }
 
     #[test]

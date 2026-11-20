@@ -9,6 +9,7 @@ from providers.lyrics.base import (
     DEFAULT_TIMEOUT,
     DEFAULT_USER_AGENT,
     LyricsProvider,
+    build_lyrics_response,
     clean_title_for_search,
     extract_album,
     extract_artists,
@@ -256,19 +257,17 @@ class MegalobizProvider(LyricsProvider):
         c_dur = sheet.get("duration") or best_candidate.get("duration") or dur_sec
         sheet_url = sheet.get("url") or best_candidate.get("url")
 
-        return {
-            "source": "Megalobiz",
-            "sync_type": sync_type,
-            "title": html.unescape(c_title),
-            "artist": html.unescape(c_artist),
-            "isrc": isrc,
-            "lines": lines,
-            "album": album,
-            "duration_seconds": c_dur,
-            "language": None,
-            "plain_lyrics": "\n".join(l["text"] for l in lines),
-            "raw_ttml": None,
-            "raw_lrc": raw_lrc,
-            "attribution": self.attribution,
-            "url": sheet_url,
-        }
+        return build_lyrics_response(
+            source="Megalobiz",
+            sync_type=sync_type,
+            title=html.unescape(c_title),
+            artist=html.unescape(c_artist),
+            isrc=isrc,
+            lines=lines,
+            album=album,
+            duration_seconds=c_dur,
+            raw_ttml=None,
+            raw_lrc=raw_lrc,
+            attribution=self.attribution,
+            url=sheet_url,
+        )

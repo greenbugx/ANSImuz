@@ -8,6 +8,7 @@ from providers.lyrics.base import (
     DEFAULT_TIMEOUT,
     DEFAULT_USER_AGENT,
     LyricsProvider,
+    build_lyrics_response,
     clean_title_for_search,
     extract_album,
     extract_artists,
@@ -126,22 +127,20 @@ class BetterLyricsProvider(LyricsProvider):
             if data and "ttml" in data and isinstance(data["ttml"], str):
                 sync_type, lines = parse_ttml(data["ttml"])
                 if lines:
-                    return {
-                        "source": "BetterLyrics",
-                        "sync_type": sync_type,
-                        "title": title,
-                        "artist": artist,
-                        "isrc": isrc,
-                        "lines": lines,
-                        "album": album,
-                        "duration_seconds": dur_sec,
-                        "language": None,
-                        "plain_lyrics": "\n".join(l["text"] for l in lines),
-                        "raw_ttml": data["ttml"],
-                        "raw_lrc": None,
-                        "attribution": self.attribution,
-                        "url": None,
-                    }
+                    return build_lyrics_response(
+                        source="BetterLyrics",
+                        sync_type=sync_type,
+                        title=title,
+                        artist=artist,
+                        isrc=isrc,
+                        lines=lines,
+                        album=album,
+                        duration_seconds=dur_sec,
+                        raw_ttml=data["ttml"],
+                        raw_lrc=None,
+                        attribution=self.attribution,
+                        url=None,
+                    )
 
         # 2. Fallback endpoint: Portato (QQ Music QRC)
         for t_query in ([title, cleaned_title] if cleaned_title != title else [title]):
@@ -149,22 +148,20 @@ class BetterLyricsProvider(LyricsProvider):
             if data and "lyrics" in data and isinstance(data["lyrics"], str):
                 sync_type, lines = parse_qrc(data["lyrics"])
                 if lines:
-                    return {
-                        "source": "BetterLyrics (QQ)",
-                        "sync_type": sync_type,
-                        "title": title,
-                        "artist": artist,
-                        "isrc": isrc,
-                        "lines": lines,
-                        "album": album,
-                        "duration_seconds": dur_sec,
-                        "language": None,
-                        "plain_lyrics": "\n".join(l["text"] for l in lines),
-                        "raw_ttml": None,
-                        "raw_lrc": data["lyrics"],
-                        "attribution": self.attribution,
-                        "url": None,
-                    }
+                    return build_lyrics_response(
+                        source="BetterLyrics (QQ)",
+                        sync_type=sync_type,
+                        title=title,
+                        artist=artist,
+                        isrc=isrc,
+                        lines=lines,
+                        album=album,
+                        duration_seconds=dur_sec,
+                        raw_ttml=None,
+                        raw_lrc=data["lyrics"],
+                        attribution=self.attribution,
+                        url=None,
+                    )
 
         return None
 

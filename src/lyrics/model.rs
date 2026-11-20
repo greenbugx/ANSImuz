@@ -1,6 +1,26 @@
 use crate::lyrics::types::{SyncType, ValidationError};
 use serde::{Deserialize, Serialize};
 
+/// Calculates normalized progression (0.0 to 1.0) of `ms` within `[start_ms, end_ms]`.
+#[inline]
+pub fn time_window_progress(ms: u64, start_ms: u64, end_ms: u64) -> f32 {
+    if ms <= start_ms {
+        0.0
+    } else if ms >= end_ms {
+        1.0
+    } else {
+        let span = (end_ms - start_ms).max(1);
+        ((ms - start_ms) as f32 / span as f32).clamp(0.0, 1.0)
+    }
+}
+
+/// Checks whether `ms` falls within the half-open interval `[start_ms, end_ms)`.
+/// If `end_ms` is None, any timestamp `>= start_ms` is considered in-window.
+#[inline]
+pub fn is_in_time_window(ms: u64, start_ms: u64, end_ms: Option<u64>) -> bool {
+    ms >= start_ms && end_ms.map(|end| ms < end).unwrap_or(true)
+}
+
 /// An individual synchronized syllable within a word.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct LyricSyllable {
@@ -71,22 +91,29 @@ impl LyricWord {
         self.end_ms
     }
 
-    /// Returns the active syllable at the given millisecond position, if available.
-    /// Uses centralized timing windows consistent with the synchronizer.
-    pub fn syllable_at_ms(&self, ms: u64) -> Option<(usize, &LyricSyllable)> {
-        if self.syllables.is_empty() {
-            return None;
-        }
-
+    /// Returns the active syllable index, syllable reference, and progression at `ms`.
+    /// Uses centralized timing windows and progress calculation.
+    pub fn active_syllable_at_ms(&self, ms: u64) -> Option<(usize, &LyricSyllable, f32)> {
         for (idx, syl) in self.syllables.iter().enumerate() {
             if let Some(start) = syl.start_ms {
                 let end = self.effective_syllable_end(idx);
-                if ms >= start && end.map(|e| ms < e).unwrap_or(true) {
-                    return Some((idx, syl));
+                if is_in_time_window(ms, start, end) {
+                    let prog = match end {
+                        Some(end_ms) => time_window_progress(ms, start, end_ms),
+                        None => 0.0,
+                    };
+                    return Some((idx, syl, prog));
                 }
             }
         }
         None
+    }
+
+    /// Returns the active syllable at the given millisecond position, if available.
+    /// Uses centralized timing windows consistent with the synchronizer.
+    pub fn syllable_at_ms(&self, ms: u64) -> Option<(usize, &LyricSyllable)> {
+        self.active_syllable_at_ms(ms)
+            .map(|(idx, syl, _)| (idx, syl))
     }
 }
 
@@ -229,22 +256,28 @@ impl LyricLine {
         self.end_ms
     }
 
-    /// Finds the active word at a given timestamp in milliseconds.
-    /// Uses centralized timing windows consistent with the synchronizer.
-    pub fn word_at_ms(&self, ms: u64) -> Option<(usize, &LyricWord)> {
-        if self.words.is_empty() {
-            return None;
-        }
-
+    /// Returns the active word index, word reference, and progression at `ms`.
+    /// Uses centralized timing windows and progress calculation.
+    pub fn active_word_at_ms(&self, ms: u64) -> Option<(usize, &LyricWord, f32)> {
         for (idx, word) in self.words.iter().enumerate() {
             if let Some(start) = word.start_ms {
                 let end = self.effective_word_end(idx);
-                if ms >= start && end.map(|e| ms < e).unwrap_or(true) {
-                    return Some((idx, word));
+                if is_in_time_window(ms, start, end) {
+                    let prog = match end {
+                        Some(end_ms) => time_window_progress(ms, start, end_ms),
+                        None => 0.0,
+                    };
+                    return Some((idx, word, prog));
                 }
             }
         }
         None
+    }
+
+    /// Finds the active word at a given timestamp in milliseconds.
+    /// Uses centralized timing windows consistent with the synchronizer.
+    pub fn word_at_ms(&self, ms: u64) -> Option<(usize, &LyricWord)> {
+        self.active_word_at_ms(ms).map(|(idx, word, _)| (idx, word))
     }
 }
 

@@ -19,6 +19,7 @@ from providers.lyrics.base import (
     DEFAULT_TIMEOUT,
     DEFAULT_USER_AGENT,
     LyricsProvider,
+    build_lyrics_response,
     clean_title_for_search,
     format_timestamp,
     parse_lrc,
@@ -52,54 +53,85 @@ from providers.lyrics.megalobiz import (
 
 logger = logging.getLogger(__name__)
 
-_better_lyrics_provider: BetterLyricsProvider | None = None
-_genius_provider: GeniusProvider | None = None
-_lyrics_plus_provider: LyricsPlusProvider | None = None
-_lrclib_provider: LrclibProvider | None = None
-_lrc_red_provider: LrcRedProvider | None = None
-_megalobiz_provider: MegalobizProvider | None = None
+class LyricsProviderRegistry:
+    """
+    Registry managing lazy initialization and lookup of lyrics providers.
+    Eliminates duplicated global provider state while preserving lazy instantiation
+    and test mock compatibility.
+    """
+
+    def __init__(self) -> None:
+        self._factories: dict[str, Callable[[], Any]] = {
+            "lrc.red": LrcRedProvider,
+            "LyricsPlus": LyricsPlusProvider,
+            "LRCLIB": LrclibProvider,
+            "Megalobiz": MegalobizProvider,
+            "BetterLyrics": BetterLyricsProvider,
+            "Genius": GeniusProvider,
+        }
+        self._instances: dict[str, Any] = {}
+        self._lock = threading.Lock()
+
+    def register(self, name: str, factory_or_instance: Any) -> None:
+        """Registers a provider factory or pre-constructed instance."""
+        with self._lock:
+            if callable(factory_or_instance):
+                self._factories[name] = factory_or_instance
+                self._instances.pop(name, None)
+            else:
+                self._instances[name] = factory_or_instance
+
+    def get(self, name: str) -> Any:
+        """Retrieves or lazily constructs the requested provider."""
+        with self._lock:
+            if name in self._instances:
+                return self._instances[name]
+            factory = self._factories.get(name)
+            if factory is None:
+                raise KeyError(f"Unknown lyrics provider: {name}")
+            instance = factory()
+            self._instances[name] = instance
+            return instance
+
+    def reset(self) -> None:
+        """Clears all cached instances (useful for test isolation)."""
+        with self._lock:
+            self._instances.clear()
+
+    @property
+    def registered_names(self) -> list[str]:
+        return list(self._factories.keys())
+
+
+_GLOBAL_REGISTRY = LyricsProviderRegistry()
+
+
+def get_provider_registry() -> LyricsProviderRegistry:
+    return _GLOBAL_REGISTRY
 
 
 def get_better_lyrics_provider() -> BetterLyricsProvider:
-    global _better_lyrics_provider
-    if _better_lyrics_provider is None:
-        _better_lyrics_provider = BetterLyricsProvider()
-    return _better_lyrics_provider
+    return _GLOBAL_REGISTRY.get("BetterLyrics")
 
 
 def get_genius_provider() -> GeniusProvider:
-    global _genius_provider
-    if _genius_provider is None:
-        _genius_provider = GeniusProvider()
-    return _genius_provider
+    return _GLOBAL_REGISTRY.get("Genius")
 
 
 def get_lyrics_plus_provider() -> LyricsPlusProvider:
-    global _lyrics_plus_provider
-    if _lyrics_plus_provider is None:
-        _lyrics_plus_provider = LyricsPlusProvider()
-    return _lyrics_plus_provider
+    return _GLOBAL_REGISTRY.get("LyricsPlus")
 
 
 def get_lrclib_provider() -> LrclibProvider:
-    global _lrclib_provider
-    if _lrclib_provider is None:
-        _lrclib_provider = LrclibProvider()
-    return _lrclib_provider
+    return _GLOBAL_REGISTRY.get("LRCLIB")
 
 
 def get_megalobiz_provider() -> MegalobizProvider:
-    global _megalobiz_provider
-    if _megalobiz_provider is None:
-        _megalobiz_provider = MegalobizProvider()
-    return _megalobiz_provider
+    return _GLOBAL_REGISTRY.get("Megalobiz")
 
 
 def get_lrc_red_provider() -> LrcRedProvider:
-    global _lrc_red_provider
-    if _lrc_red_provider is None:
-        _lrc_red_provider = LrcRedProvider()
-    return _lrc_red_provider
+    return _GLOBAL_REGISTRY.get("lrc.red")
 
 
 # Backward compatibility alias
@@ -428,10 +460,12 @@ __all__ = [
     "LrclibProvider",
     "LyricsPlusProvider",
     "LyricsProvider",
+    "LyricsProviderRegistry",
     "LrcRedProvider",
     "MegalobizProvider",
     "ProviderHealthTracker",
     "ProviderResult",
+    "build_lyrics_response",
     "clean_title_for_search",
     "format_timestamp",
     "get_better_lyrics_provider",
@@ -443,6 +477,7 @@ __all__ = [
     "get_lyrics_plus_provider",
     "get_megalobiz_provider",
     "get_provider_health",
+    "get_provider_registry",
     "parse_lrc",
     "parse_lyrics_plus",
     "parse_lyricsfile",

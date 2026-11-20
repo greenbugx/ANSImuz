@@ -11,6 +11,7 @@ import requests
 from providers.lyrics.base import (
     DEFAULT_TIMEOUT,
     LyricsProvider,
+    build_lyrics_response,
     extract_album,
     extract_artists,
     extract_duration_seconds,
@@ -427,19 +428,17 @@ class GeniusProvider(LyricsProvider):
         c_title = best_candidate.get("title") if best_candidate else title
         c_artist = best_candidate.get("artist_names") if best_candidate else artist
 
-        return {
-            "source": "Genius",
-            "sync_type": "none",
-            "title": c_title or title,
-            "artist": c_artist or artist,
-            "isrc": isrc,
-            "lines": lines,
-            "album": album,
-            "duration_seconds": dur_sec,
-            "language": None,
-            "plain_lyrics": "\n".join(l["text"] for l in lines),
-            "raw_ttml": None,
-            "raw_lrc": None,
-            "attribution": self.attribution,
-            "url": song_url,
-        }
+        return build_lyrics_response(
+            source="Genius",
+            sync_type="none",
+            title=c_title or title,
+            artist=c_artist or artist,
+            isrc=isrc,
+            lines=lines,
+            album=album,
+            duration_seconds=dur_sec,
+            raw_ttml=None,
+            raw_lrc=None,
+            attribution=self.attribution,
+            url=song_url,
+        )

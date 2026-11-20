@@ -8,6 +8,7 @@ from providers.lyrics.base import (
     DEFAULT_TIMEOUT,
     DEFAULT_USER_AGENT,
     LyricsProvider,
+    build_lyrics_response,
     clean_title_for_search,
     compute_similarity,
     extract_album,
@@ -206,64 +207,61 @@ class LrclibProvider(LyricsProvider):
             if res:
                 sync_type, lines = res
                 if lines:
-                    return {
-                        "source": "LRCLIB",
-                        "sync_type": sync_type,
-                        "title": record.get("trackName") or title,
-                        "artist": record.get("artistName") or artist,
-                        "isrc": isrc,
-                        "lines": lines,
-                        "album": record.get("albumName") or album,
-                        "duration_seconds": record.get("duration") or dur_sec,
-                        "language": None,
-                        "plain_lyrics": record.get("plainLyrics") or "\n".join(l["text"] for l in lines),
-                        "raw_ttml": None,
-                        "raw_lrc": record.get("syncedLyrics"),
-                        "attribution": self.attribution,
-                        "url": f"{self.base_url}/api/get/{record['id']}" if record.get("id") else None,
-                    }
+                    return build_lyrics_response(
+                        source="LRCLIB",
+                        sync_type=sync_type,
+                        title=record.get("trackName") or title,
+                        artist=record.get("artistName") or artist,
+                        isrc=isrc,
+                        lines=lines,
+                        album=record.get("albumName") or album,
+                        duration_seconds=record.get("duration") or dur_sec,
+                        plain_lyrics=record.get("plainLyrics"),
+                        raw_ttml=None,
+                        raw_lrc=record.get("syncedLyrics"),
+                        attribution=self.attribution,
+                        url=f"{self.base_url}/api/get/{record['id']}" if record.get("id") else None,
+                    )
 
         # 2. Line-synced lyrics
         if record.get("syncedLyrics"):
             sync_type, lines = parse_lrc(record["syncedLyrics"])
             if lines:
-                return {
-                    "source": "LRCLIB",
-                    "sync_type": sync_type,
-                    "title": record.get("trackName") or title,
-                    "artist": record.get("artistName") or artist,
-                    "isrc": isrc,
-                    "lines": lines,
-                    "album": record.get("albumName") or album,
-                    "duration_seconds": record.get("duration") or dur_sec,
-                    "language": None,
-                    "plain_lyrics": record.get("plainLyrics") or "\n".join(l["text"] for l in lines),
-                    "raw_ttml": None,
-                    "raw_lrc": record.get("syncedLyrics"),
-                    "attribution": self.attribution,
-                    "url": f"{self.base_url}/api/get/{record['id']}" if record.get("id") else None,
-                }
+                return build_lyrics_response(
+                    source="LRCLIB",
+                    sync_type=sync_type,
+                    title=record.get("trackName") or title,
+                    artist=record.get("artistName") or artist,
+                    isrc=isrc,
+                    lines=lines,
+                    album=record.get("albumName") or album,
+                    duration_seconds=record.get("duration") or dur_sec,
+                    plain_lyrics=record.get("plainLyrics"),
+                    raw_ttml=None,
+                    raw_lrc=record.get("syncedLyrics"),
+                    attribution=self.attribution,
+                    url=f"{self.base_url}/api/get/{record['id']}" if record.get("id") else None,
+                )
 
         # 3. Plain unsynchronized lyrics
         if record.get("plainLyrics"):
             sync_type, lines = parse_lrc(record["plainLyrics"])
             if lines:
-                return {
-                    "source": "LRCLIB",
-                    "sync_type": "none",
-                    "title": record.get("trackName") or title,
-                    "artist": record.get("artistName") or artist,
-                    "isrc": isrc,
-                    "lines": lines,
-                    "album": record.get("albumName") or album,
-                    "duration_seconds": record.get("duration") or dur_sec,
-                    "language": None,
-                    "plain_lyrics": record.get("plainLyrics"),
-                    "raw_ttml": None,
-                    "raw_lrc": None,
-                    "attribution": self.attribution,
-                    "url": f"{self.base_url}/api/get/{record['id']}" if record.get("id") else None,
-                }
+                return build_lyrics_response(
+                    source="LRCLIB",
+                    sync_type="none",
+                    title=record.get("trackName") or title,
+                    artist=record.get("artistName") or artist,
+                    isrc=isrc,
+                    lines=lines,
+                    album=record.get("albumName") or album,
+                    duration_seconds=record.get("duration") or dur_sec,
+                    plain_lyrics=record.get("plainLyrics"),
+                    raw_ttml=None,
+                    raw_lrc=None,
+                    attribution=self.attribution,
+                    url=f"{self.base_url}/api/get/{record['id']}" if record.get("id") else None,
+                )
 
         return None
 

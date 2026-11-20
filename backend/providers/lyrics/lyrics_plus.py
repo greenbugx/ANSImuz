@@ -10,6 +10,7 @@ from providers.lyrics.base import (
     DEFAULT_TIMEOUT,
     DEFAULT_USER_AGENT,
     LyricsProvider,
+    build_lyrics_response,
     clean_title_for_search,
     extract_album,
     extract_artists,
@@ -239,22 +240,20 @@ class LyricsPlusProvider(LyricsProvider):
                 winner_host, data = res
                 sync_type, lines = parse_lyrics_plus(data)
                 if lines:
-                    return {
-                        "source": "LyricsPlus",
-                        "sync_type": sync_type,
-                        "title": title,
-                        "artist": artist,
-                        "isrc": isrc,
-                        "lines": lines,
-                        "album": album,
-                        "duration_seconds": dur_sec,
-                        "language": None,
-                        "plain_lyrics": "\n".join(l["text"] for l in lines),
-                        "raw_ttml": None,
-                        "raw_lrc": None,
-                        "attribution": self.attribution,
-                        "url": winner_host,
-                    }
+                    return build_lyrics_response(
+                        source="LyricsPlus",
+                        sync_type=sync_type,
+                        title=title,
+                        artist=artist,
+                        isrc=isrc,
+                        lines=lines,
+                        album=album,
+                        duration_seconds=dur_sec,
+                        raw_ttml=None,
+                        raw_lrc=None,
+                        attribution=self.attribution,
+                        url=winner_host,
+                    )
 
         return None
 

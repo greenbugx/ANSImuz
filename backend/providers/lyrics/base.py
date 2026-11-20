@@ -5,6 +5,7 @@ from typing import Any
 
 from providers.lyrics.matching import compute_similarity
 from providers.lyrics.normalization import (
+    build_lyrics_response,
     clean_title_for_search,
     extract_album,
     extract_artists,
@@ -57,6 +58,7 @@ __all__ = [
     "DEFAULT_TIMEOUT",
     "DEFAULT_USER_AGENT",
     "LyricsProvider",
+    "build_lyrics_response",
     "clean_title_for_search",
     "compute_similarity",
     "extract_album",

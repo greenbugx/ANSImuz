@@ -16,6 +16,7 @@ from providers.lyrics.base import (
     DEFAULT_TIMEOUT,
     DEFAULT_USER_AGENT,
     LyricsProvider,
+    build_lyrics_response,
     compute_similarity,
     extract_album,
     extract_artists,
@@ -363,23 +364,22 @@ class LrcRedProvider(LyricsProvider):
         language = metadata.get("language")
         page_url = metadata.get("page") or f"{self.base_url}/s/{isrc}"
 
-        return {
-            "source": self.name,
-            "sync_type": sync_type,
-            "title": title,
-            "artist": artist,
-            "isrc": isrc,
-            "lines": lines,
-            # Additional metadata
-            "album": album,
-            "duration_seconds": duration,
-            "language": language,
-            "plain_lyrics": plain_lyrics,
-            "raw_ttml": raw_ttml,
-            "raw_lrc": raw_lrc,
-            "attribution": self.attribution,
-            "url": page_url,
-        }
+        return build_lyrics_response(
+            source=self.name,
+            sync_type=sync_type,
+            title=title,
+            artist=artist,
+            isrc=isrc,
+            lines=lines,
+            album=album,
+            duration_seconds=duration,
+            language=language,
+            plain_lyrics=plain_lyrics,
+            raw_ttml=raw_ttml,
+            raw_lrc=raw_lrc,
+            attribution=self.attribution,
+            url=page_url,
+        )
 
     def get_lyrics(self, track: dict[str, Any]) -> dict[str, Any] | None:
         """

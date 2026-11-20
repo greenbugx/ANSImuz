@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use crate::lyrics::model::{LyricLine, LyricSyllable, LyricWord, Lyrics};
+use crate::lyrics::model::{
+    LyricLine, LyricSyllable, LyricWord, Lyrics, is_in_time_window, time_window_progress,
+};
 use crate::playback::PlayerEvent;
 
 /// Detailed synchronization point in time for lyrics rendering.
@@ -319,9 +321,7 @@ pub fn compute_sync_point(
         let line = &lyrics.lines[primary_idx];
         let start = line.start_ms.unwrap_or(0);
         let end = effective_line_end(primary_idx, &lyrics.lines, duration_ms);
-        let prog = ((position_ms.saturating_sub(start)) as f32
-            / (end.saturating_sub(start)).max(1) as f32)
-            .clamp(0.0, 1.0);
+        let prog = time_window_progress(position_ms, start, end);
 
         let mut indices = all_active;
         if let Some(pos) = indices.iter().position(|&i| i == primary_idx)
@@ -405,7 +405,7 @@ fn find_all_active_lines(ms: u64, lines: &[LyricLine], duration_ms: Option<u64>)
         .filter(|(i, line)| {
             if let Some(start) = line.start_ms {
                 let end = effective_line_end(*i, lines, duration_ms);
-                ms >= start && ms < end
+                is_in_time_window(ms, start, Some(end))
             } else {
                 false
             }
@@ -444,9 +444,7 @@ fn find_active_line(
 
         if ms >= curr_start {
             if ms < curr_end {
-                let prog = ((ms.saturating_sub(curr_start)) as f32
-                    / (curr_end.saturating_sub(curr_start)).max(1) as f32)
-                    .clamp(0.0, 1.0);
+                let prog = time_window_progress(ms, curr_start, curr_end);
                 return (Some(hint), false, prog);
             }
             // Check if in gap between current line and next line
@@ -463,9 +461,7 @@ fn find_active_line(
                 let n_end = effective_line_end(next_idx, lines, duration_ms);
 
                 if ms >= n_start && ms < n_end {
-                    let prog = ((ms.saturating_sub(n_start)) as f32
-                        / (n_end.saturating_sub(n_start)).max(1) as f32)
-                        .clamp(0.0, 1.0);
+                    let prog = time_window_progress(ms, n_start, n_end);
                     return (Some(next_idx), false, prog);
                 }
             }
@@ -492,9 +488,7 @@ fn find_active_line(
     let effective_end = effective_line_end(found_idx, lines, duration_ms);
 
     if ms < effective_end {
-        let prog = ((ms.saturating_sub(start)) as f32
-            / (effective_end.saturating_sub(start)).max(1) as f32)
-            .clamp(0.0, 1.0);
+        let prog = time_window_progress(ms, start, effective_end);
         (Some(found_idx), false, prog)
     } else {
         // Line has finished
@@ -513,72 +507,21 @@ fn find_active_line(
 }
 
 /// Identifies active word, active syllable, and calculates word and syllable progression.
+/// Delegates to unified `LyricLine::active_word_at_ms` and `LyricWord::active_syllable_at_ms`.
 fn find_active_word_and_syllable(
     ms: u64,
     line: &LyricLine,
     line_progress: f32,
 ) -> (Option<usize>, f32, Option<usize>, f32) {
-    if line.words.is_empty() {
-        return (None, line_progress, None, line_progress);
-    }
-
-    // Find the word active at ms using centralized effective timing windows
-    for (w_idx, word) in line.words.iter().enumerate() {
-        if let Some(w_start) = word.start_ms {
-            let w_end = line.effective_word_end(w_idx);
-
-            if ms >= w_start {
-                if let Some(end_val) = w_end {
-                    if ms < end_val {
-                        // Word is active!
-                        let word_prog = if end_val > w_start {
-                            ((ms - w_start) as f32 / (end_val - w_start) as f32).clamp(0.0, 1.0)
-                        } else {
-                            1.0
-                        };
-
-                        // Find active syllable within this word
-                        let (syl_idx, syl_prog) = find_active_syllable(ms, word, word_prog);
-                        return (Some(w_idx), word_prog, syl_idx, syl_prog);
-                    }
-                } else {
-                    return (Some(w_idx), 0.0, None, 0.0);
-                }
-            }
+    if let Some((w_idx, word, word_prog)) = line.active_word_at_ms(ms) {
+        if let Some((s_idx, _, syl_prog)) = word.active_syllable_at_ms(ms) {
+            (Some(w_idx), word_prog, Some(s_idx), syl_prog)
+        } else {
+            (Some(w_idx), word_prog, None, word_prog)
         }
+    } else {
+        (None, line_progress, None, line_progress)
     }
-
-    (None, line_progress, None, line_progress)
-}
-
-/// Finds the active syllable within a word and calculates syllable progression.
-fn find_active_syllable(ms: u64, word: &LyricWord, fallback_prog: f32) -> (Option<usize>, f32) {
-    if word.syllables.is_empty() {
-        return (None, fallback_prog);
-    }
-
-    for (s_idx, syl) in word.syllables.iter().enumerate() {
-        if let Some(s_start) = syl.start_ms {
-            let s_end = word.effective_syllable_end(s_idx);
-
-            if ms >= s_start {
-                if let Some(end_val) = s_end {
-                    if ms < end_val {
-                        let syl_prog = if end_val > s_start {
-                            ((ms - s_start) as f32 / (end_val - s_start) as f32).clamp(0.0, 1.0)
-                        } else {
-                            1.0
-                        };
-                        return (Some(s_idx), syl_prog);
-                    }
-                } else {
-                    return (Some(s_idx), 0.0);
-                }
-            }
-        }
-    }
-
-    (None, fallback_prog)
 }
 
 #[cfg(test)]
