@@ -222,6 +222,7 @@ pub fn handle_player_event(
             if generation != current {
                 return false;
             }
+            app.playback_generation = generation;
             let pos_dur = Duration::from_secs_f64(elapsed);
             let dur_opt = duration.filter(|&d| d > 0.0).map(Duration::from_secs_f64);
             if let Some(track) = app.current_track_mut()
@@ -267,9 +268,7 @@ pub fn handle_player_event(
             }
             app.current_position = None;
             *playback = None;
-            if let Some(lyrics) = &app.lyrics_state.lyrics {
-                app.lyrics_synchronizer.sync_ended(generation, lyrics);
-            }
+            app.lyrics_synchronizer.reset();
             if app.is_resolving() {
                 player.record_error(message.to_string());
                 retire_active_track_while_resolving(app);
@@ -518,6 +517,7 @@ pub fn start_playback_with_direct(
             if let Some(worker) = &app.lyrics_worker {
                 worker.fetch(track.clone());
             }
+            app.playback_generation = player.generation();
             app.lyrics_synchronizer.reset();
             app.lyrics_scroll_offset = 0;
             app.lyrics_auto_scroll = true;
