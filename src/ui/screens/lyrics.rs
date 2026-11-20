@@ -10,7 +10,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::App;
 use crate::lyrics::synchronizer::compute_sync_point;
 use crate::lyrics::types::{LyricsStatus, SyncType};
-use crate::lyrics::{LyricLine, LyricWord, Lyrics, LyricsSyncPoint};
+use crate::lyrics::{LyricLine, LyricSyllable, Lyrics, LyricsSyncPoint};
 use crate::ui::screens::player::{layout_player_panel, render_player_panel};
 use crate::ui::theme::{Theme, truncate};
 
@@ -271,25 +271,47 @@ fn render_lyrics_content(
         }
     }
 
-    // Calculate vertical scroll offset (Auto vs Manual)
+    // Calculate vertical scroll offset according to explicit scroll policy (Auto vs Manual)
     let visible_height = inner.height as usize;
     let total_lines = rendered_lines.len();
     let max_scroll = total_lines.saturating_sub(visible_height);
 
-    let scroll_y = if app.lyrics_auto_scroll {
-        if is_timed && let Some(active_row) = active_visual_row {
+    let scroll_y = calculate_lyrics_scroll(
+        app.lyrics_auto_scroll,
+        app.lyrics_scroll_offset,
+        if is_timed { active_visual_row } else { None },
+        visible_height,
+        max_scroll,
+    );
+
+    let paragraph = Paragraph::new(rendered_lines).scroll((scroll_y as u16, 0));
+
+    frame.render_widget(paragraph, inner);
+}
+
+/// Scroll policy:
+/// - Playback position strictly controls the active lyric.
+/// - Auto-scroll determines whether the viewport follows that active lyric row.
+/// - Manual scrolling modifies only the viewport scroll offset
+//    it NEVER alters synchronization state.
+#[inline]
+pub fn calculate_lyrics_scroll(
+    auto_scroll: bool,
+    manual_offset: usize,
+    active_visual_row: Option<usize>,
+    visible_height: usize,
+    max_scroll: usize,
+) -> usize {
+    if auto_scroll {
+        if let Some(active_row) = active_visual_row {
             let center_offset = visible_height / 3;
             active_row.saturating_sub(center_offset).min(max_scroll)
         } else {
             0
         }
     } else {
-        app.lyrics_scroll_offset.min(max_scroll)
-    };
-
-    let paragraph = Paragraph::new(rendered_lines).scroll((scroll_y as u16, 0));
-
-    frame.render_widget(paragraph, inner);
+        manual_offset.min(max_scroll)
+    }
 }
 
 fn resolve_sync_point(
@@ -298,7 +320,19 @@ fn resolve_sync_point(
     playback: Option<(f64, Option<f64>)>,
 ) -> LyricsSyncPoint {
     let cached = app.lyrics_synchronizer.current_sync_point();
-    if cached.position_ms > 0 || cached.has_active_line() || cached.is_ended {
+
+    // Explicitly verify cached sync point belongs to the currently active playback generation and track
+    let is_valid_generation = cached.generation == app.playback_generation;
+    let track_matches = match (app.current_track(), app.lyrics_state.current_track.as_ref()) {
+        (Some(curr), Some(lyr)) => curr.same_identity(lyr),
+        (None, None) => true,
+        _ => true,
+    };
+
+    if is_valid_generation
+        && track_matches
+        && (cached.position_ms > 0 || cached.has_active_line() || cached.is_ended)
+    {
         cached.clone()
     } else if let Some((elapsed, duration)) = playback {
         let pos_ms = (elapsed.max(0.0) * 1000.0).round() as u64;
@@ -306,14 +340,22 @@ fn resolve_sync_point(
         compute_sync_point(
             pos_ms,
             dur_ms,
-            app.resolve_generation,
+            app.playback_generation,
             app.is_paused(),
             false,
             lyrics,
             None,
         )
     } else {
-        cached.clone()
+        compute_sync_point(
+            0,
+            None,
+            app.playback_generation,
+            app.is_paused(),
+            false,
+            lyrics,
+            None,
+        )
     }
 }
 
@@ -500,18 +542,43 @@ fn wrap_right_aligned_line(
             .add_modifier(Modifier::BOLD)
     };
 
-    let words: Vec<LyricWord> = if line.words.is_empty() {
+    let first_suffix = suffix.unwrap_or("");
+    let first_suffix_w = first_suffix.width();
+    let cont_indent_w = HANGING_INDENT_PREFIX.width();
+
+    struct WordItem<'a> {
+        text: &'a str,
+        start_ms: Option<u64>,
+        syllables: &'a [LyricSyllable],
+    }
+
+    struct WordSpan<'a> {
+        text: &'a str,
+        style: Style,
+        width: usize,
+    }
+
+    let raw_words: Vec<WordItem> = if line.words.is_empty() {
         line.display_text()
             .split_whitespace()
-            .map(|tok| LyricWord::new(tok, None, None))
+            .map(|tok| WordItem {
+                text: tok,
+                start_ms: None,
+                syllables: &[],
+            })
             .collect()
     } else {
-        line.words.clone()
+        line.words
+            .iter()
+            .map(|w| WordItem {
+                text: w.text.as_str(),
+                start_ms: w.start_ms,
+                syllables: w.syllables.as_slice(),
+            })
+            .collect()
     };
 
-    if words.is_empty() {
-        let first_suffix = suffix.unwrap_or("");
-        let first_suffix_w = first_suffix.width();
+    if raw_words.is_empty() {
         let pad_left = max_width.saturating_sub(first_suffix_w);
         let suf_style = if sync_point.is_some() {
             active_style
@@ -525,40 +592,30 @@ fn wrap_right_aligned_line(
         return;
     }
 
-    let first_suffix = suffix.unwrap_or("");
-    let first_suffix_w = first_suffix.width();
-    let cont_indent_w = HANGING_INDENT_PREFIX.width();
-
-    struct WordSpan {
-        text: String,
-        style: Style,
-        width: usize,
-    }
-
-    let mut word_spans: Vec<Vec<WordSpan>> = Vec::with_capacity(words.len());
-    for (w_idx, word) in words.iter().enumerate() {
+    let mut word_spans: Vec<Vec<WordSpan>> = Vec::with_capacity(raw_words.len());
+    for (w_idx, word) in raw_words.iter().enumerate() {
         let mut spans = Vec::new();
         if let Some(sp) = sync_point {
             let w_start = word
                 .start_ms
                 .or_else(|| {
-                    words
+                    raw_words
                         .get(w_idx.saturating_sub(1))
-                        .and_then(|prev| prev.end_ms)
+                        .and_then(|prev| prev.start_ms)
                 })
                 .unwrap_or(line.start_ms.unwrap_or(0));
             let has_word_started = sp.position_ms >= w_start;
 
             if !has_word_started {
                 spans.push(WordSpan {
-                    text: word.text.clone(),
+                    text: word.text,
                     style: upcoming_word_style,
                     width: word.text.width(),
                 });
             } else if !word.syllables.is_empty()
                 && word.syllables.iter().any(|s| s.start_ms.is_some())
             {
-                for syl in &word.syllables {
+                for syl in word.syllables {
                     let s_start = syl.start_ms.unwrap_or(w_start);
                     let syl_style = if sp.position_ms >= s_start {
                         active_style
@@ -566,21 +623,21 @@ fn wrap_right_aligned_line(
                         upcoming_word_style
                     };
                     spans.push(WordSpan {
-                        text: syl.text.clone(),
+                        text: syl.text.as_str(),
                         style: syl_style,
                         width: syl.text.width(),
                     });
                 }
             } else {
                 spans.push(WordSpan {
-                    text: word.text.clone(),
+                    text: word.text,
                     style: active_style,
                     width: word.text.width(),
                 });
             }
         } else {
             spans.push(WordSpan {
-                text: word.text.clone(),
+                text: word.text,
                 style: fallback_style,
                 width: word.text.width(),
             });
@@ -593,7 +650,7 @@ fn wrap_right_aligned_line(
     let mut cur_row_content_w: usize = 0;
     let mut is_first_line = true;
 
-    for (w_idx, word) in words.iter().enumerate() {
+    for (w_idx, word) in raw_words.iter().enumerate() {
         let w_len = word.text.width();
         let max_content_w = if is_first_line {
             max_width.saturating_sub(first_suffix_w)
@@ -613,7 +670,7 @@ fn wrap_right_aligned_line(
         }
 
         for ws in &word_spans[w_idx] {
-            cur_row_spans.push(Span::styled(ws.text.clone(), ws.style));
+            cur_row_spans.push(Span::styled(ws.text.to_string(), ws.style));
             cur_row_content_w += ws.width;
         }
     }
@@ -1384,5 +1441,53 @@ mod tests {
                 .any(|r| { r.contains("Shining, shimmering, splendid") && r.contains("◀") }),
             "Singer 1 line must be right-aligned with '◀' suffix"
         );
+    }
+
+    #[test]
+    fn test_calculate_lyrics_scroll_policy() {
+        // Auto scroll with active row centers at 1/3 viewport
+        assert_eq!(calculate_lyrics_scroll(true, 5, Some(10), 30, 50), 0);
+        assert_eq!(calculate_lyrics_scroll(true, 5, Some(20), 30, 50), 10);
+        // Auto scroll with no active row sits at top (0)
+        assert_eq!(calculate_lyrics_scroll(true, 5, None, 30, 50), 0);
+
+        // Manual scroll uses manual_offset clamped to max_scroll
+        assert_eq!(calculate_lyrics_scroll(false, 15, Some(20), 30, 50), 15);
+        assert_eq!(calculate_lyrics_scroll(false, 999, Some(20), 30, 50), 50);
+    }
+
+    #[test]
+    fn test_resolve_sync_point_rejects_stale_generation() {
+        let mut app = App::new();
+        let track_a = Track::new("Song A", "Artist");
+        app.tracks.push(track_a.clone());
+        app.playing = Some(0);
+        app.playback_generation = 2;
+
+        let lyrics = Lyrics {
+            source: Some("test".into()),
+            sync_type: SyncType::Line,
+            title: Some("Song A".into()),
+            artist: Some("Artist".into()),
+            isrc: None,
+            lines: vec![LyricLine::new("Line 1", Some(1000), Some(4000))],
+            unavailable_reason: None,
+        };
+
+        // Populate synchronizer with stale generation (gen 1 from a previous track)
+        app.lyrics_synchronizer
+            .sync_position(1, 2.0, Some(10.0), &lyrics);
+        assert_eq!(app.lyrics_synchronizer.current_sync_point().generation, 1);
+        assert!(
+            app.lyrics_synchronizer
+                .current_sync_point()
+                .has_active_line()
+        );
+
+        // resolve_sync_point with playback at 0.5s on generation 2 must NOT return the stale gen 1 point
+        let pt = resolve_sync_point(&app, &lyrics, Some((0.5, Some(10.0))));
+        assert_eq!(pt.generation, 2);
+        assert_eq!(pt.position_ms, 500);
+        assert_eq!(pt.active_line_index, None); // Before line 1 start (1000ms)
     }
 }

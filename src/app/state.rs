@@ -140,6 +140,7 @@ pub struct App {
     pub command_palette_query: String,
     pub command_palette_cursor: usize,
     pub resolve_generation: u64,
+    pub playback_generation: u64,
     pub search_generation: u64,
     pub queue: Vec<QueueEntry>,
     pub queue_selected: usize,
@@ -193,6 +194,7 @@ impl App {
             command_palette_query: String::new(),
             command_palette_cursor: 0,
             resolve_generation: 0,
+            playback_generation: 0,
             search_generation: 0,
             queue: Vec::new(),
             queue_selected: 0,
@@ -450,11 +452,22 @@ impl App {
     }
 
     pub fn handle_lyrics_event(&mut self, event: crate::lyrics::LyricsEvent) {
+        // Discard responses that do not match the current playback track
+        if let Some(event_track) = event.track() {
+            if let Some(current_track) = self.current_track() {
+                if !current_track.same_identity(event_track) {
+                    return;
+                }
+            } else {
+                return;
+            }
+        }
+
         if let crate::lyrics::LyricsEvent::Success { ref lyrics, .. } = event
             && let Some(pos) = self.current_position
         {
             self.lyrics_synchronizer.sync_position(
-                self.resolve_generation,
+                self.playback_generation,
                 pos.as_secs_f64(),
                 None,
                 lyrics,
@@ -1299,5 +1312,119 @@ mod tests {
         app.clear_queue();
         assert!(app.prefetch_slot.is_none());
         assert_eq!(app.prefetch_generation, generation2 + 1);
+    }
+
+    #[test]
+    fn test_handle_lyrics_event_rejects_mismatched_track_and_uses_playback_generation() {
+        let mut app = App::new();
+        let track_a = sample_track("Song A");
+        let track_b = sample_track("Song B");
+
+        app.set_playing(track_a.clone());
+        app.playback_generation = 42;
+        app.resolve_generation = 999;
+        app.current_position = Some(Duration::from_secs(5));
+
+        // Event for Track B should be rejected
+        let lyrics_b = Box::new(crate::lyrics::Lyrics::from_plain_text(
+            Some("Song B".into()),
+            Some("Artist".into()),
+            "Words for Song B",
+        ));
+        app.handle_lyrics_event(crate::lyrics::LyricsEvent::Success {
+            generation: 1,
+            track: track_b,
+            lyrics: lyrics_b,
+        });
+
+        assert_eq!(app.lyrics_state.status, crate::lyrics::LyricsStatus::Idle);
+        assert!(app.lyrics_state.lyrics.is_none());
+
+        // Event for Track A should be accepted and synced using playback_generation (42), not resolve_generation (999)
+        let lyrics_a = Box::new(crate::lyrics::Lyrics {
+            source: Some("test".into()),
+            sync_type: crate::lyrics::SyncType::Line,
+            title: Some("Song A".into()),
+            artist: Some("Artist".into()),
+            isrc: None,
+            lines: vec![crate::lyrics::LyricLine::new(
+                "Line",
+                Some(4000),
+                Some(8000),
+            )],
+            unavailable_reason: None,
+        });
+        app.handle_lyrics_event(crate::lyrics::LyricsEvent::Success {
+            generation: 1,
+            track: track_a,
+            lyrics: lyrics_a,
+        });
+
+        assert_eq!(
+            app.lyrics_state.status,
+            crate::lyrics::LyricsStatus::Available
+        );
+        assert!(app.lyrics_state.lyrics.is_some());
+        let sync_point = app.lyrics_synchronizer.current_sync_point();
+        assert_eq!(sync_point.generation, 42);
+        assert_eq!(sync_point.position_ms, 5000);
+        assert_eq!(sync_point.active_line_index, Some(0));
+    }
+
+    #[test]
+    fn test_handle_lyrics_event_rejects_mismatched_track_and_uses_playback_generation() {
+        let mut app = App::new();
+        let track_a = sample_track("Song A");
+        let track_b = sample_track("Song B");
+
+        app.set_playing(track_a.clone());
+        app.playback_generation = 42;
+        app.resolve_generation = 999;
+        app.current_position = Some(Duration::from_secs(5));
+
+        // Event for Track B should be rejected
+        let lyrics_b = Box::new(crate::lyrics::Lyrics::from_plain_text(
+            Some("Song B".into()),
+            Some("Artist".into()),
+            "Words for Song B",
+        ));
+        app.handle_lyrics_event(crate::lyrics::LyricsEvent::Success {
+            generation: 1,
+            track: track_b,
+            lyrics: lyrics_b,
+        });
+
+        assert_eq!(app.lyrics_state.status, crate::lyrics::LyricsStatus::Idle);
+        assert!(app.lyrics_state.lyrics.is_none());
+
+        // Event for Track A should be accepted and synced using playback_generation (42), not resolve_generation (999)
+        let lyrics_a = Box::new(crate::lyrics::Lyrics {
+            source: Some("test".into()),
+            sync_type: crate::lyrics::SyncType::Line,
+            title: Some("Song A".into()),
+            artist: Some("Artist".into()),
+            isrc: None,
+            lines: vec![crate::lyrics::LyricLine::new(
+                "Line",
+                Some(4000),
+                Some(8000),
+            )],
+            unavailable_reason: None,
+        });
+        app.handle_lyrics_event(crate::lyrics::LyricsEvent::Success {
+            generation: 1,
+            track: track_a,
+            lyrics: lyrics_a,
+        });
+
+        assert_eq!(
+            app.lyrics_state.status,
+            crate::lyrics::LyricsStatus::Available
+        );
+        assert!(app.lyrics_state.lyrics.is_some());
+        let sync_point = app.lyrics_synchronizer.current_sync_point();
+        assert_eq!(sync_point.generation, 42);
+        assert_eq!(sync_point.position_ms, 5000);
+        assert_eq!(sync_point.active_line_index, Some(0));
     }
 }
