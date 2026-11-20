@@ -1,0 +1,38 @@
+
+# Windows binaries and generated libraries
+/mpv/*.dll
+/mpv/*.dll.a
+/mpv/*.exe
+/mpv/lib/*.lib
+/mpv/lib/*.dll.a
+/mpv/lib/*.exp
+/mpv/lib/*.def
+/mpv/lib/*.obj
+/mpv/lib/*.pdb
+/mpv/lib/*.ilk
+
+# Linux shared libraries
+/mpv/*.so
+/mpv/*.so.*
+/mpv/lib/*.so
+/mpv/lib/*.so.*
+
+# macOS shared libraries
+/mpv/*.dylib
+/mpv/lib/*.dylib
+
+# Unix static/import libraries
+/mpv/lib/*.a
+
+# Temporary build artifacts
+/mpv/*.o
+/mpv/*.obj
+/mpv/*.pdb
+/mpv/*.ilk
+/mpv/*.exe
+/mpv/*.dll
+/mpv/*.so
+/mpv/*.dylib
+
+# Test executable
+/mpv/test_mpv
