@@ -21,12 +21,17 @@ typedef struct ansimuz_mpv ansimuz_mpv;
  * Normalized playback event types.
  *
  * Event contract:
- *   FILE_LOADED      Stream opened and container headers parsed successfully
- *   PLAYBACK_RESTART Audio rendering started or resumed after seek or pause
- *   PROPERTY_CHANGE  Observed property updated (duration, pause, volume)
- *   END_FILE         Track playback finished, stopped, replaced, or failed
- *   ERROR            Engine or command failure outside track lifecycle
- *   NONE             No event available within drain batch limit
+ *   FILE_LOADED      Stream opened and container headers parsed successfully.
+ *   PLAYBACK_RESTART Audio rendering started or resumed after seek or pause.
+ *   PROPERTY_CHANGE  Observed property updated (duration, pause, volume).
+ *   END_FILE         Track lifecycle ended. Inspect end_reason and error_code
+ *                    to determine the cause. Track loading failures (such as
+ *                    file not found or demux failure) arrive through END_FILE
+ *                    with end_reason set to ANSIMUZ_MPV_END_ERROR. Normal
+ *                    completion has end_reason set to ANSIMUZ_MPV_END_EOF.
+ *   ERROR            Asynchronous engine or command dispatch failure outside
+ *                    normal track lifecycle. Carries native libmpv error code.
+ *   NONE             No event available within drain batch limit.
  */
 typedef enum ansimuz_mpv_event_type {
     ANSIMUZ_MPV_EVENT_NONE = 0,
@@ -46,7 +51,17 @@ typedef enum ansimuz_mpv_property {
     ANSIMUZ_MPV_PROPERTY_VOLUME
 } ansimuz_mpv_property;
 
-/* Reasons why media playback stopped or ended */
+/*
+ * Reasons why media playback stopped or ended.
+ * Used with ANSIMUZ_MPV_EVENT_END_FILE to distinguish normal track completion
+ * from playback cancellation or loading failure.
+ *
+ * EOF       Track played to completion normally.
+ * STOP      Playback halted explicitly via stop or loadfile replacement.
+ * QUIT      Playback terminated due to player shutdown.
+ * ERROR     Track failed to load or demux. Check error_code for detail.
+ * REDIRECT  Playlist redirected to another entry.
+ */
 typedef enum ansimuz_mpv_end_reason {
     ANSIMUZ_MPV_END_UNKNOWN = 0,
     ANSIMUZ_MPV_END_EOF,

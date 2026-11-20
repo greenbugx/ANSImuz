@@ -6,16 +6,34 @@
 #include <string.h>
 
 /*
+ * Maximum number of concurrent in-flight track loads tracked in ring buffer.
+ * Holds load records during asynchronous transitions and track replacements.
+ */
+#define ANSIMUZ_MPV_MAX_TRACKED_LOADS 16
+
+/*
+ * Association between a native mpv playlist entry and an application load ID.
+ */
+typedef struct track_load_entry {
+    int64_t playlist_entry_id;
+    uint64_t load_id;
+    int is_loaded;
+} track_load_entry;
+
+/*
  * Internal handle holder. Keeping mpv_handle internal insulates callers
  * from libmpv header drift and keeps the C ABI boundary clean.
- * Tracks monotonically increasing load identifiers to correlate async
- * events with specific track playback requests.
+ * Correlates native mpv playlist entry identifiers with monotonic application
+ * load IDs to ensure accurate event attribution across track replacements.
  */
 struct ansimuz_mpv {
     mpv_handle *handle;
     uint64_t next_load_id;
     uint64_t active_load_id;
-    uint64_t pending_load_id;
+
+    track_load_entry load_queue[ANSIMUZ_MPV_MAX_TRACKED_LOADS];
+    int load_queue_head;
+    int load_queue_count;
 };
 
 /*
@@ -93,6 +111,86 @@ static int observe_properties(mpv_handle *handle) {
         handle, 4, "volume", MPV_FORMAT_DOUBLE
     );
     if (status < 0) return status;
+
+    return 0;
+}
+
+/*
+ * Enqueues a pending load request into the internal tracking ring buffer.
+ * Drops the oldest entry if capacity is exhausted under rapid replacement.
+ */
+static void enqueue_load(ansimuz_mpv *player, uint64_t load_id) {
+    if (player->load_queue_count >= ANSIMUZ_MPV_MAX_TRACKED_LOADS) {
+        player->load_queue_head =
+            (player->load_queue_head + 1) % ANSIMUZ_MPV_MAX_TRACKED_LOADS;
+        player->load_queue_count--;
+    }
+
+    int idx = (player->load_queue_head + player->load_queue_count) %
+              ANSIMUZ_MPV_MAX_TRACKED_LOADS;
+    player->load_queue[idx].playlist_entry_id = -1;
+    player->load_queue[idx].load_id = load_id;
+    player->load_queue[idx].is_loaded = 0;
+    player->load_queue_count++;
+}
+
+/*
+ * Associates a native mpv playlist entry ID with the earliest unbound load record.
+ */
+static void bind_playlist_entry(ansimuz_mpv *player, int64_t playlist_entry_id) {
+    for (int i = 0; i < player->load_queue_count; i++) {
+        int idx = (player->load_queue_head + i) % ANSIMUZ_MPV_MAX_TRACKED_LOADS;
+        if (player->load_queue[idx].playlist_entry_id == -1) {
+            player->load_queue[idx].playlist_entry_id = playlist_entry_id;
+            break;
+        }
+    }
+}
+
+/*
+ * Marks the active entry as loaded and returns its correlated load ID.
+ */
+static uint64_t mark_file_loaded(ansimuz_mpv *player) {
+    for (int i = 0; i < player->load_queue_count; i++) {
+        int idx = (player->load_queue_head + i) % ANSIMUZ_MPV_MAX_TRACKED_LOADS;
+        if (player->load_queue[idx].playlist_entry_id != -1 &&
+            !player->load_queue[idx].is_loaded) {
+            player->load_queue[idx].is_loaded = 1;
+            return player->load_queue[idx].load_id;
+        }
+    }
+
+    if (player->load_queue_count > 0) {
+        int idx = (player->load_queue_head + player->load_queue_count - 1) %
+                  ANSIMUZ_MPV_MAX_TRACKED_LOADS;
+        player->load_queue[idx].is_loaded = 1;
+        return player->load_queue[idx].load_id;
+    }
+
+    return player->next_load_id;
+}
+
+/*
+ * Removes a finished or failed track by its native playlist entry identifier.
+ * Returns the correlated load identifier, or 0 if no match was found.
+ */
+static uint64_t remove_load_entry(ansimuz_mpv *player, int64_t playlist_entry_id) {
+    for (int i = 0; i < player->load_queue_count; i++) {
+        int idx = (player->load_queue_head + i) % ANSIMUZ_MPV_MAX_TRACKED_LOADS;
+        if (player->load_queue[idx].playlist_entry_id == playlist_entry_id) {
+            uint64_t matched_id = player->load_queue[idx].load_id;
+
+            for (int j = i; j < player->load_queue_count - 1; j++) {
+                int curr = (player->load_queue_head + j) %
+                           ANSIMUZ_MPV_MAX_TRACKED_LOADS;
+                int next = (player->load_queue_head + j + 1) %
+                           ANSIMUZ_MPV_MAX_TRACKED_LOADS;
+                player->load_queue[curr] = player->load_queue[next];
+            }
+            player->load_queue_count--;
+            return matched_id;
+        }
+    }
 
     return 0;
 }
@@ -234,7 +332,7 @@ void ansimuz_mpv_destroy(ansimuz_mpv *player) {
  * Loads an audio file or stream URL by issuing the loadfile command.
  * Passes replace mode to stop current playback and swap the active track
  * without creating an mpv internal playlist queue.
- * Increments the monotonic load counter on successful command dispatch.
+ * Increments the monotonic load counter and enqueues a pending tracking record.
  */
 int ansimuz_mpv_loadfile(ansimuz_mpv *player, const char *path) {
     if (!player || !player->handle || !path || path[0] == '\0') {
@@ -251,7 +349,7 @@ int ansimuz_mpv_loadfile(ansimuz_mpv *player, const char *path) {
     int status = mpv_command(player->handle, args);
     if (status >= 0) {
         player->next_load_id++;
-        player->pending_load_id = player->next_load_id;
+        enqueue_load(player, player->next_load_id);
     }
 
     return status;
@@ -265,7 +363,7 @@ uint64_t ansimuz_mpv_get_last_load_id(const ansimuz_mpv *player) {
     if (!player) {
         return 0;
     }
-    return player->pending_load_id;
+    return player->next_load_id;
 }
 
 /*
@@ -414,8 +512,8 @@ static ansimuz_mpv_end_reason map_end_reason(mpv_end_file_reason reason) {
  *
  * Discards unexposed internal notifications until a relevant event is found
  * or the drain limit of ANSIMUZ_MPV_MAX_DRAIN is reached.
- * Attaches the appropriate load sequence identifier to each event so stale
- * notifications from displaced tracks are not misattributed.
+ * Correlates events with native playlist entry IDs to guarantee that late
+ * notifications from displaced tracks are never misattributed to new requests.
  */
 int ansimuz_mpv_poll_event(
     ansimuz_mpv *player,
@@ -436,29 +534,61 @@ int ansimuz_mpv_poll_event(
             return 0;
         }
 
-        /* Surface native asynchronous errors outside normal track completion */
+        /*
+         * Surface native asynchronous command or engine errors.
+         * Track loading and demuxer failures do not arrive here.
+         * They are delivered as ANSIMUZ_MPV_EVENT_END_FILE with
+         * end_reason set to ANSIMUZ_MPV_END_ERROR.
+         */
         if (event->error < 0 && event->event_id != MPV_EVENT_END_FILE) {
             out_event->type = ANSIMUZ_MPV_EVENT_ERROR;
             out_event->error_code = event->error;
             out_event->load_id = player->active_load_id ?
-                player->active_load_id : player->pending_load_id;
+                player->active_load_id : player->next_load_id;
             return 1;
         }
 
         switch (event->event_id) {
-            case MPV_EVENT_FILE_LOADED:
-                player->active_load_id = player->pending_load_id;
+            case MPV_EVENT_START_FILE: {
+                mpv_event_start_file *start =
+                    (mpv_event_start_file *)event->data;
+
+                if (start) {
+                    bind_playlist_entry(player, start->playlist_entry_id);
+                }
+
+                /* START_FILE is internal bookkeeping so continue draining */
+                continue;
+            }
+
+            case MPV_EVENT_FILE_LOADED: {
+                uint64_t loaded_id = mark_file_loaded(player);
+                player->active_load_id = loaded_id;
                 out_event->type = ANSIMUZ_MPV_EVENT_FILE_LOADED;
                 out_event->load_id = player->active_load_id;
                 return 1;
+            }
 
             case MPV_EVENT_PLAYBACK_RESTART:
+                /* Only attribute restart events if a track is actively loaded */
+                if (player->active_load_id == 0) {
+                    continue;
+                }
+
                 out_event->type = ANSIMUZ_MPV_EVENT_PLAYBACK_RESTART;
-                out_event->load_id = player->active_load_id ?
-                    player->active_load_id : player->pending_load_id;
+                out_event->load_id = player->active_load_id;
                 return 1;
 
             case MPV_EVENT_PROPERTY_CHANGE: {
+                /*
+                 * Discard transient property updates if no track is active.
+                 * Prevents unpolled notifications from displaced tracks from
+                 * leaking into new track lifecycle and breaking lyrics sync.
+                 */
+                if (player->active_load_id == 0) {
+                    continue;
+                }
+
                 mpv_event_property *property =
                     (mpv_event_property *)event->data;
 
@@ -497,8 +627,7 @@ int ansimuz_mpv_poll_event(
 
                 out_event->type = ANSIMUZ_MPV_EVENT_PROPERTY_CHANGE;
                 out_event->property = id;
-                out_event->load_id = player->active_load_id ?
-                    player->active_load_id : player->pending_load_id;
+                out_event->load_id = player->active_load_id;
                 return 1;
             }
 
@@ -516,16 +645,35 @@ int ansimuz_mpv_poll_event(
                 }
 
                 /*
-                 * Attribute the end event to the active track if currently playing.
-                 * When a track fails before loading completes or is replaced upfront,
-                 * attribute the event to the pending load counter instead.
+                 * Correlate track completion with its native playlist entry ID.
+                 * Ensures displacement end events from previous tracks match
+                 * their original load sequence ID even after a new loadfile call.
                  */
-                if (player->active_load_id != 0) {
-                    out_event->load_id = player->active_load_id;
+                uint64_t matched_id = 0;
+                if (end && end->playlist_entry_id > 0) {
+                    matched_id = remove_load_entry(player, end->playlist_entry_id);
+                }
+
+                if (matched_id == 0) {
+                    /* Fallback when playlist entry ID was not provided */
+                    if (player->active_load_id != 0) {
+                        matched_id = player->active_load_id;
+                    } else if (player->load_queue_count > 0) {
+                        int idx = player->load_queue_head;
+                        matched_id = player->load_queue[idx].load_id;
+                        player->load_queue_head =
+                            (player->load_queue_head + 1) %
+                            ANSIMUZ_MPV_MAX_TRACKED_LOADS;
+                        player->load_queue_count--;
+                    } else {
+                        matched_id = player->next_load_id;
+                    }
+                }
+
+                out_event->load_id = matched_id;
+
+                if (player->active_load_id == matched_id) {
                     player->active_load_id = 0;
-                } else {
-                    out_event->load_id = player->pending_load_id;
-                    player->pending_load_id = 0;
                 }
 
                 return 1;

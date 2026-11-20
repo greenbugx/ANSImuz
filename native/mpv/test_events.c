@@ -125,7 +125,49 @@ static const char *end_reason_name(ansimuz_mpv_end_reason reason) {
 }
 
 /*
- * Smoke test verifying native event polling, load attribution, and bounded queue draining.
+ * Drains and logs pending events for a given duration in milliseconds.
+ */
+static void drain_events_for(ansimuz_mpv *player, int duration_ms) {
+    for (int elapsed = 0; elapsed < duration_ms; elapsed += 50) {
+        ansimuz_mpv_event event;
+        int result = ansimuz_mpv_poll_event(player, &event);
+
+        if (result < 0) {
+            fprintf(stderr, "Event polling failed: %s\n",
+                    ansimuz_mpv_error_string(result));
+            break;
+        }
+
+        if (result == 1) {
+            printf("[EVENT] %s | load_id: %llu",
+                   event_name(event.type),
+                   (unsigned long long)event.load_id);
+
+            if (event.type == ANSIMUZ_MPV_EVENT_PROPERTY_CHANGE) {
+                printf(" | Property: %s (%d) | Value: %.3f",
+                       property_name(event.property), event.property, event.value);
+            }
+
+            if (event.type == ANSIMUZ_MPV_EVENT_END_FILE) {
+                printf(" | Reason: %s (%d) | Error: %d",
+                       end_reason_name(event.end_reason), event.end_reason, event.error_code);
+            }
+
+            if (event.type == ANSIMUZ_MPV_EVENT_ERROR) {
+                printf(" | Native Error: %s (%d)",
+                       ansimuz_mpv_error_string(event.error_code), event.error_code);
+            }
+
+            printf("\n");
+        }
+
+        wait_ms(50);
+    }
+}
+
+/*
+ * Integration test exercising track lifecycle, load ID attribution across
+ * replacement, on demand position polling, and error handling.
  */
 int main(int argc, char **argv) {
     ansimuz_mpv *player = NULL;
@@ -157,8 +199,9 @@ int main(int argc, char **argv) {
         }
     }
 
+    /* Load initial track (expected load_id = 1) */
+    printf("\n--- Phase 1: Initial Track Load ---\n");
     status = ansimuz_mpv_loadfile(player, target_path);
-
     if (status < 0) {
         fprintf(stderr, "Load command failed: %s\n",
                 ansimuz_mpv_error_string(status));
@@ -166,71 +209,46 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    uint64_t dispatched_id = ansimuz_mpv_get_last_load_id(player);
-    printf("[OK] Load dispatched for: %s (load_id: %llu)\n",
-           target_path, (unsigned long long)dispatched_id);
-    printf("[INFO] Listening for native events (bounded drain limit: %d)...\n",
-           ANSIMUZ_MPV_MAX_DRAIN);
+    printf("[OK] Dispatched Track 1 (last_load_id: %llu)\n",
+           (unsigned long long)ansimuz_mpv_get_last_load_id(player));
+    drain_events_for(player, 1000);
 
-    /*
-     * Poll for up to 3 seconds to observe initial load and playback events.
-     * Demonstrates non blocking event polling and proper load ID attribution.
-     */
-    for (int elapsed = 0; elapsed < 3000; elapsed += 50) {
-        ansimuz_mpv_event event;
-
-        int result = ansimuz_mpv_poll_event(player, &event);
-
-        if (result < 0) {
-            fprintf(stderr, "Event polling failed: %s\n",
-                    ansimuz_mpv_error_string(result));
-            break;
-        }
-
-        if (result == 1) {
-            printf("[EVENT] %s | load_id: %llu",
-                   event_name(event.type),
-                   (unsigned long long)event.load_id);
-
-            if (event.type == ANSIMUZ_MPV_EVENT_PROPERTY_CHANGE) {
-                printf(" | Property: %s (%d) | Value: %.3f",
-                       property_name(event.property), event.property, event.value);
-            }
-
-            if (event.type == ANSIMUZ_MPV_EVENT_END_FILE) {
-                printf(" | Reason: %s (%d) | Error: %d",
-                       end_reason_name(event.end_reason), event.end_reason, event.error_code);
-            }
-
-            if (event.type == ANSIMUZ_MPV_EVENT_ERROR) {
-                printf(" | Native Error: %s (%d)",
-                       ansimuz_mpv_error_string(event.error_code), event.error_code);
-            }
-
-            printf("\n");
-
-            if (event.type == ANSIMUZ_MPV_EVENT_END_FILE) {
-                break;
-            }
-        }
-
-        /*
-         * Query position on demand to demonstrate how caller avoids queue saturation.
-         * Position updates are polled on the caller tick rather than through mpv events.
-         */
-        if (elapsed > 0 && elapsed % 1000 == 0) {
-            double pos = 0.0;
-            if (ansimuz_mpv_get_time_pos(player, &pos) == 0) {
-                printf("[POLL] Current position on demand: %.2f seconds\n", pos);
-            }
-        }
-
-        wait_ms(50);
+    /* Verify on demand position query */
+    double pos = 0.0;
+    if (ansimuz_mpv_get_time_pos(player, &pos) == 0) {
+        printf("[POLL] On demand position: %.2f seconds\n", pos);
     }
 
-    ansimuz_mpv_destroy(player);
+    /* Rapid track replacement (expected load_id = 2) */
+    printf("\n--- Phase 2: Track Replacement (load_id 1 replaced by 2) ---\n");
+    status = ansimuz_mpv_loadfile(player, target_path);
+    if (status < 0) {
+        fprintf(stderr, "Load command failed: %s\n",
+                ansimuz_mpv_error_string(status));
+        ansimuz_mpv_destroy(player);
+        return 1;
+    }
 
-    printf("[OK] Backend destroyed cleanly\n");
+    printf("[OK] Dispatched Track 2 (last_load_id: %llu)\n",
+           (unsigned long long)ansimuz_mpv_get_last_load_id(player));
+    drain_events_for(player, 1000);
+
+    /* Replace with non existent track to verify error contract (expected load_id = 3) */
+    printf("\n--- Phase 3: Failed Track Load (load_id 2 replaced by 3 with error) ---\n");
+    status = ansimuz_mpv_loadfile(player, "nonexistent_file_fixture.mp3");
+    if (status < 0) {
+        fprintf(stderr, "Load command failed: %s\n",
+                ansimuz_mpv_error_string(status));
+        ansimuz_mpv_destroy(player);
+        return 1;
+    }
+
+    printf("[OK] Dispatched Track 3 (last_load_id: %llu)\n",
+           (unsigned long long)ansimuz_mpv_get_last_load_id(player));
+    drain_events_for(player, 1000);
+
+    ansimuz_mpv_destroy(player);
+    printf("\n[OK] Backend destroyed cleanly\n");
 
     return 0;
 }
