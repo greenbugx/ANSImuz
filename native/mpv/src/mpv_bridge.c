@@ -8,9 +8,14 @@
 /*
  * Internal handle holder. Keeping mpv_handle internal insulates callers
  * from libmpv header drift and keeps the C ABI boundary clean.
+ * Tracks monotonically increasing load identifiers to correlate async
+ * events with specific track playback requests.
  */
 struct ansimuz_mpv {
     mpv_handle *handle;
+    uint64_t next_load_id;
+    uint64_t active_load_id;
+    uint64_t pending_load_id;
 };
 
 /*
@@ -64,14 +69,15 @@ static int configure_option(
 /*
  * Registers property observation hooks on the initialized mpv instance.
  * Uses discrete integer reply_userdata IDs to avoid string lookups in poll loop.
+ *
+ * High frequency properties like time-pos are intentionally omitted from
+ * observation. Position changes occur continuously during playback and can
+ * saturate libmpv internal event ring buffer if the client event loop is busy
+ * rendering or processing input. Callers query playback position on demand
+ * via ansimuz_mpv_get_time_pos instead.
  */
 static int observe_properties(mpv_handle *handle) {
     int status;
-
-    status = mpv_observe_property(
-        handle, 1, "time-pos", MPV_FORMAT_DOUBLE
-    );
-    if (status < 0) return status;
 
     status = mpv_observe_property(
         handle, 2, "duration", MPV_FORMAT_DOUBLE
@@ -228,6 +234,7 @@ void ansimuz_mpv_destroy(ansimuz_mpv *player) {
  * Loads an audio file or stream URL by issuing the loadfile command.
  * Passes replace mode to stop current playback and swap the active track
  * without creating an mpv internal playlist queue.
+ * Increments the monotonic load counter on successful command dispatch.
  */
 int ansimuz_mpv_loadfile(ansimuz_mpv *player, const char *path) {
     if (!player || !player->handle || !path || path[0] == '\0') {
@@ -241,7 +248,24 @@ int ansimuz_mpv_loadfile(ansimuz_mpv *player, const char *path) {
         NULL
     };
 
-    return mpv_command(player->handle, args);
+    int status = mpv_command(player->handle, args);
+    if (status >= 0) {
+        player->next_load_id++;
+        player->pending_load_id = player->next_load_id;
+    }
+
+    return status;
+}
+
+/*
+ * Returns the sequence identifier of the most recently initiated load.
+ * Returns 0 if no track has been loaded.
+ */
+uint64_t ansimuz_mpv_get_last_load_id(const ansimuz_mpv *player) {
+    if (!player) {
+        return 0;
+    }
+    return player->pending_load_id;
 }
 
 /*
@@ -386,9 +410,12 @@ static ansimuz_mpv_end_reason map_end_reason(mpv_end_file_reason reason) {
 }
 
 /*
- * Polls the native mpv event queue non blocking.
+ * Polls the native mpv event queue without blocking.
+ *
  * Discards unexposed internal notifications until a relevant event is found
- * or the event ring buffer is completely drained.
+ * or the drain limit of ANSIMUZ_MPV_MAX_DRAIN is reached.
+ * Attaches the appropriate load sequence identifier to each event so stale
+ * notifications from displaced tracks are not misattributed.
  */
 int ansimuz_mpv_poll_event(
     ansimuz_mpv *player,
@@ -400,7 +427,7 @@ int ansimuz_mpv_poll_event(
 
     memset(out_event, 0, sizeof(*out_event));
 
-    for (;;) {
+    for (int drain_count = 0; drain_count < ANSIMUZ_MPV_MAX_DRAIN; drain_count++) {
         /* Zero timeout ensures this never blocks the calling thread */
         mpv_event *event = mpv_wait_event(player->handle, 0);
 
@@ -409,13 +436,26 @@ int ansimuz_mpv_poll_event(
             return 0;
         }
 
+        /* Surface native asynchronous errors outside normal track completion */
+        if (event->error < 0 && event->event_id != MPV_EVENT_END_FILE) {
+            out_event->type = ANSIMUZ_MPV_EVENT_ERROR;
+            out_event->error_code = event->error;
+            out_event->load_id = player->active_load_id ?
+                player->active_load_id : player->pending_load_id;
+            return 1;
+        }
+
         switch (event->event_id) {
             case MPV_EVENT_FILE_LOADED:
+                player->active_load_id = player->pending_load_id;
                 out_event->type = ANSIMUZ_MPV_EVENT_FILE_LOADED;
+                out_event->load_id = player->active_load_id;
                 return 1;
 
             case MPV_EVENT_PLAYBACK_RESTART:
                 out_event->type = ANSIMUZ_MPV_EVENT_PLAYBACK_RESTART;
+                out_event->load_id = player->active_load_id ?
+                    player->active_load_id : player->pending_load_id;
                 return 1;
 
             case MPV_EVENT_PROPERTY_CHANGE: {
@@ -446,8 +486,6 @@ int ansimuz_mpv_poll_event(
                     continue;
                 }
 
-                out_event->property = id;
-
                 if (property->format == MPV_FORMAT_DOUBLE && property->data) {
                     out_event->value = *(double *)property->data;
                 } else if (property->format == MPV_FORMAT_FLAG && property->data) {
@@ -458,6 +496,9 @@ int ansimuz_mpv_poll_event(
                 }
 
                 out_event->type = ANSIMUZ_MPV_EVENT_PROPERTY_CHANGE;
+                out_event->property = id;
+                out_event->load_id = player->active_load_id ?
+                    player->active_load_id : player->pending_load_id;
                 return 1;
             }
 
@@ -474,6 +515,19 @@ int ansimuz_mpv_poll_event(
                     out_event->error_code = end->error;
                 }
 
+                /*
+                 * Attribute the end event to the active track if currently playing.
+                 * When a track fails before loading completes or is replaced upfront,
+                 * attribute the event to the pending load counter instead.
+                 */
+                if (player->active_load_id != 0) {
+                    out_event->load_id = player->active_load_id;
+                    player->active_load_id = 0;
+                } else {
+                    out_event->load_id = player->pending_load_id;
+                    player->pending_load_id = 0;
+                }
+
                 return 1;
             }
 
@@ -482,4 +536,8 @@ int ansimuz_mpv_poll_event(
                 continue;
         }
     }
+
+    /* Drain limit reached without finding an exposed event */
+    out_event->type = ANSIMUZ_MPV_EVENT_NONE;
+    return 0;
 }

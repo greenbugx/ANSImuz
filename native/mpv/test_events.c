@@ -125,7 +125,7 @@ static const char *end_reason_name(ansimuz_mpv_end_reason reason) {
 }
 
 /*
- * Smoke test verifying native event polling and property change notifications.
+ * Smoke test verifying native event polling, load attribution, and bounded queue draining.
  */
 int main(int argc, char **argv) {
     ansimuz_mpv *player = NULL;
@@ -166,14 +166,17 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    printf("[OK] Load dispatched for: %s\n", target_path);
-    printf("[INFO] Listening for native events...\n");
+    uint64_t dispatched_id = ansimuz_mpv_get_last_load_id(player);
+    printf("[OK] Load dispatched for: %s (load_id: %llu)\n",
+           target_path, (unsigned long long)dispatched_id);
+    printf("[INFO] Listening for native events (bounded drain limit: %d)...\n",
+           ANSIMUZ_MPV_MAX_DRAIN);
 
     /*
-     * Poll for up to 15 seconds.
-     * This test intentionally does not block inside libmpv.
+     * Poll for up to 3 seconds to observe initial load and playback events.
+     * Demonstrates non blocking event polling and proper load ID attribution.
      */
-    for (int elapsed = 0; elapsed < 15000; elapsed += 50) {
+    for (int elapsed = 0; elapsed < 3000; elapsed += 50) {
         ansimuz_mpv_event event;
 
         int result = ansimuz_mpv_poll_event(player, &event);
@@ -185,7 +188,9 @@ int main(int argc, char **argv) {
         }
 
         if (result == 1) {
-            printf("[EVENT] %s", event_name(event.type));
+            printf("[EVENT] %s | load_id: %llu",
+                   event_name(event.type),
+                   (unsigned long long)event.load_id);
 
             if (event.type == ANSIMUZ_MPV_EVENT_PROPERTY_CHANGE) {
                 printf(" | Property: %s (%d) | Value: %.3f",
@@ -197,10 +202,26 @@ int main(int argc, char **argv) {
                        end_reason_name(event.end_reason), event.end_reason, event.error_code);
             }
 
+            if (event.type == ANSIMUZ_MPV_EVENT_ERROR) {
+                printf(" | Native Error: %s (%d)",
+                       ansimuz_mpv_error_string(event.error_code), event.error_code);
+            }
+
             printf("\n");
 
             if (event.type == ANSIMUZ_MPV_EVENT_END_FILE) {
                 break;
+            }
+        }
+
+        /*
+         * Query position on demand to demonstrate how caller avoids queue saturation.
+         * Position updates are polled on the caller tick rather than through mpv events.
+         */
+        if (elapsed > 0 && elapsed % 1000 == 0) {
+            double pos = 0.0;
+            if (ansimuz_mpv_get_time_pos(player, &pos) == 0) {
+                printf("[POLL] Current position on demand: %.2f seconds\n", pos);
             }
         }
 
@@ -213,4 +234,3 @@ int main(int argc, char **argv) {
 
     return 0;
 }
-

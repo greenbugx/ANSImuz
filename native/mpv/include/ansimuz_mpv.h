@@ -6,12 +6,28 @@ extern "C" {
 #endif
 
 /*
+ * Maximum number of native events inspected per ansimuz_mpv_poll_event call.
+ * Prevents high volume native event bursts from starving the caller thread.
+ */
+#define ANSIMUZ_MPV_MAX_DRAIN 64
+
+/*
  * Opaque wrapper around an mpv client instance.
  * Exposes a minimal C ABI suitable for Rust FFI bindings.
  */
 typedef struct ansimuz_mpv ansimuz_mpv;
 
-/* Normalized ANSImuz event types */
+/*
+ * Normalized playback event types.
+ *
+ * Event contract:
+ *   FILE_LOADED      Stream opened and container headers parsed successfully
+ *   PLAYBACK_RESTART Audio rendering started or resumed after seek or pause
+ *   PROPERTY_CHANGE  Observed property updated (duration, pause, volume)
+ *   END_FILE         Track playback finished, stopped, replaced, or failed
+ *   ERROR            Engine or command failure outside track lifecycle
+ *   NONE             No event available within drain batch limit
+ */
 typedef enum ansimuz_mpv_event_type {
     ANSIMUZ_MPV_EVENT_NONE = 0,
     ANSIMUZ_MPV_EVENT_FILE_LOADED,
@@ -43,6 +59,9 @@ typedef enum ansimuz_mpv_end_reason {
 /* Normalized event payload passed across the C ABI */
 typedef struct ansimuz_mpv_event {
     ansimuz_mpv_event_type type;
+
+    /* Monotonically increasing load sequence identifier */
+    uint64_t load_id;
 
     /* Populated for PROPERTY_CHANGE */
     ansimuz_mpv_property property;
@@ -83,10 +102,17 @@ void ansimuz_mpv_destroy(ansimuz_mpv *player);
  *
  * Uses replace mode so any currently playing audio stream is halted and evicted.
  * Playback starts asynchronously on the core demuxer thread.
+ * Increments the internal monotonic load counter on successful dispatch.
  *
  * Returns 0 on command dispatch success or a negative mpv error code.
  */
 int ansimuz_mpv_loadfile(ansimuz_mpv *player, const char *path);
+
+/*
+ * Returns the sequence identifier of the most recently initiated load.
+ * Returns 0 if no track has been loaded.
+ */
+uint64_t ansimuz_mpv_get_last_load_id(const ansimuz_mpv *player);
 
 /*
  * Sets playback pause state.
@@ -155,8 +181,11 @@ const char *ansimuz_mpv_error_string(int status);
 /*
  * Retrieves the next pending event without blocking.
  *
- * Returns 1 if an event was retrieved, 0 if queue is empty,
- * or negative mpv error code on invalid parameters.
+ * Drains up to ANSIMUZ_MPV_MAX_DRAIN native events per call to avoid
+ * starving the caller thread when the internal queue is busy.
+ *
+ * Returns 1 if an event was retrieved, 0 if no event was available or the
+ * drain limit was reached, or a negative mpv error code on invalid parameters.
  *
  * The caller owns the output structure and can reuse it after each call.
  */
