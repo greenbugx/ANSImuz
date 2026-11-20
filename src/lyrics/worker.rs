@@ -304,6 +304,10 @@ fn run_lyrics_worker<F>(
 {
     let mut current_generation: u64 = 0;
     let mut last_track: Option<Track> = None;
+    // True when the most-recent completed fetch for `last_track` returned an
+    // error.  Allows the deduplication guard to pass a retry through for the
+    // same track without requiring `force = true`.
+    let mut last_track_failed: bool = false;
     let mut current_cancel_token: Option<Arc<AtomicBool>> = None;
 
     let task_queue: FetchQueue = Arc::new((
@@ -373,13 +377,19 @@ fn run_lyrics_worker<F>(
 
         match cmd {
             LyricsCommand::Fetch { track, force } => {
-                // Prevent duplicate requests for the same track
+                // Prevent duplicate requests for the same track, unless the
+                // previous attempt for that track ended in a transient failure
+                // (in which case a retry must be allowed through).
                 if !force
+                    && !last_track_failed
                     && let Some(ref last) = last_track
                     && last.same_identity(&track)
                 {
                     continue;
                 }
+
+                // A new fetch supersedes any prior failure for this track.
+                last_track_failed = false;
 
                 // If forcing refresh, invalidate track from cache first.
                 // Otherwise check cache for instant loading.
@@ -452,6 +462,7 @@ fn run_lyrics_worker<F>(
                 // Return success, unavailable (NotFound), and error states
                 match result {
                     Ok(Some(lyrics)) => {
+                        last_track_failed = false;
                         crate::lyrics::cache::store_lyrics_in_cache(&track, &lyrics);
                         let _ = event_tx.send(LyricsEvent::Success {
                             generation,
@@ -460,9 +471,14 @@ fn run_lyrics_worker<F>(
                         });
                     }
                     Ok(None) => {
+                        last_track_failed = false;
                         let _ = event_tx.send(LyricsEvent::NotFound { generation, track });
                     }
                     Err(err) => {
+                        // Mark this track as failed so the next `fetch` call
+                        // for the same track is treated as a retry rather than
+                        // a duplicate.
+                        last_track_failed = true;
                         let _ = event_tx.send(LyricsEvent::Failed {
                             generation,
                             track,
@@ -476,6 +492,7 @@ fn run_lyrics_worker<F>(
                 current_generation = current_generation.wrapping_add(1);
                 active_generation.store(current_generation, Ordering::SeqCst);
                 last_track = None;
+                last_track_failed = false;
                 cancel_active_and_pending(&task_queue, &mut current_cancel_token);
                 let _ = event_tx.send(LyricsEvent::Cleared);
             }
@@ -502,6 +519,62 @@ fn run_lyrics_worker<F>(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn test_lyrics_worker_retry_allowed_after_failed_fetch() {
+        let (event_tx, event_rx) = channel();
+        let track = Track::new("RetryTrack_Failed_Test", "Artist");
+        crate::lyrics::cache::invalidate_track_in_cache(&track);
+
+        // Fetcher fails on the first call, succeeds on the second.
+        let call_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+        let worker = LyricsWorker::spawn_with_fetcher(event_tx, move |_t| {
+            let n = call_count_clone.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                Err(LyricsError::Network("transient failure".to_string()))
+            } else {
+                Ok(Some(Lyrics::from_plain_text(
+                    Some("RetryTrack".to_string()),
+                    Some("Artist".to_string()),
+                    "Lyrics on retry",
+                )))
+            }
+        })
+        .expect("spawn worker");
+
+        let mut state = LyricsState::new();
+
+        // First fetch — should trigger a network error.
+        worker.fetch(track.clone());
+        let ev = event_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        state.apply_event(ev); // Loading
+        let ev = event_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        state.apply_event(ev); // Failed
+        assert!(
+            matches!(state.status, LyricsStatus::Failed(_)),
+            "Expected Failed after first fetch, got {:?}",
+            state.status
+        );
+
+        // Second fetch for the same track — must NOT be deduplicated even
+        // though `last_track` still points to this track.
+        worker.fetch(track.clone());
+        let ev = event_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        state.apply_event(ev); // Loading
+        assert_eq!(
+            state.status,
+            LyricsStatus::Loading,
+            "Retry must trigger a new Loading event"
+        );
+        let ev = event_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        state.apply_event(ev); // Available
+        assert_eq!(
+            state.status,
+            LyricsStatus::Available,
+            "Retry must succeed after transient failure"
+        );
+    }
 
     #[test]
     fn test_lyrics_worker_single_track_success() {
