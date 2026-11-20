@@ -35,3 +35,8 @@
 
 # Test executable
 /mpv/test_mpv
+/mpv/test_bridge
+/mpv/test_playback
+
+# audio
+*mp3
