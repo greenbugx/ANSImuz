@@ -8,8 +8,8 @@ export default function Features() {
         <SectionHeader
           index="01"
           label="Features"
-          title="Built for the keyboard."
-          intro="Search, queue, lyrics, and artwork in one terminal window. No browser, no mouse, no extra tabs."
+          title="The sound of Simplicity."
+          intro="Everything you need to enjoy music, right at your fingertips. Search, play, queue, and explore, all from one terminal."
         />
 
         <ul className="feature-grid">

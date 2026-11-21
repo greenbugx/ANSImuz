@@ -10,13 +10,12 @@ export default function Footer() {
           <div className="footer-brand">
             <a className="brand" href="#top" aria-label="ANSImuz home">
               <span className="brand-mark">
-                <img src="/logo.png" alt="" width="30" height="30" />
+                <img src="/logo.webp" alt="" width="30" height="30" />
               </span>
               <span className="brand-name">ANSImuz</span>
             </a>
             <p>
-              A terminal music player with 8-bit ANSI vibes. Built with Rust, Ratatui, and
-              a keyboard-first mindset.
+              A terminal music player with 8-bit ANSI vibes. Built in Rust & Python
             </p>
           </div>
 
@@ -84,9 +83,8 @@ export default function Footer() {
         </pre>
 
         <div className="footer-bottom">
-          <p>© {year} ANSImuz contributors</p>
+          <p>© {year} ANSImuz</p>
           <div className="footer-bottom-links">
-            <span>MIT licensed</span>
             <a className="text-link" href="#top">
               Back to top <span aria-hidden="true">↑</span>
             </a>

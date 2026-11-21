@@ -1,3 +1,5 @@
+import type { ReactNode } from 'react';
+
 export const VERSION = '0.1.3';
 
 export const REPO = 'https://github.com/greenbugx/ANSImuz';
@@ -28,7 +30,7 @@ export const SECTION_IDS = SECTIONS.map((section) => section.id);
 
 export type Feature = {
   title: string;
-  description: string;
+  description: ReactNode;
 };
 
 export const FEATURES: Feature[] = [
@@ -43,11 +45,11 @@ export const FEATURES: Feature[] = [
   },
   {
     title: 'ANSI album art',
-    description: 'Covers are drawn in adaptive block art, right inside the terminal.',
+    description: 'Covers are drawn in adaptive block art or get Ultra High Quality cover arts right inside the terminal.',
   },
   {
     title: 'Queue control',
-    description: 'Add, remove, and reorder tracks with a few keys. No mouse required.',
+    description: 'Add, remove, and reorder tracks with a few keys.',
   },
   {
     title: 'Session history',
@@ -63,7 +65,11 @@ export const FEATURES: Feature[] = [
   },
   {
     title: 'Command palette',
-    description: 'Press colon to reach every command and setting from one place.',
+    description: (
+      <>
+        Press <kbd>:</kbd> to reach every command and setting from one place.
+      </>
+    ),
   },
   {
     title: 'Offline cache',
@@ -93,7 +99,7 @@ export type Platform = {
   meta: string;
   commandLabel?: string;
   commands?: string[];
-  note?: string;
+  note?: ReactNode;
   action: string;
   href: string;
   primary?: boolean;
@@ -109,6 +115,15 @@ export const PLATFORMS: Platform[] = [
     meta: 'COPR repository',
     commandLabel: 'install',
     commands: ['sudo dnf copr enable greenbugx/ansimuz', 'sudo dnf install ansimuz'],
+    note: (
+      <>
+        Or download the prebuilt binary from{' '}
+        <a href={LINKS.releases} target="_blank" rel="noreferrer">
+          GitHub Releases
+        </a>
+        .
+      </>
+    ),
     action: 'Open COPR',
     href: LINKS.copr,
   },
@@ -121,6 +136,15 @@ export const PLATFORMS: Platform[] = [
       'cd ANSImuz/packaging/arch',
       'makepkg -si',
     ],
+    note: (
+      <>
+        Or download the prebuilt binary from{' '}
+        <a href={LINKS.releases} target="_blank" rel="noreferrer">
+          GitHub Releases
+        </a>
+        .
+      </>
+    ),
     action: 'View packaging',
     href: `${REPO}/tree/main/packaging/arch`,
   },
@@ -152,7 +176,7 @@ export const PLATFORMS: Platform[] = [
 
 export type Faq = {
   question: string;
-  answer: string;
+  answer: ReactNode;
 };
 
 export const FAQS: Faq[] = [
@@ -178,8 +202,13 @@ export const FAQS: Faq[] = [
   },
   {
     question: 'Where does it store caches?',
-    answer:
-      'Under $XDG_CACHE_HOME/ansimuz on Linux or %LOCALAPPDATA%\\ansimuz on Windows. Audio, artwork, and lyrics are kept there. You can clear them from Settings.',
+    answer: (
+      <>
+        Under <kbd>$XDG_CACHE_HOME/ansimuz</kbd> on Linux or{' '}
+        <kbd>%LOCALAPPDATA%\ansimuz</kbd> on Windows. Audio, artwork, and lyrics
+        are kept there. You can clear them from Settings.
+      </>
+    ),
   },
   {
     question: 'Does it run on Windows?',

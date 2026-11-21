@@ -1,14 +1,59 @@
+import { useEffect, useRef } from 'react';
 import { CONTROLS, LINKS } from '../content';
+import { getAssetBlob } from '../lib/assetCache';
 import SectionHeader from './SectionHeader';
 
 export default function Docs() {
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    let isIntersecting = false;
+
+    const syncPlayback = () => {
+      if (document.hidden || !isIntersecting) {
+        if (!video.paused) {
+          video.pause();
+        }
+      } else {
+        if (video.paused) {
+          video.play().catch(() => {});
+        }
+      }
+    };
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          isIntersecting = entry.isIntersecting;
+          syncPlayback();
+        }
+      },
+      { threshold: 0.1 }
+    );
+
+    observer.observe(video);
+
+    const onVisibilityChange = () => {
+      syncPlayback();
+    };
+
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    return () => {
+      observer.disconnect();
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, []);
   return (
     <section className="section" id="docs">
       <div className="container">
         <SectionHeader
           index="02"
           label="Docs"
-          title="Everything is a keypress."
+          title="THE ANSImuz field guide."
           intro="A short guide to the controls, the command palette, and the lyrics view. The full reference is in the README."
         />
 
@@ -39,8 +84,8 @@ export default function Docs() {
                 <div>
                   <h3>Run it</h3>
                   <p>
-                    Type <code>ansimuz</code> in a terminal and press <kbd>?</kbd> for the
-                    full keymap.
+                    Type <code>ansimuz</code> in a terminal and press <kbd>:</kbd> for the
+                    command pallete
                   </p>
                 </div>
               </li>
@@ -76,23 +121,25 @@ export default function Docs() {
             <div className="docs-block">
               <div className="docs-block-head">
                 <span className="eyebrow">lyrics view</span>
-                <span className="docs-note">press L</span>
               </div>
-              <div className="lyric-demo">
-                <p className="lyric-line lyric-active">
-                  <span aria-hidden="true">▶</span> lead vocal, left aligned
-                </p>
-                <p className="lyric-line lyric-duet">
-                  <span aria-hidden="true">◀</span> duet vocal, right aligned
-                </p>
-                <p className="lyric-line lyric-bg">
-                  <span aria-hidden="true">▷</span> background vocal, dim
-                </p>
+              <div className="docs-video-frame">
+                <video
+                  ref={videoRef}
+                  src={getAssetBlob('/recordings/1.webm')}
+                  autoPlay
+                  loop
+                  muted
+                  playsInline
+                  preload="metadata"
+                  disablePictureInPicture
+                  onEnded={(e) => {
+                    e.currentTarget.currentTime = 0;
+                    e.currentTarget.play().catch(() => {});
+                  }}
+                >
+                  Your browser does not support the video tag.
+                </video>
               </div>
-              <p className="docs-caption">
-                Syllables highlight in time with the audio. Scroll with j and k, or press c
-                to recenter the active line.
-              </p>
             </div>
           </div>
         </div>
