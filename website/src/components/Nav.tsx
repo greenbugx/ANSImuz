@@ -21,7 +21,6 @@ export default function Nav() {
             <span className="brand-mark">
               <img src="/logo.png" alt="" width="30" height="30" />
             </span>
-            <span className="brand-name">ANSImuz</span>
           </a>
 
           <nav className="primary-nav" aria-label="Primary">

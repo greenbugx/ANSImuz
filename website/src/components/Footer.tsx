@@ -85,7 +85,6 @@ export default function Footer() {
 
         <div className="footer-bottom">
           <p>© {year} ANSImuz contributors</p>
-          <p className="footer-disclaimer">Not affiliated with YouTube or Spotify.</p>
           <div className="footer-bottom-links">
             <span>MIT licensed</span>
             <a className="text-link" href="#top">

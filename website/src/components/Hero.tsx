@@ -1,17 +1,9 @@
-import { VERSION, WAVE } from '../content';
+import { VERSION } from '../content';
 
 export default function Hero() {
   return (
     <section className="hero" id="top">
       <div className="container">
-        <div className="hero-meta">
-          <span className="eyebrow">
-            <span className="dot" aria-hidden="true" />
-            terminal music player
-          </span>
-          <span className="hero-meta-right">open source / mit</span>
-        </div>
-
         <h1 className="hero-title">
           <span className="hero-title-accent">ANSI</span>muz
           <span className="cursor" aria-hidden="true">
@@ -54,12 +46,6 @@ export default function Hero() {
           </div>
 
           <figure className="hero-poster">
-            <div className="poster-corners" aria-hidden="true">
-              <span>+</span>
-              <span>+</span>
-              <span>+</span>
-              <span>+</span>
-            </div>
             <div className="poster-frame">
               <img
                 src="/logo.png"
@@ -73,13 +59,6 @@ export default function Hero() {
               <span>8-bit / ANSI</span>
             </figcaption>
           </figure>
-        </div>
-
-        <div className="hero-wave">
-          <pre className="hero-wave-art" aria-hidden="true">
-            {WAVE}
-          </pre>
-          <span>search / stream / queue / repeat</span>
         </div>
       </div>
     </section>
