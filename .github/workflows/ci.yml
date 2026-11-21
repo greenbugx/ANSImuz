@@ -10,6 +10,8 @@ on:
       - "**/.gitignore"
       - "assets/**"
       - "scripts/**"
+      - "website/**"
+      - ".github/workflows/web_ci.yml"
   pull_request:
     branches: [ "main" ]
     paths-ignore:
@@ -19,6 +21,8 @@ on:
       - "**/.gitignore"
       - "assets/**"
       - "scripts/**"
+      - "website/**"
+      - ".github/workflows/web_ci.yml"
   workflow_dispatch:
 
 concurrency:
