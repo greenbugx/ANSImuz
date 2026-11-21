@@ -1,5 +1,6 @@
 #ifndef ANSIMUZ_MPV_H
 #define ANSIMUZ_MPV_H
+#include <stdint.h>
 #include <stddef.h>
 #ifdef __cplusplus
 extern "C" {
@@ -23,7 +24,7 @@ typedef struct ansimuz_mpv ansimuz_mpv;
  * Event contract:
  *   FILE_LOADED      Stream opened and container headers parsed successfully.
  *   PLAYBACK_RESTART Audio rendering started or resumed after seek or pause.
- *   PROPERTY_CHANGE  Observed property updated (duration, pause, volume).
+ *   PROPERTY_CHANGE  Observed property updated (duration, pause, volume, mute).
  *   END_FILE         Track lifecycle ended. Inspect end_reason and error_code
  *                    to determine the cause. Track loading failures (such as
  *                    file not found or demux failure) arrive through END_FILE
@@ -48,7 +49,8 @@ typedef enum ansimuz_mpv_property {
     ANSIMUZ_MPV_PROPERTY_TIME_POS,
     ANSIMUZ_MPV_PROPERTY_DURATION,
     ANSIMUZ_MPV_PROPERTY_PAUSE,
-    ANSIMUZ_MPV_PROPERTY_VOLUME
+    ANSIMUZ_MPV_PROPERTY_VOLUME,
+    ANSIMUZ_MPV_PROPERTY_MUTE
 } ansimuz_mpv_property;
 
 /*
@@ -185,6 +187,44 @@ int ansimuz_mpv_get_time_pos(
 int ansimuz_mpv_get_duration(
     ansimuz_mpv *player,
     double *out_seconds
+);
+
+/*
+ * Sets playback volume.
+ *
+ * Accepts values between 0.0 and 100.0. Clamps or rejects invalid values.
+ * Returns 0 on success or a negative mpv error code.
+ */
+int ansimuz_mpv_set_volume(ansimuz_mpv *player, double volume);
+
+/*
+ * Reads the current playback volume.
+ *
+ * Writes the volume level between 0.0 and 100.0 into out_volume.
+ * Returns 0 on success or a negative mpv error code.
+ */
+int ansimuz_mpv_get_volume(
+    ansimuz_mpv *player,
+    double *out_volume
+);
+
+/*
+ * Enables or disables audio mute.
+ *
+ * Pass non zero to mute or 0 to unmute.
+ * Returns 0 on success or a negative mpv error code.
+ */
+int ansimuz_mpv_set_mute(ansimuz_mpv *player, int muted);
+
+/*
+ * Reads the current mute state.
+ *
+ * Writes 1 when muted and 0 when unmuted into out_muted.
+ * Returns 0 on success or a negative mpv error code.
+ */
+int ansimuz_mpv_get_mute(
+    ansimuz_mpv *player,
+    int *out_muted
 );
 
 /*

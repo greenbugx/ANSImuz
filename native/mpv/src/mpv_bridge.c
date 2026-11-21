@@ -1,6 +1,8 @@
+#include <math.h>
+#include <stdint.h>
+#include <stddef.h>
 #include "ansimuz_mpv.h"
 #include <mpv/client.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,6 +32,9 @@ struct ansimuz_mpv {
     mpv_handle *handle;
     uint64_t next_load_id;
     uint64_t active_load_id;
+
+    /* Tracks the native playlist entry ID currently loaded or demuxing */
+    int64_t current_playlist_entry_id;
 
     track_load_entry load_queue[ANSIMUZ_MPV_MAX_TRACKED_LOADS];
     int load_queue_head;
@@ -112,39 +117,121 @@ static int observe_properties(mpv_handle *handle) {
     );
     if (status < 0) return status;
 
+    status = mpv_observe_property(
+        handle, 5, "mute", MPV_FORMAT_FLAG
+    );
+    if (status < 0) return status;
+
     return 0;
 }
 
 /*
- * Enqueues a pending load request into the internal tracking ring buffer.
- * Drops the oldest entry if capacity is exhausted under rapid replacement.
+ * Enqueues a pending load request into the tracking ring buffer.
+ * Returns -1 if the buffer is full without discarding existing records.
  */
-static void enqueue_load(ansimuz_mpv *player, uint64_t load_id) {
+static int enqueue_load(ansimuz_mpv *player, uint64_t load_id) {
     if (player->load_queue_count >= ANSIMUZ_MPV_MAX_TRACKED_LOADS) {
-        player->load_queue_head =
-            (player->load_queue_head + 1) % ANSIMUZ_MPV_MAX_TRACKED_LOADS;
-        player->load_queue_count--;
+        return -1;
     }
 
     int idx = (player->load_queue_head + player->load_queue_count) %
               ANSIMUZ_MPV_MAX_TRACKED_LOADS;
+
     player->load_queue[idx].playlist_entry_id = -1;
     player->load_queue[idx].load_id = load_id;
     player->load_queue[idx].is_loaded = 0;
     player->load_queue_count++;
+
+    return 0;
 }
 
 /*
- * Associates a native mpv playlist entry ID with the earliest unbound load record.
+ * Binds an allocated load record to its resolved native playlist entry ID.
  */
-static void bind_playlist_entry(ansimuz_mpv *player, int64_t playlist_entry_id) {
+static int bind_load_to_playlist_entry(
+    ansimuz_mpv *player,
+    uint64_t load_id,
+    int64_t playlist_entry_id
+) {
     for (int i = 0; i < player->load_queue_count; i++) {
-        int idx = (player->load_queue_head + i) % ANSIMUZ_MPV_MAX_TRACKED_LOADS;
-        if (player->load_queue[idx].playlist_entry_id == -1) {
-            player->load_queue[idx].playlist_entry_id = playlist_entry_id;
+        int idx = (player->load_queue_head + i) %
+                  ANSIMUZ_MPV_MAX_TRACKED_LOADS;
+
+        track_load_entry *entry = &player->load_queue[idx];
+
+        if (entry->load_id == load_id) {
+            entry->playlist_entry_id = playlist_entry_id;
+            return 0;
+        }
+    }
+
+    return -1;
+}
+
+/*
+ * Reads the ID of the current native mpv playlist entry.
+ * Traverses the playlist node array property to find the active entry map.
+ * Returns 0 on success, or a negative mpv error code.
+ */
+static int get_current_playlist_entry_id(
+    mpv_handle *handle,
+    int64_t *out_id
+) {
+    mpv_node playlist = {0};
+
+    *out_id = -1;
+
+    int status = mpv_get_property(
+        handle,
+        "playlist",
+        MPV_FORMAT_NODE,
+        &playlist
+    );
+
+    if (status < 0) {
+        return status;
+    }
+
+    if (playlist.format != MPV_FORMAT_NODE_ARRAY || !playlist.u.list) {
+        mpv_free_node_contents(&playlist);
+        return MPV_ERROR_PROPERTY_FORMAT;
+    }
+
+    mpv_node_list *entries = playlist.u.list;
+
+    for (int i = 0; i < entries->num; i++) {
+        mpv_node *entry = &entries->values[i];
+
+        if (entry->format != MPV_FORMAT_NODE_MAP || !entry->u.list) {
+            continue;
+        }
+
+        mpv_node_list *fields = entry->u.list;
+        int is_current = 0;
+        int64_t entry_id = -1;
+
+        for (int j = 0; j < fields->num; j++) {
+            const char *key = fields->keys[j];
+            mpv_node *value = &fields->values[j];
+
+            if (strcmp(key, "current") == 0 &&
+                value->format == MPV_FORMAT_FLAG) {
+                is_current = value->u.flag;
+            } else if (strcmp(key, "id") == 0 &&
+                       value->format == MPV_FORMAT_INT64) {
+                entry_id = value->u.int64;
+            }
+        }
+
+        if (is_current && entry_id >= 0) {
+            *out_id = entry_id;
             break;
         }
     }
+
+    mpv_free_node_contents(&playlist);
+
+    return (*out_id >= 0) ? 0 : MPV_ERROR_PROPERTY_UNAVAILABLE;
 }
 
 /*
@@ -152,22 +239,20 @@ static void bind_playlist_entry(ansimuz_mpv *player, int64_t playlist_entry_id) 
  */
 static uint64_t mark_file_loaded(ansimuz_mpv *player) {
     for (int i = 0; i < player->load_queue_count; i++) {
-        int idx = (player->load_queue_head + i) % ANSIMUZ_MPV_MAX_TRACKED_LOADS;
-        if (player->load_queue[idx].playlist_entry_id != -1 &&
-            !player->load_queue[idx].is_loaded) {
-            player->load_queue[idx].is_loaded = 1;
-            return player->load_queue[idx].load_id;
+        int idx = (player->load_queue_head + i) %
+                  ANSIMUZ_MPV_MAX_TRACKED_LOADS;
+
+        track_load_entry *entry = &player->load_queue[idx];
+
+        if (entry->playlist_entry_id ==
+                player->current_playlist_entry_id &&
+            !entry->is_loaded) {
+            entry->is_loaded = 1;
+            return entry->load_id;
         }
     }
 
-    if (player->load_queue_count > 0) {
-        int idx = (player->load_queue_head + player->load_queue_count - 1) %
-                  ANSIMUZ_MPV_MAX_TRACKED_LOADS;
-        player->load_queue[idx].is_loaded = 1;
-        return player->load_queue[idx].load_id;
-    }
-
-    return player->next_load_id;
+    return 0;
 }
 
 /*
@@ -195,6 +280,33 @@ static uint64_t remove_load_entry(ansimuz_mpv *player, int64_t playlist_entry_id
     return 0;
 }
 
+/*
+ * Removes a reserved load record by its application sequence ID.
+ * Used during early dispatch or binding failure to rollback tracking state.
+ */
+static int remove_load_by_id(ansimuz_mpv *player, uint64_t load_id) {
+    for (int i = 0; i < player->load_queue_count; i++) {
+        int idx = (player->load_queue_head + i) %
+                  ANSIMUZ_MPV_MAX_TRACKED_LOADS;
+
+        if (player->load_queue[idx].load_id == load_id) {
+            for (int j = i; j < player->load_queue_count - 1; j++) {
+                int curr = (player->load_queue_head + j) %
+                           ANSIMUZ_MPV_MAX_TRACKED_LOADS;
+                int next = (player->load_queue_head + j + 1) %
+                           ANSIMUZ_MPV_MAX_TRACKED_LOADS;
+
+                player->load_queue[curr] = player->load_queue[next];
+            }
+
+            player->load_queue_count--;
+            return 0;
+        }
+    }
+
+    return -1;
+}
+
 int ansimuz_mpv_create(
     ansimuz_mpv **out_player,
     char *error_buffer,
@@ -215,6 +327,8 @@ int ansimuz_mpv_create(
     if (!player) {
         return -1;
     }
+
+    player->current_playlist_entry_id = -1;
 
     player->handle = mpv_create();
 
@@ -284,6 +398,8 @@ int ansimuz_mpv_create(
         goto fail;
     }
 
+    mpv_request_log_messages(player->handle, "debug");
+
     /*
      * Register property observers immediately after initialize succeeds.
      * If observer setup fails, tear down the initialized engine before exiting.
@@ -339,6 +455,20 @@ int ansimuz_mpv_loadfile(ansimuz_mpv *player, const char *path) {
         return MPV_ERROR_INVALID_PARAMETER;
     }
 
+    /* Check capacity before issuing a playback command. */
+    if (player->load_queue_count >= ANSIMUZ_MPV_MAX_TRACKED_LOADS) {
+        return MPV_ERROR_GENERIC;
+    }
+
+    uint64_t load_id = player->next_load_id + 1;
+
+    /* Reserve tracking space before asking mpv to load anything. */
+    int status = enqueue_load(player, load_id);
+
+    if (status < 0) {
+        return MPV_ERROR_GENERIC;
+    }
+
     const char *args[] = {
         "loadfile",
         path,
@@ -346,13 +476,65 @@ int ansimuz_mpv_loadfile(ansimuz_mpv *player, const char *path) {
         NULL
     };
 
-    int status = mpv_command(player->handle, args);
-    if (status >= 0) {
-        player->next_load_id++;
-        enqueue_load(player, player->next_load_id);
+    status = mpv_command(player->handle, args);
+
+    if (status < 0) {
+        remove_load_by_id(player, load_id);
+        return status;
     }
 
-    return status;
+    player->next_load_id = load_id;
+
+    /* Resolve the actual native playlist entry ID. */
+    int64_t playlist_entry_id = -1;
+
+    status = get_current_playlist_entry_id(
+        player->handle,
+        &playlist_entry_id
+    );
+
+    if (status < 0) {
+        /*
+         * The command was accepted, but we could not correlate its entry.
+         * Stop playback rather than leave an untracked request running.
+         */
+        const char *stop_args[] = {
+            "stop",
+            NULL
+        };
+
+        mpv_command(player->handle, stop_args);
+        remove_load_by_id(player, load_id);
+
+        return status;
+    }
+
+    status = bind_load_to_playlist_entry(
+        player,
+        load_id,
+        playlist_entry_id
+    );
+
+    if (status < 0) {
+        const char *stop_args[] = {
+            "stop",
+            NULL
+        };
+
+        mpv_command(player->handle, stop_args);
+        remove_load_by_id(player, load_id);
+
+        return MPV_ERROR_GENERIC;
+    }
+
+    fprintf(stderr,
+        "[LOAD BIND] load_id=%llu playlist_entry_id=%lld path=%s\n",
+        (unsigned long long)load_id,
+        (long long)playlist_entry_id,
+        path
+    );
+
+    return 0;
 }
 
 /*
@@ -462,6 +644,89 @@ int ansimuz_mpv_get_duration(
 }
 
 /*
+ * Sets playback volume between 0.0 and 100.0.
+ * Rejects non finite numbers and values outside allowable percentage bounds.
+ */
+int ansimuz_mpv_set_volume(
+    ansimuz_mpv *player,
+    double volume
+) {
+    if (!player || !player->handle ||
+        !isfinite(volume) || volume < 0.0 || volume > 100.0) {
+        return MPV_ERROR_INVALID_PARAMETER;
+    }
+
+    return mpv_set_property(
+        player->handle,
+        "volume",
+        MPV_FORMAT_DOUBLE,
+        &volume
+    );
+}
+
+/*
+ * Reads current playback volume level.
+ * Writes a double precision value between 0.0 and 100.0 to out_volume.
+ */
+int ansimuz_mpv_get_volume(
+    ansimuz_mpv *player,
+    double *out_volume
+) {
+    if (!player || !player->handle || !out_volume) {
+        return MPV_ERROR_INVALID_PARAMETER;
+    }
+
+    return mpv_get_property(
+        player->handle,
+        "volume",
+        MPV_FORMAT_DOUBLE,
+        out_volume
+    );
+}
+
+/*
+ * Enables or disables audio mute.
+ * Writes integer flag to mpv mute property without changing volume levels.
+ */
+int ansimuz_mpv_set_mute(
+    ansimuz_mpv *player,
+    int muted
+) {
+    if (!player || !player->handle) {
+        return MPV_ERROR_INVALID_PARAMETER;
+    }
+
+    int value = muted ? 1 : 0;
+
+    return mpv_set_property(
+        player->handle,
+        "mute",
+        MPV_FORMAT_FLAG,
+        &value
+    );
+}
+
+/*
+ * Reads current mute state.
+ * Writes 1 if audio output is muted or 0 if audio is unmuted.
+ */
+int ansimuz_mpv_get_mute(
+    ansimuz_mpv *player,
+    int *out_muted
+) {
+    if (!player || !player->handle || !out_muted) {
+        return MPV_ERROR_INVALID_PARAMETER;
+    }
+
+    return mpv_get_property(
+        player->handle,
+        "mute",
+        MPV_FORMAT_FLAG,
+        out_muted
+    );
+}
+
+/*
  * Translates native libmpv status codes to human readable static strings.
  * Keeps error formatting consistent across the FFI boundary.
  */
@@ -482,6 +747,8 @@ static ansimuz_mpv_property map_property_id(uint64_t id) {
             return ANSIMUZ_MPV_PROPERTY_PAUSE;
         case 4:
             return ANSIMUZ_MPV_PROPERTY_VOLUME;
+        case 5:
+            return ANSIMUZ_MPV_PROPERTY_MUTE;
         default:
             return ANSIMUZ_MPV_PROPERTY_NONE;
     }
@@ -549,23 +816,47 @@ int ansimuz_mpv_poll_event(
         }
 
         switch (event->event_id) {
+            case MPV_EVENT_LOG_MESSAGE: {
+                mpv_event_log_message *msg =
+                    (mpv_event_log_message *)event->data;
+
+                if (msg) {
+                    fprintf(stderr, "[MPV:%s] %s",
+                            msg->level ? msg->level : "unknown",
+                            msg->text ? msg->text : "");
+                }
+
+                continue;
+            }
+
             case MPV_EVENT_START_FILE: {
                 mpv_event_start_file *start =
                     (mpv_event_start_file *)event->data;
 
                 if (start) {
-                    bind_playlist_entry(player, start->playlist_entry_id);
+                    player->current_playlist_entry_id =
+                        start->playlist_entry_id;
                 }
 
-                /* START_FILE is internal bookkeeping so continue draining */
+                fprintf(stderr,
+                    "[NATIVE START_FILE] playlist_entry_id=%lld\n",
+                    (long long)start->playlist_entry_id
+                );
+
                 continue;
             }
 
             case MPV_EVENT_FILE_LOADED: {
                 uint64_t loaded_id = mark_file_loaded(player);
+
+                if (loaded_id == 0) {
+                    player->active_load_id = 0;
+                    continue;
+                }
+
                 player->active_load_id = loaded_id;
                 out_event->type = ANSIMUZ_MPV_EVENT_FILE_LOADED;
-                out_event->load_id = player->active_load_id;
+                out_event->load_id = loaded_id;
                 return 1;
             }
 
@@ -609,6 +900,8 @@ int ansimuz_mpv_poll_event(
                         id = ANSIMUZ_MPV_PROPERTY_PAUSE;
                     } else if (strcmp(property->name, "volume") == 0) {
                         id = ANSIMUZ_MPV_PROPERTY_VOLUME;
+                    } else if (strcmp(property->name, "mute") == 0) {
+                        id = ANSIMUZ_MPV_PROPERTY_MUTE;
                     }
                 }
 
@@ -635,6 +928,15 @@ int ansimuz_mpv_poll_event(
                 mpv_event_end_file *end =
                     (mpv_event_end_file *)event->data;
 
+                if (end) {
+                    fprintf(stderr,
+                        "[NATIVE END_FILE] playlist_entry_id=%lld reason=%d error=%d\n",
+                        (long long)end->playlist_entry_id,
+                        end->reason,
+                        end->error
+                    );
+                }
+
                 out_event->type = ANSIMUZ_MPV_EVENT_END_FILE;
 
                 if (end) {
@@ -650,23 +952,16 @@ int ansimuz_mpv_poll_event(
                  * their original load sequence ID even after a new loadfile call.
                  */
                 uint64_t matched_id = 0;
-                if (end && end->playlist_entry_id > 0) {
-                    matched_id = remove_load_entry(player, end->playlist_entry_id);
-                }
 
-                if (matched_id == 0) {
-                    /* Fallback when playlist entry ID was not provided */
-                    if (player->active_load_id != 0) {
-                        matched_id = player->active_load_id;
-                    } else if (player->load_queue_count > 0) {
-                        int idx = player->load_queue_head;
-                        matched_id = player->load_queue[idx].load_id;
-                        player->load_queue_head =
-                            (player->load_queue_head + 1) %
-                            ANSIMUZ_MPV_MAX_TRACKED_LOADS;
-                        player->load_queue_count--;
-                    } else {
-                        matched_id = player->next_load_id;
+                if (end && end->playlist_entry_id >= 0) {
+                    matched_id = remove_load_entry(
+                        player,
+                        end->playlist_entry_id
+                    );
+
+                    if (end->playlist_entry_id ==
+                        player->current_playlist_entry_id) {
+                        player->current_playlist_entry_id = -1;
                     }
                 }
 
