@@ -250,11 +250,13 @@ main:focus {
   gap: 8px;
   padding: 6px 10px;
   border-radius: 9999px;
-  background: rgba(10, 10, 12, 0.78);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  background: rgba(14, 14, 18, 0.65);
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
   border: 1px solid rgba(255, 255, 255, 0.1);
-  box-shadow: 0 14px 34px -4px rgba(0, 0, 0, 0.85);
+  box-shadow:
+    0 16px 36px -6px rgba(0, 0, 0, 0.7),
+    0 0 0 1px rgba(255, 255, 255, 0.04);
   width: fit-content;
 }
 
@@ -265,7 +267,7 @@ main:focus {
   height: 38px;
   padding: 0 16px;
   border-radius: 9999px;
-  color: #777777;
+  color: #888888;
   text-decoration: none;
   font-family: var(--font-mono);
   font-size: 12.5px;
@@ -298,7 +300,7 @@ main:focus {
 
 .nav-pill-item:hover {
   color: #ffffff;
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.07);
 }
 
 .nav-pill-item.is-active {
@@ -306,7 +308,7 @@ main:focus {
   color: #000000;
   font-weight: 700;
   padding: 0 20px 0 16px;
-  box-shadow: 0 4px 16px rgba(255, 255, 255, 0.18);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
 }
 
 .nav-pill-item.is-active .nav-pill-label {
@@ -1471,10 +1473,11 @@ html.lenis body {
     display: grid;
     grid-template-columns: repeat(4, 1fr);
     padding-bottom: env(safe-area-inset-bottom);
-    background: rgba(10, 10, 10, 0.96);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-    border-top: 1px solid var(--line);
+    background: rgba(14, 14, 18, 0.78);
+    backdrop-filter: blur(20px) saturate(150%);
+    -webkit-backdrop-filter: blur(20px) saturate(150%);
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    box-shadow: 0 -8px 24px -4px rgba(0, 0, 0, 0.5);
   }
 
   .mobile-nav a {
