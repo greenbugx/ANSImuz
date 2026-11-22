@@ -836,12 +836,12 @@ int ansimuz_mpv_poll_event(
                 if (start) {
                     player->current_playlist_entry_id =
                         start->playlist_entry_id;
-                }
 
-                fprintf(stderr,
-                    "[NATIVE START_FILE] playlist_entry_id=%lld\n",
-                    (long long)start->playlist_entry_id
-                );
+                    fprintf(stderr,
+                        "[NATIVE START_FILE] playlist_entry_id=%lld\n",
+                        (long long)start->playlist_entry_id
+                    );
+                }
 
                 continue;
             }
