@@ -246,11 +246,18 @@ class TestArtworkThumbnails(unittest.TestCase):
         self.assertIn("ansimuz", path)
 
     def test_is_gray_placeholder(self):
-        from PIL import Image
+        from PIL import Image, ImageDraw
         from artwork import thumbnails
 
         gray_img = Image.new("RGB", (120, 90), (128, 128, 128))
         self.assertTrue(thumbnails._is_gray_placeholder(gray_img))
+
+        bw_img = Image.new("RGB", (240, 240), (20, 20, 20))
+        ImageDraw.Draw(bw_img).rectangle([0, 0, 120, 240], fill=(235, 235, 235))
+        self.assertFalse(thumbnails._is_gray_placeholder(bw_img))
+
+        l_mode_bw = bw_img.convert("L")
+        self.assertFalse(thumbnails._is_gray_placeholder(l_mode_bw))
 
         color_img = Image.new("RGB", (120, 90), (255, 0, 0))
         self.assertFalse(thumbnails._is_gray_placeholder(color_img))

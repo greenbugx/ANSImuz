@@ -28,17 +28,35 @@ def cache_path(url):
 
 def _is_gray_placeholder(img):
     w, h = img.size
+    if w == 0 or h == 0:
+        return True
+
+    sample_img = img if img.mode in ("RGB", "RGBA", "L") else img.convert("RGB")
     steps = 8
     dx = max(w // steps, 1)
     dy = max(h // steps, 1)
+    min_luma = 255
+    max_luma = 0
+
     for sy in range(steps):
         for sx in range(steps):
             x = min(sx * dx, w - 1)
             y = min(sy * dy, h - 1)
-            r, g, b = img.getpixel((x, y))[:3]
-            if r != g or g != b:
+            pixel = sample_img.getpixel((x, y))
+            if isinstance(pixel, int):
+                r = g = b = pixel
+            else:
+                r, g, b = pixel[:3]
+            hi = max(r, g, b)
+            lo = min(r, g, b)
+            if hi - lo > 2:
                 return False
-    return True
+            if lo < min_luma:
+                min_luma = lo
+            if hi > max_luma:
+                max_luma = hi
+
+    return (max_luma - min_luma) <= 16
 
 
 def fetch_square_artwork(url):
