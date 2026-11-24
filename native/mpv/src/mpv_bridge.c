@@ -234,6 +234,10 @@ static int get_current_playlist_entry_id(
             *out_id = entry_id;
             break;
         }
+
+        if (entry_id >= 0) {
+            *out_id = entry_id;
+        }
     }
 
     mpv_free_node_contents(&playlist);
@@ -242,7 +246,7 @@ static int get_current_playlist_entry_id(
 }
 
 /*
- * Marks the active entry as loaded and returns its correlated load ID.
+ * Marks the active entry as loaded and returns its correlated load ID
  */
 static uint64_t mark_file_loaded(ansimuz_mpv *player) {
     for (int i = 0; i < player->load_queue_count; i++) {
@@ -251,9 +255,10 @@ static uint64_t mark_file_loaded(ansimuz_mpv *player) {
 
         track_load_entry *entry = &player->load_queue[idx];
 
-        if (entry->playlist_entry_id ==
-                player->current_playlist_entry_id &&
+        if ((entry->playlist_entry_id == player->current_playlist_entry_id ||
+             entry->playlist_entry_id < 0) &&
             !entry->is_loaded) {
+            entry->playlist_entry_id = player->current_playlist_entry_id;
             entry->is_loaded = 1;
             return entry->load_id;
         }
@@ -263,25 +268,36 @@ static uint64_t mark_file_loaded(ansimuz_mpv *player) {
 }
 
 /*
- * Removes a finished or failed track by its native playlist entry identifier.
- * Returns the correlated load identifier, or 0 if no match was found.
+ * Removes a finished or failed track by its native playlist entry identifier
+ * Returns the correlated load identifier or 0 if no match was found
  */
 static uint64_t remove_load_entry(ansimuz_mpv *player, int64_t playlist_entry_id) {
+    int target_idx = -1;
     for (int i = 0; i < player->load_queue_count; i++) {
         int idx = (player->load_queue_head + i) % ANSIMUZ_MPV_MAX_TRACKED_LOADS;
         if (player->load_queue[idx].playlist_entry_id == playlist_entry_id) {
-            uint64_t matched_id = player->load_queue[idx].load_id;
-
-            for (int j = i; j < player->load_queue_count - 1; j++) {
-                int curr = (player->load_queue_head + j) %
-                           ANSIMUZ_MPV_MAX_TRACKED_LOADS;
-                int next = (player->load_queue_head + j + 1) %
-                           ANSIMUZ_MPV_MAX_TRACKED_LOADS;
-                player->load_queue[curr] = player->load_queue[next];
-            }
-            player->load_queue_count--;
-            return matched_id;
+            target_idx = i;
+            break;
         }
+    }
+
+    if (target_idx < 0 && player->load_queue_count > 0) {
+        target_idx = 0;
+    }
+
+    if (target_idx >= 0) {
+        int matched_pos = (player->load_queue_head + target_idx) % ANSIMUZ_MPV_MAX_TRACKED_LOADS;
+        uint64_t matched_id = player->load_queue[matched_pos].load_id;
+
+        for (int j = target_idx; j < player->load_queue_count - 1; j++) {
+            int curr = (player->load_queue_head + j) %
+                       ANSIMUZ_MPV_MAX_TRACKED_LOADS;
+            int next = (player->load_queue_head + j + 1) %
+                       ANSIMUZ_MPV_MAX_TRACKED_LOADS;
+            player->load_queue[curr] = player->load_queue[next];
+        }
+        player->load_queue_count--;
+        return matched_id;
     }
 
     return 0;
@@ -573,7 +589,7 @@ int ansimuz_mpv_loadfile(ansimuz_mpv *player, const char *path) {
 
     player->next_load_id = load_id;
 
-    /* Resolve the actual native playlist entry ID. */
+    /* Resolve the actual native playlist entry ID if already available */
     int64_t playlist_entry_id = -1;
 
     status = get_current_playlist_entry_id(
@@ -581,43 +597,17 @@ int ansimuz_mpv_loadfile(ansimuz_mpv *player, const char *path) {
         &playlist_entry_id
     );
 
-    if (status < 0) {
-        /*
-         * The command was accepted, but we could not correlate its entry.
-         * Stop playback rather than leave an untracked request running.
-         */
-        const char *stop_args[] = {
-            "stop",
-            NULL
-        };
-
-        mpv_command(player->handle, stop_args);
-        remove_load_by_id(player, load_id);
-
-        return status;
-    }
-
-    status = bind_load_to_playlist_entry(
-        player,
-        load_id,
-        playlist_entry_id
-    );
-
-    if (status < 0) {
-        const char *stop_args[] = {
-            "stop",
-            NULL
-        };
-
-        mpv_command(player->handle, stop_args);
-        remove_load_by_id(player, load_id);
-
-        return MPV_ERROR_GENERIC;
+    if (status == 0 && playlist_entry_id >= 0) {
+        bind_load_to_playlist_entry(
+            player,
+            load_id,
+            playlist_entry_id
+        );
     }
 
     if (player->log_file) {
         fprintf(player->log_file,
-            "[LOAD BIND] load_id=%llu playlist_entry_id=%lld path=%s\n",
+            "[LOAD] load_id=%llu playlist_entry_id=%lld path=%s\n",
             (unsigned long long)load_id,
             (long long)playlist_entry_id,
             path
@@ -929,6 +919,16 @@ int ansimuz_mpv_poll_event(
                     player->current_playlist_entry_id =
                         start->playlist_entry_id;
 
+                    for (int i = 0; i < player->load_queue_count; i++) {
+                        int idx = (player->load_queue_head + i) %
+                                  ANSIMUZ_MPV_MAX_TRACKED_LOADS;
+                        if (player->load_queue[idx].playlist_entry_id < 0) {
+                            player->load_queue[idx].playlist_entry_id =
+                                start->playlist_entry_id;
+                            break;
+                        }
+                    }
+
                     if (player->log_file) {
                         fprintf(player->log_file,
                             "[NATIVE START_FILE] playlist_entry_id=%lld\n",
@@ -1079,4 +1079,92 @@ int ansimuz_mpv_poll_event(
     /* Drain limit reached without finding an exposed event */
     out_event->type = ANSIMUZ_MPV_EVENT_NONE;
     return 0;
+}
+
+/*
+ * Dumps an audio stream to a file using a secondary headless mpv instance
+ * Polls for completion while checking cancel_flag periodically
+ * Returns 0 on success, -2 when cancelled, or a negative mpv error code
+ */
+int ansimuz_mpv_dump_stream(
+    const char *url,
+    const char *output_path,
+    const uint8_t *cancel_flag
+) {
+    if (!url || !output_path || url[0] == '\0' || output_path[0] == '\0') {
+        return MPV_ERROR_INVALID_PARAMETER;
+    }
+
+    if (cancel_flag && *cancel_flag != 0) {
+        return -2;
+    }
+
+    mpv_handle *handle = mpv_create();
+    if (!handle) {
+        return MPV_ERROR_NOMEM;
+    }
+
+    mpv_set_option_string(handle, "terminal", "no");
+    mpv_set_option_string(handle, "msg-level", "all=no");
+    mpv_set_option_string(handle, "video", "no");
+    mpv_set_option_string(handle, "audio", "no");
+    mpv_set_option_string(handle, "force-window", "no");
+    mpv_set_option_string(handle, "idle", "no");
+    mpv_set_option_string(handle, "ytdl", "yes");
+    mpv_set_option_string(handle, "stream-dump", output_path);
+
+    int status = mpv_initialize(handle);
+    if (status < 0) {
+        mpv_destroy(handle);
+        return status;
+    }
+
+    const char *args[] = {
+        "loadfile",
+        url,
+        "replace",
+        NULL
+    };
+
+    status = mpv_command(handle, args);
+    if (status < 0) {
+        mpv_terminate_destroy(handle);
+        return status;
+    }
+
+    int result = -1;
+    while (1) {
+        if (cancel_flag && *cancel_flag != 0) {
+            result = -2;
+            break;
+        }
+
+        mpv_event *event = mpv_wait_event(handle, 0.1);
+        if (!event || event->event_id == MPV_EVENT_NONE) {
+            continue;
+        }
+
+        if (event->event_id == MPV_EVENT_END_FILE) {
+            mpv_event_end_file *end = (mpv_event_end_file *)event->data;
+            if (end) {
+                if (end->reason == MPV_END_FILE_REASON_EOF) {
+                    result = 0;
+                } else if (end->reason == MPV_END_FILE_REASON_ERROR) {
+                    result = end->error < 0 ? end->error : MPV_ERROR_GENERIC;
+                } else {
+                    result = MPV_ERROR_GENERIC;
+                }
+            } else {
+                result = 0;
+            }
+            break;
+        }
+
+        if (event->event_id == MPV_EVENT_SHUTDOWN) {
+            break;
+        }
+    }
+
+    mpv_terminate_destroy(handle);
+    return result;
 }

@@ -189,6 +189,12 @@ unsafe extern "C" {
         player: *mut c_void,
         out_event: *mut NativeEvent,
     ) -> c_int;
+
+    fn ansimuz_mpv_dump_stream(
+        url: *const c_char,
+        output_path: *const c_char,
+        cancel_flag: *const u8,
+    ) -> c_int;
 }
 
 pub struct NativeMpv {
@@ -386,6 +392,44 @@ impl NativeMpv {
             CStr::from_ptr(ptr)
                 .to_string_lossy()
                 .into_owned()
+        }
+    }
+
+    pub fn dump_stream(
+        url: &str,
+        output_path: &std::path::Path,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<(), String> {
+        let url_c = CString::new(url)
+            .map_err(|_| "Stream URL contains an interior NUL byte".to_string())?;
+        let path_str = output_path
+            .to_str()
+            .ok_or_else(|| "Invalid UTF-8 in output path".to_string())?;
+        let path_c = CString::new(path_str)
+            .map_err(|_| "Output path contains an interior NUL byte".to_string())?;
+
+        let cancel_ptr = cancel
+            .map(|c| c.as_ptr() as *const u8)
+            .unwrap_or(std::ptr::null());
+
+        let status = unsafe {
+            ansimuz_mpv_dump_stream(url_c.as_ptr(), path_c.as_ptr(), cancel_ptr)
+        };
+
+        if status == 0 {
+            Ok(())
+        } else if status == -2 {
+            Err("Stream dump cancelled".to_string())
+        } else {
+            let msg = unsafe {
+                let ptr = ansimuz_mpv_error_string(status);
+                if ptr.is_null() {
+                    format!("Stream dump failed with status {status}")
+                } else {
+                    CStr::from_ptr(ptr).to_string_lossy().into_owned()
+                }
+            };
+            Err(msg)
         }
     }
 }

@@ -121,3 +121,47 @@ fn rapid_replace_does_not_emit_eof_for_first_track() {
     );
 }
 
+#[test]
+fn native_dump_stream_dumps_file() {
+    let dir = std::env::temp_dir().join("ansimuz-native-smoke-dump");
+    let _ = fs::create_dir_all(&dir);
+    let wav_src = dir.join("src_silence.wav");
+    let wav_dst = dir.join("dst_silence.wav");
+    write_silence_wav(&wav_src, 1);
+    if wav_dst.exists() {
+        let _ = fs::remove_file(&wav_dst);
+    }
+
+    if std::env::var_os("ANSIMUZ_MPV_AO").is_none() {
+        unsafe {
+            std::env::set_var("ANSIMUZ_MPV_AO", "null");
+        }
+    }
+
+    let res = NativeMpv::dump_stream(wav_src.to_str().expect("valid src"), &wav_dst, None);
+    assert!(res.is_ok(), "dump_stream failed: {res:?}");
+    assert!(wav_dst.exists(), "dump destination file does not exist");
+    let meta = fs::metadata(&wav_dst).expect("read metadata");
+    assert!(meta.len() > 0, "dump destination file is empty");
+    let _ = fs::remove_file(&wav_src);
+    let _ = fs::remove_file(&wav_dst);
+}
+
+#[test]
+fn native_dump_stream_cancelled() {
+    let dir = std::env::temp_dir().join("ansimuz-native-smoke-cancel");
+    let _ = fs::create_dir_all(&dir);
+    let wav_src = dir.join("src_long.wav");
+    let wav_dst = dir.join("dst_long.wav");
+    write_silence_wav(&wav_src, 5);
+    if wav_dst.exists() {
+        let _ = fs::remove_file(&wav_dst);
+    }
+
+    let cancel = std::sync::atomic::AtomicBool::new(true);
+    let res = NativeMpv::dump_stream(wav_src.to_str().expect("valid src"), &wav_dst, Some(&cancel));
+    assert!(res.is_err(), "expected cancelled error");
+    let _ = fs::remove_file(&wav_src);
+    let _ = fs::remove_file(&wav_dst);
+}
+

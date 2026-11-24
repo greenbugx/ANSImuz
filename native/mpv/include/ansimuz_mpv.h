@@ -249,6 +249,17 @@ int ansimuz_mpv_poll_event(
     ansimuz_mpv_event *out_event
 );
 
+/*
+ * Dumps an audio stream to disk using a secondary libmpv instance
+ * Runs headless with video and audio rendering disabled
+ * Returns 0 on success, -2 when cancelled, or a negative mpv error code
+ */
+int ansimuz_mpv_dump_stream(
+    const char *url,
+    const char *output_path,
+    const uint8_t *cancel_flag
+);
+
 #ifdef __cplusplus
 }
 #endif

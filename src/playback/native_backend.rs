@@ -6,10 +6,152 @@ use std::thread;
 use std::time::Duration;
 
 use super::events::PlayerEvent;
-use super::mpv::{PrefetchResult, start_dump_cancellable};
+use super::mpv::{PrefetchResult, audio_cache_dir, audio_hash};
 use super::native_adapter::Translator;
 use super::native_mpv::NativeMpv;
 use super::player::AudioPlayer;
+
+// Dumps an audio stream to disk cache using a secondary native libmpv instance
+pub(crate) fn dump_stream_native(
+    url: &str,
+    dumping: Arc<Mutex<HashSet<String>>>,
+    cancel: Option<Arc<AtomicBool>>,
+) -> PrefetchResult {
+    let epoch = crate::config::current_cache_epoch();
+    if url.trim().is_empty() {
+        return PrefetchResult::Failed("Empty URL".into());
+    }
+
+    if cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+        return PrefetchResult::Cancelled;
+    }
+
+    let final_path = audio_cache_dir().join(format!("{}.audio", audio_hash(url)));
+    if final_path.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+        return PrefetchResult::AlreadyCached(final_path);
+    }
+
+    {
+        let mut set = match dumping.lock() {
+            Ok(set) => set,
+            Err(_) => return PrefetchResult::Failed("Dumping lock poisoned".into()),
+        };
+
+        if set.contains(url) {
+            return PrefetchResult::Cancelled;
+        }
+        set.insert(url.to_string());
+    }
+
+    struct DumpingGuard {
+        url: String,
+        dumping: Arc<Mutex<HashSet<String>>>,
+    }
+
+    impl Drop for DumpingGuard {
+        fn drop(&mut self) {
+            if let Ok(mut set) = self.dumping.lock() {
+                set.remove(&self.url);
+            }
+        }
+    }
+
+    let _dump_guard = DumpingGuard {
+        url: url.to_string(),
+        dumping: Arc::clone(&dumping),
+    };
+
+    if let Err(e) = std::fs::create_dir_all(audio_cache_dir()) {
+        return PrefetchResult::Failed(format!("Cannot create audio cache directory: {e}"));
+    }
+
+    let part = audio_cache_dir().join(format!("{}.part", audio_hash(url)));
+    if part.exists() {
+        let _ = std::fs::remove_file(&part);
+    }
+
+    struct PartGuard {
+        path: std::path::PathBuf,
+        success: bool,
+    }
+
+    impl Drop for PartGuard {
+        fn drop(&mut self) {
+            if !self.success && self.path.exists() {
+                let _ = std::fs::remove_file(&self.path);
+            }
+        }
+    }
+
+    let mut part_guard = PartGuard {
+        path: part.clone(),
+        success: false,
+    };
+
+    if cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+        return PrefetchResult::Cancelled;
+    }
+
+    let cancel_ref = cancel.as_deref();
+    let dump_res = NativeMpv::dump_stream(url, &part, cancel_ref);
+
+    match dump_res {
+        Ok(()) => {
+            if cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+                return PrefetchResult::Cancelled;
+            }
+            if crate::config::current_cache_epoch() != epoch {
+                return PrefetchResult::Cancelled;
+            }
+
+            let file_size = match part.metadata() {
+                Ok(meta) => meta.len(),
+                Err(e) => {
+                    return PrefetchResult::Failed(format!(
+                        "Failed to read stream dump metadata: {e}"
+                    ));
+                }
+            };
+
+            if file_size == 0 {
+                return PrefetchResult::Failed("Stream dump produced empty cache file".to_string());
+            }
+
+            if let Err(e) = std::fs::rename(&part, &final_path) {
+                if e.kind() == std::io::ErrorKind::AlreadyExists
+                    || e.kind() == std::io::ErrorKind::PermissionDenied
+                {
+                    let _ = std::fs::remove_file(&final_path);
+                    if let Err(retry_e) = std::fs::rename(&part, &final_path) {
+                        return PrefetchResult::Failed(format!(
+                            "Failed to rename .part to final cache file: {retry_e}"
+                        ));
+                    }
+                } else {
+                    return PrefetchResult::Failed(format!(
+                        "Failed to rename .part to final cache file: {e}"
+                    ));
+                }
+            }
+
+            part_guard.success = true;
+            let _ = crate::config::prune_cache_dir(
+                &audio_cache_dir(),
+                crate::config::MAX_CACHE_DIR_BYTES,
+            );
+            PrefetchResult::Cached(final_path)
+        }
+        Err(err) => {
+            if cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed))
+                || err.contains("cancelled")
+            {
+                PrefetchResult::Cancelled
+            } else {
+                PrefetchResult::Failed(err)
+            }
+        }
+    }
+}
 
 // Resolves playback target by checking disk cache first then delegating to mpv
 pub(crate) fn resolve_playback_target(url: &str) -> Result<String, String> {
@@ -115,7 +257,7 @@ impl NativeBackend {
                 return;
             }
 
-            let res = start_dump_cancellable(&owned, dumping, Some(cancel));
+            let res = dump_stream_native(&owned, dumping, Some(cancel));
             if let Ok(mut lock) = results.lock() {
                 if lock.len() >= 20
                     && !lock.contains_key(&owned)
