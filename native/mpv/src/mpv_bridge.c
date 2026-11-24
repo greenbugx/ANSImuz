@@ -72,6 +72,62 @@ static int configure_option(
     return status;
 }
 
+/* YTDL_PLAYER_CLIENTS */
+#define ANSIMUZ_YTDL_EXTRACTOR_ARGS \
+    "youtube:player_client=android,ios,mweb,web,web_music,android_vr,tv,tv_samsung,tv_simply,visionos,default"
+
+/*
+ * Checks whether target URL points to YouTube so ytdl can be enabled selectively.
+ */
+static int is_youtube_url(const char *url) {
+    return url && (strstr(url, "youtube.com") != NULL || strstr(url, "youtu.be") != NULL);
+}
+
+/*
+ * Configures ytdl and preserves the YouTube player client fallback chain via
+ * MPV_FORMAT_NODE_MAP so commas inside player_client are not split by mpv.
+ */
+static int configure_ytdl(
+    mpv_handle *handle,
+    int enable,
+    char *error_buffer,
+    size_t error_buffer_size
+) {
+    int status = configure_option(
+        handle, "ytdl", enable ? "yes" : "no",
+        error_buffer, error_buffer_size
+    );
+    if (status < 0) {
+        return status;
+    }
+
+    char *keys[] = { "extractor-args" };
+    mpv_node val;
+    val.format = MPV_FORMAT_STRING;
+    val.u.string = (char *)ANSIMUZ_YTDL_EXTRACTOR_ARGS;
+
+    mpv_node_list map;
+    map.num = 1;
+    map.keys = keys;
+    map.values = &val;
+
+    mpv_node root;
+    root.format = MPV_FORMAT_NODE_MAP;
+    root.u.list = &map;
+
+    status = mpv_set_option(handle, "ytdl-raw-options", MPV_FORMAT_NODE, &root);
+    if (status < 0) {
+        set_error(
+            error_buffer,
+            error_buffer_size,
+            "ytdl-raw-options",
+            status
+        );
+    }
+
+    return status;
+}
+
 /*
  * Registers property observation hooks on the initialized mpv instance.
  * Uses discrete integer reply_userdata IDs to avoid string lookups in poll loop.
@@ -249,10 +305,10 @@ int ansimuz_mpv_create(
     if (status < 0) goto fail;
 
     /*
-     * Enable mpv internal ytdl hook for direct stream URL resolution.
+     * Enable mpv internal ytdl hook and YouTube client fallback chain.
      */
-    status = configure_option(
-        player->handle, "ytdl", "yes",
+    status = configure_ytdl(
+        player->handle, 1,
         error_buffer, error_buffer_size
     );
 
@@ -403,6 +459,12 @@ int ansimuz_mpv_loadfile(ansimuz_mpv *player, const char *path) {
     if (!player || !player->handle || !path || path[0] == '\0') {
         return MPV_ERROR_INVALID_PARAMETER;
     }
+
+    (void)mpv_set_property_string(
+        player->handle,
+        "ytdl",
+        is_youtube_url(path) ? "yes" : "no"
+    );
 
     const char *args[] = {
         "loadfile",
@@ -906,10 +968,14 @@ int ansimuz_mpv_dump_stream(
     mpv_set_option_string(handle, "osc", "no");
     mpv_set_option_string(handle, "input-default-bindings", "no");
     mpv_set_option_string(handle, "input-vo-keyboard", "no");
-    mpv_set_option_string(handle, "ytdl", "yes");
+    int status = configure_ytdl(handle, is_youtube_url(url), NULL, 0);
+    if (status < 0) {
+        mpv_destroy(handle);
+        return status;
+    }
     mpv_set_option_string(handle, "stream-dump", output_path);
 
-    int status = mpv_initialize(handle);
+    status = mpv_initialize(handle);
     if (status < 0) {
         mpv_destroy(handle);
         return status;
