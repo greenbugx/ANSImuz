@@ -1,8 +1,26 @@
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+
 use super::events::PlayerEvent;
-use super::mpv::PrefetchResult;
+use super::mpv::{PrefetchResult, resolve_stream, start_dump_cancellable};
 use super::native_adapter::Translator;
 use super::native_mpv::NativeMpv;
+use super::player::AudioPlayer;
+
+// Resolves playback target by checking disk cache first then resolving web streams
+pub(crate) fn resolve_playback_target(url: &str) -> Result<String, String> {
+    if let Some(path) = AudioPlayer::cached_audio(url) {
+        Ok(path.to_string_lossy().into_owned())
+    } else if url.contains("youtube.com") || url.contains("youtu.be") {
+        resolve_stream(url)
+    } else {
+        Ok(url.to_string())
+    }
+}
 
 // Native libmpv backend implementing the playback interface
 pub struct NativeBackend {
@@ -12,6 +30,9 @@ pub struct NativeBackend {
     generation: u64,
     last_error: Option<String>,
     events: Option<Sender<PlayerEvent>>,
+    dumping: Arc<Mutex<HashSet<String>>>,
+    cancel_prefetch: Arc<AtomicBool>,
+    prefetch_results: Arc<Mutex<HashMap<String, PrefetchResult>>>,
     is_mock: bool,
     mock_playing: bool,
     mock_fail: bool,
@@ -27,6 +48,9 @@ impl NativeBackend {
             generation: 0,
             last_error: None,
             events: None,
+            dumping: Arc::new(Mutex::new(HashSet::new())),
+            cancel_prefetch: Arc::new(AtomicBool::new(false)),
+            prefetch_results: Arc::new(Mutex::new(HashMap::new())),
             is_mock: false,
             mock_playing: false,
             mock_fail: false,
@@ -41,6 +65,9 @@ impl NativeBackend {
             generation: 0,
             last_error: None,
             events: None,
+            dumping: Arc::new(Mutex::new(HashSet::new())),
+            cancel_prefetch: Arc::new(AtomicBool::new(false)),
+            prefetch_results: Arc::new(Mutex::new(HashMap::new())),
             is_mock: true,
             mock_playing: false,
             mock_fail: false,
@@ -62,12 +89,49 @@ impl NativeBackend {
         self.last_error = None;
     }
 
-    pub fn prefetch_later(&self, _url: &str, _delay_secs: u64) {
-        // Prefetching stream caching is delegated to the shared cache
+    pub fn prefetch_later(&self, url: &str, delay_secs: u64) {
+        if self.is_mock || url.trim().is_empty() || AudioPlayer::cached_audio(url).is_some() {
+            return;
+        }
+
+        let dumping = Arc::clone(&self.dumping);
+        let results = Arc::clone(&self.prefetch_results);
+        let cancel = Arc::clone(&self.cancel_prefetch);
+        let owned = url.to_string();
+
+        thread::spawn(move || {
+            for _ in 0..(delay_secs * 10) {
+                if cancel.load(Ordering::Relaxed) {
+                    if let Ok(mut lock) = results.lock() {
+                        lock.insert(owned, PrefetchResult::Cancelled);
+                    }
+                    return;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+
+            if cancel.load(Ordering::Relaxed) {
+                if let Ok(mut lock) = results.lock() {
+                    lock.insert(owned, PrefetchResult::Cancelled);
+                }
+                return;
+            }
+
+            let res = start_dump_cancellable(&owned, dumping, Some(cancel));
+            if let Ok(mut lock) = results.lock() {
+                if lock.len() >= 20
+                    && !lock.contains_key(&owned)
+                    && let Some(first_key) = lock.keys().next().cloned()
+                {
+                    lock.remove(&first_key);
+                }
+                lock.insert(owned, res);
+            }
+        });
     }
 
-    pub fn prefetch_result(&self, _url: &str) -> Option<PrefetchResult> {
-        None
+    pub fn prefetch_result(&self, url: &str) -> Option<PrefetchResult> {
+        self.prefetch_results.lock().ok()?.get(url).cloned()
     }
 
     pub fn generation(&self) -> u64 {
@@ -107,12 +171,15 @@ impl NativeBackend {
 
         self.stop();
         self.last_error = None;
+        self.cancel_prefetch = Arc::new(AtomicBool::new(false));
         self.generation += 1;
         let generation = self.generation;
 
+        let target = resolve_playback_target(url)?;
+
         if let Some(ref mut mpv) = self.mpv {
             mpv.set_volume(volume)?;
-            let load_id = mpv.loadfile(url)?;
+            let load_id = mpv.loadfile(&target)?;
             self.translator.begin(load_id, generation);
             self.playing = true;
             self.events = Some(events);
@@ -187,6 +254,7 @@ impl NativeBackend {
             self.mock_playing = false;
             return;
         }
+        self.cancel_prefetch.store(true, Ordering::SeqCst);
         if let Some(ref mut mpv) = self.mpv {
             let _ = mpv.stop();
         }
@@ -204,5 +272,42 @@ impl Default for NativeBackend {
 impl Drop for NativeBackend {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_playback_target_direct_url_preserved() {
+        let direct = "https://example.com/audio.mp3";
+        let target = resolve_playback_target(direct).expect("resolve direct");
+        assert_eq!(target, direct);
+    }
+
+    #[test]
+    fn test_resolve_playback_target_local_path_preserved() {
+        let local_path = "native/mpv/music1.mp3";
+        let target = resolve_playback_target(local_path).expect("resolve local");
+        assert_eq!(target, local_path);
+    }
+
+    #[test]
+    fn test_native_backend_mock_lifecycle_and_prefetch() {
+        let mut backend = NativeBackend::new_mock();
+        assert_eq!(backend.generation(), 0);
+        assert!(!backend.is_playing());
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let res = backend.play("native/mpv/music1.mp3", 85, tx);
+        assert!(res.is_ok());
+        assert!(backend.is_playing());
+        assert_eq!(backend.generation(), 1);
+
+        backend.prefetch_later("https://example.com/track", 1);
+        backend.stop();
+        assert!(!backend.is_playing());
+        assert_eq!(backend.generation(), 1);
     }
 }

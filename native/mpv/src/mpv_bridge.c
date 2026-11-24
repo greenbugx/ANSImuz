@@ -397,6 +397,43 @@ int ansimuz_mpv_create(
     if (status < 0) goto fail;
 
     /*
+     * Silence all terminal messages to prevent corrupting the TUI.
+     */
+    status = configure_option(
+        player->handle, "msg-level", "all=no",
+        error_buffer, error_buffer_size
+    );
+
+    if (status < 0) goto fail;
+
+    /*
+     * Disable mpv internal ytdl hook because Rust resolves stream URLs directly.
+     */
+    status = configure_option(
+        player->handle, "ytdl", "no",
+        error_buffer, error_buffer_size
+    );
+
+    if (status < 0) goto fail;
+
+    /*
+     * Disable window creation and idle mode to match CLI audio playback arguments.
+     */
+    status = configure_option(
+        player->handle, "force-window", "no",
+        error_buffer, error_buffer_size
+    );
+
+    if (status < 0) goto fail;
+
+    status = configure_option(
+        player->handle, "idle", "no",
+        error_buffer, error_buffer_size
+    );
+
+    if (status < 0) goto fail;
+
+    /*
      * Commit options and spawn internal playback threads.
      * Once initialized most core options become read only or require property writes.
      */
