@@ -250,6 +250,13 @@ int ansimuz_mpv_poll_event(
 );
 
 /*
+ * Callback invoked by ansimuz_mpv_dump_stream to poll cancellation state
+ * Allows Rust to load std::sync::atomic::AtomicBool atomically across threads
+ * Must be non blocking and return non zero when cancelled
+ */
+typedef int (*ansimuz_mpv_cancel_fn)(const void *ctx);
+
+/*
  * Dumps an audio stream to disk using a secondary libmpv instance
  * Runs headless with video and audio rendering disabled
  * Returns 0 on success, -2 when cancelled, or a negative mpv error code
@@ -257,7 +264,8 @@ int ansimuz_mpv_poll_event(
 int ansimuz_mpv_dump_stream(
     const char *url,
     const char *output_path,
-    const uint8_t *cancel_flag
+    ansimuz_mpv_cancel_fn is_cancelled,
+    const void *cancel_ctx
 );
 
 #ifdef __cplusplus

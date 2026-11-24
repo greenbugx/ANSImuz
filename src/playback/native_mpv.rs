@@ -1,6 +1,7 @@
 use std::{
     ffi::{CStr, CString, c_char, c_double, c_int, c_void},
     ptr::NonNull,
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 const ERROR_BUFFER_SIZE: usize = 512;
@@ -163,7 +164,8 @@ unsafe extern "C" {
     fn ansimuz_mpv_dump_stream(
         url: *const c_char,
         output_path: *const c_char,
-        cancel_flag: *const u8,
+        is_cancelled: Option<unsafe extern "C" fn(*const c_void) -> c_int>,
+        cancel_ctx: *const c_void,
     ) -> c_int;
 }
 
@@ -327,8 +329,18 @@ impl NativeMpv {
     pub fn dump_stream(
         url: &str,
         output_path: &std::path::Path,
-        cancel: Option<&std::sync::atomic::AtomicBool>,
+        cancel: Option<&AtomicBool>,
     ) -> Result<(), String> {
+        // Invoked by the C bridge to load AtomicBool atomically across threads
+        unsafe extern "C" fn check_cancelled(ctx: *const c_void) -> c_int {
+            if ctx.is_null() {
+                return 0;
+            }
+            // SAFETY: ctx points to caller's AtomicBool which outlives ansimuz_mpv_dump_stream
+            let flag = unsafe { &*(ctx as *const AtomicBool) };
+            c_int::from(flag.load(Ordering::Acquire))
+        }
+
         let url_c = CString::new(url)
             .map_err(|_| "Stream URL contains an interior NUL byte".to_string())?;
         let path_str = output_path
@@ -337,12 +349,17 @@ impl NativeMpv {
         let path_c = CString::new(path_str)
             .map_err(|_| "Output path contains an interior NUL byte".to_string())?;
 
-        let cancel_ptr = cancel
-            .map(|c| c.as_ptr() as *const u8)
-            .unwrap_or(std::ptr::null());
+        let (cancel_cb, cancel_ctx): (
+            Option<unsafe extern "C" fn(*const c_void) -> c_int>,
+            *const c_void,
+        ) = match cancel {
+            Some(flag) => (Some(check_cancelled), (flag as *const AtomicBool).cast()),
+            None => (None, std::ptr::null()),
+        };
 
-        let status =
-            unsafe { ansimuz_mpv_dump_stream(url_c.as_ptr(), path_c.as_ptr(), cancel_ptr) };
+        let status = unsafe {
+            ansimuz_mpv_dump_stream(url_c.as_ptr(), path_c.as_ptr(), cancel_cb, cancel_ctx)
+        };
 
         if status == 0 {
             Ok(())

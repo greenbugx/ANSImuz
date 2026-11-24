@@ -934,21 +934,29 @@ int ansimuz_mpv_poll_event(
     return 0;
 }
 
+static int dump_cancelled(
+    ansimuz_mpv_cancel_fn is_cancelled,
+    const void *cancel_ctx
+) {
+    return is_cancelled && is_cancelled(cancel_ctx) != 0;
+}
+
 /*
  * Dumps an audio stream to a file using a secondary headless mpv instance
- * Polls for completion while checking cancel_flag periodically
+ * Polls for completion while checking is_cancelled periodically
  * Returns 0 on success, -2 when cancelled, or a negative mpv error code
  */
 int ansimuz_mpv_dump_stream(
     const char *url,
     const char *output_path,
-    const uint8_t *cancel_flag
+    ansimuz_mpv_cancel_fn is_cancelled,
+    const void *cancel_ctx
 ) {
     if (!url || !output_path || url[0] == '\0' || output_path[0] == '\0') {
         return MPV_ERROR_INVALID_PARAMETER;
     }
 
-    if (cancel_flag && *cancel_flag != 0) {
+    if (dump_cancelled(is_cancelled, cancel_ctx)) {
         return -2;
     }
 
@@ -981,6 +989,11 @@ int ansimuz_mpv_dump_stream(
         return status;
     }
 
+    if (dump_cancelled(is_cancelled, cancel_ctx)) {
+        mpv_terminate_destroy(handle);
+        return -2;
+    }
+
     const char *args[] = {
         "loadfile",
         url,
@@ -996,7 +1009,7 @@ int ansimuz_mpv_dump_stream(
 
     int result = -1;
     while (1) {
-        if (cancel_flag && *cancel_flag != 0) {
+        if (dump_cancelled(is_cancelled, cancel_ctx)) {
             result = -2;
             break;
         }
