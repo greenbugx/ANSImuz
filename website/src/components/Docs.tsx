@@ -64,11 +64,10 @@ export default function Docs() {
               <li>
                 <span className="step-index">01</span>
                 <div>
-                  <h3>Install the players</h3>
+                  <h3>Install yt-dlp</h3>
                   <p>
-                    ANSImuz needs <a href={LINKS.mpv} target="_blank" rel="noreferrer">mpv</a>{' '}
-                    and <a href={LINKS.ytdlp} target="_blank" rel="noreferrer">yt-dlp</a> on
-                    your PATH.
+                    Install <a href={LINKS.ytdlp} target="_blank" rel="noreferrer">yt-dlp</a> on
+                    your PATH for stream resolution.
                   </p>
                 </div>
               </li>
@@ -85,7 +84,7 @@ export default function Docs() {
                   <h3>Run it</h3>
                   <p>
                     Type <code>ansimuz</code> in a terminal and press <kbd>:</kbd> for the
-                    command pallete
+                    command palette.
                   </p>
                 </div>
               </li>

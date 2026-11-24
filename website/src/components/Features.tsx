@@ -26,8 +26,8 @@ export default function Features() {
 
         <p className="feature-footnote">
           <span>Also included</span>
-          Shuffle and repeat modes, volume control, and Discord Rich Presence
-          (experimental).
+          Adaptive layout across terminal sizes, shuffle and repeat modes (Off, All, One),
+          and optional CLI mpv fallback.
         </p>
       </div>
     </section>

@@ -36,44 +36,50 @@ export type Feature = {
 export const FEATURES: Feature[] = [
   {
     title: 'Multi-source streaming',
-    description: 'Search YouTube Music and Spotify, then play both from the same queue.',
+    description: 'Search YouTube Music and Spotify, then play both from a single unified queue.',
+  },
+  {
+    title: 'Native libmpv engine',
+    description:
+      'In-process audio via native libmpv with headless stream prefetching and zero external player windows.',
   },
   {
     title: 'Synchronized lyrics',
     description:
-      'Words and syllables highlight in time with the track. Duets and background vocals get their own lanes.',
+      'Words and syllables highlight in time with the track. Duets, background vocals, and manual scroll are built in.',
   },
   {
-    title: 'ANSI album art',
-    description: 'Covers are drawn in adaptive block art or get Ultra High Quality cover arts right inside the terminal.',
+    title: 'Terminal album art',
+    description:
+      'Covers render in adaptive Unicode pixel blocks or HQ terminal graphics, including monochrome artwork.',
   },
   {
-    title: 'Queue control',
-    description: 'Add, remove, and reorder tracks with a few keys.',
+    title: 'Queue & history',
+    description:
+      'Add, remove, and reorder upcoming tracks, or jump back through anything played in your session.',
   },
   {
-    title: 'Session history',
-    description: 'Jump back to anything you played earlier in the current session.',
-  },
-  {
-    title: 'Adaptive layout',
-    description: 'The interface reshapes itself to fit the terminal you have open.',
+    title: 'Offline cache',
+    description:
+      'Audio streams, album covers, and lyrics save locally for instant replay even when offline.',
   },
   {
     title: 'Color themes',
-    description: 'Palettes sampled from the album art, or classic ANSI colors if you prefer.',
+    description:
+      'Sample dynamic palettes live from album covers, or keep the classic retro green ANSI look.',
+  },
+  {
+    title: 'Discord Rich Presence',
+    description:
+      'Broadcast live track progress, buttons, and auto-hosted cover art to Discord (experimental).',
   },
   {
     title: 'Command palette',
     description: (
       <>
-        Press <kbd>:</kbd> to reach every command and setting from one place.
+        Press <kbd>:</kbd> to search and trigger every command, mode, and setting from one place.
       </>
     ),
-  },
-  {
-    title: 'Offline cache',
-    description: 'Audio, artwork, and lyrics stay cached for instant replay, even offline.',
   },
 ];
 
@@ -85,6 +91,9 @@ export type Control = {
 export const CONTROLS: Control[] = [
   { key: 'space', action: 'Play or pause the current track' },
   { key: '← / →', action: 'Previous track or next in queue' },
+  { key: '+ / -', action: 'Adjust playback volume (±5%)' },
+  { key: 'Tab', action: 'Switch focus between search and queue' },
+  { key: 'A / Del', action: 'Add search result or remove queued track' },
   { key: 'L', action: 'Open or close the lyrics view' },
   { key: ':', action: 'Open the command palette' },
   { key: 'S', action: 'Open settings' },
@@ -117,7 +126,8 @@ export const PLATFORMS: Platform[] = [
     commands: ['sudo dnf copr enable greenbugx/ansimuz', 'sudo dnf install ansimuz'],
     note: (
       <>
-        Or download the prebuilt binary from{' '}
+        Includes native libmpv and yt-dlp automatically. Or download the prebuilt binary
+        from{' '}
         <a href={LINKS.releases} target="_blank" rel="noreferrer">
           GitHub Releases
         </a>
@@ -132,13 +142,14 @@ export const PLATFORMS: Platform[] = [
     meta: 'PKGBUILD',
     commandLabel: 'build',
     commands: [
+      'paru -S python-spotifyscraper',
       'git clone https://github.com/greenbugx/ANSImuz.git',
-      'cd ANSImuz/packaging/arch',
-      'makepkg -si',
+      'cd ANSImuz/packaging/arch && makepkg -si',
     ],
     note: (
       <>
-        Or download the prebuilt binary from{' '}
+        Installs libmpv (via mpv) and yt-dlp automatically. Use yay or manual AUR if you
+        do not use paru, or grab a release from{' '}
         <a href={LINKS.releases} target="_blank" rel="noreferrer">
           GitHub Releases
         </a>
@@ -151,12 +162,15 @@ export const PLATFORMS: Platform[] = [
   {
     name: 'Windows',
     meta: 'Portable x64 build',
-    commandLabel: 'prerequisites',
-    commands: [
-      'winget install --id shinchiro.mpv -e',
-      'winget install --id yt-dlp.yt-dlp -e',
-    ],
-    note: 'The release bundles its runtime. Extract the archive and run ansimuz.exe. Windows 10 and 11 are supported.',
+    commandLabel: 'prerequisite',
+    commands: ['winget install --id yt-dlp.yt-dlp -e'],
+    note: (
+      <>
+        Bundles the Python runtime and native <kbd>libmpv-2.dll</kbd> with no separate mpv
+        install needed. Extract the archive and run <kbd>ansimuz.exe</kbd> on Windows 10
+        or 11.
+      </>
+    ),
     action: 'Download .rar',
     href: LINKS.releases,
     primary: true,
@@ -167,8 +181,13 @@ export const PLATFORMS: Platform[] = [
   },
   {
     name: 'From source',
-    meta: 'Rust toolchain',
-    note: 'The full build requirements and commands live in CONTRIBUTING.md.',
+    meta: 'Rust + C bridge',
+    note: (
+      <>
+        Run <kbd>scripts/install_linux.sh</kbd> or <kbd>scripts/install_windows.ps1</kbd>,
+        or see <kbd>CONTRIBUTING.md</kbd> for manual Rust, Python, and libmpv setup.
+      </>
+    ),
     action: 'Build guide',
     href: LINKS.contributing,
   },
@@ -188,42 +207,50 @@ export const FAQS: Faq[] = [
   {
     question: 'Do I need Python installed?',
     answer:
-      'Not for the Windows portable build. It bundles its runtime. The Linux packages handle dependencies for you. Building from source needs the toolchain described in CONTRIBUTING.md.',
+      'Not for the Windows portable build. It bundles an embedded Python runtime and its dependencies. The Linux packages wire up system Python modules for you. Building from source uses the virtual environment workflow in CONTRIBUTING.md.',
   },
   {
-    question: 'Why does it need mpv and yt-dlp?',
-    answer:
-      'mpv handles audio playback and yt-dlp resolves the audio stream. Both need to be installed and available on your PATH before you launch ANSImuz.',
+    question: 'Do I need mpv and yt-dlp installed?',
+    answer: (
+      <>
+        Only <kbd>yt-dlp</kbd> is required on your PATH to resolve audio streams. Playback
+        runs in-process through native <kbd>libmpv</kbd> instead of launching the{' '}
+        <kbd>mpv</kbd> CLI: Windows portable builds bundle <kbd>libmpv-2.dll</kbd>{' '}
+        directly, Fedora and Arch packages install it for you, and Debian/Ubuntu users
+        just need <kbd>libmpv2</kbd>.
+      </>
+    ),
   },
   {
     question: 'Is Discord Rich Presence stable?',
     answer:
-      'It is experimental. It works, but expect rough edges while it is being developed. You can turn it on or off from Settings.',
+      'It is experimental. It displays live track info, progress, stream buttons, and auto-hosted cover art, though minor rough edges remain. You can toggle it anytime from Settings.',
   },
   {
     question: 'Where does it store caches?',
     answer: (
       <>
         Under <kbd>$XDG_CACHE_HOME/ansimuz</kbd> on Linux or{' '}
-        <kbd>%LOCALAPPDATA%\ansimuz</kbd> on Windows. Audio, artwork, and lyrics
-        are kept there. You can clear them from Settings.
+        <kbd>%LOCALAPPDATA%\ansimuz</kbd> on Windows. Audio streams, artwork thumbnails,
+        lyrics, and Discord artwork caches live there. You can clear them anytime from
+        Settings.
       </>
     ),
   },
   {
     question: 'Does it run on Windows?',
     answer:
-      'Yes. Use the portable release for Windows 10 and 11, or run it through WSL2 if you prefer a Linux environment.',
+      'Yes. Download the self-contained portable release for Windows 10 and 11, or run through WSL2 if you prefer a Linux environment.',
   },
   {
     question: 'Is it open source?',
     answer:
-      'Yes. ANSImuz is released under the MIT license. The source, issues, and release notes are all on GitHub.',
+      'Yes. ANSImuz is released under the MIT license. The source, packaging scripts, issues, and release notes are all on GitHub.',
   },
   {
     question: 'Will album art work in my terminal?',
     answer:
-      'The interface runs in any terminal with ANSI color support. Image quality depends on the terminal image protocol, but the player and lyrics stay usable either way.',
+      'Yes. Any terminal with ANSI color support works via adaptive Unicode pixel blocks, and terminals with native graphics protocols can switch Art Mode to HQ in Settings for sharp covers.',
   },
 ];
 

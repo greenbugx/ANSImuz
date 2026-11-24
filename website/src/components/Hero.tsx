@@ -14,7 +14,7 @@ const SCREENSHOTS = [
     id: 'middle',
     className: 'deck-card-middle',
     src: '/screenshots/3.webp',
-    alt: 'ANSImuz command pallete',
+    alt: 'ANSImuz command palette',
     width: 1882,
     height: 933,
   },

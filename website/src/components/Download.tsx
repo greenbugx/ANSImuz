@@ -24,15 +24,16 @@ export default function Download() {
           index="03"
           label="Download"
           title="Install. Run. Play."
-          intro="A portable Windows build, native Linux packages, or a source build. Pick one and keep mpv and yt-dlp nearby."
+          intro="A portable Windows build, native Linux packages, or a source build. Keep yt-dlp on your PATH and start listening."
         />
 
         <div className="download-note">
           <span className="note-label">before you start</span>
           <p>
-            You need <a href={LINKS.mpv} target="_blank" rel="noreferrer">mpv 0.35+</a> and{' '}
-            <a href={LINKS.ytdlp} target="_blank" rel="noreferrer">yt-dlp</a> installed and
-            available on your PATH.
+            <a href={LINKS.ytdlp} target="_blank" rel="noreferrer">yt-dlp</a> must be
+            installed and available on your PATH. Audio plays natively via{' '}
+            <a href={LINKS.mpv} target="_blank" rel="noreferrer">libmpv</a>, which is
+            bundled on Windows and installed automatically by the Linux packages.
           </p>
         </div>
 

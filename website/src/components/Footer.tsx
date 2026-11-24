@@ -15,7 +15,7 @@ export default function Footer() {
               <span className="brand-name">ANSImuz</span>
             </a>
             <p>
-              A terminal music player with 8-bit ANSI vibes. Built in Rust & Python
+              A terminal music player with 8-bit ANSI vibes. Powered by Rust, libmpv &amp; Python.
             </p>
           </div>
 
