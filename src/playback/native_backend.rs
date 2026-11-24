@@ -296,7 +296,7 @@ impl NativeBackend {
         events: Sender<PlayerEvent>,
     ) -> Result<(), String> {
         if self.is_mock {
-            self.stop();
+            self.mock_playing = false;
             self.last_error = None;
             self.generation += 1;
             if self.mock_fail {
@@ -309,8 +309,8 @@ impl NativeBackend {
             return Ok(());
         }
 
-        self.stop();
         self.last_error = None;
+        self.cancel_prefetch.store(true, Ordering::SeqCst);
         self.cancel_prefetch = Arc::new(AtomicBool::new(false));
         self.generation += 1;
         let generation = self.generation;
@@ -332,32 +332,23 @@ impl NativeBackend {
     pub fn poll_events(&mut self) -> Result<Vec<PlayerEvent>, String> {
         let mut emitted = Vec::new();
         if let Some(ref mut mpv) = self.mpv {
-            loop {
-                match mpv.poll_event() {
-                    Ok(Some(ev)) => {
-                        let desc = |code| mpv.error_message(code);
-                        if let Some(player_event) = self.translator.translate(ev, &desc) {
-                            match &player_event {
-                                PlayerEvent::Ended { .. } => {
-                                    self.playing = false;
-                                }
-                                PlayerEvent::Failed { message, .. } => {
-                                    self.playing = false;
-                                    self.last_error = Some(message.clone());
-                                }
-                                _ => {}
-                            }
-                            if let Some(ref tx) = self.events {
-                                let _ = tx.send(player_event.clone());
-                            }
-                            emitted.push(player_event);
+            while let Ok(Some(ev)) = mpv.poll_event() {
+                let desc = |code| mpv.error_message(code);
+                if let Some(player_event) = self.translator.translate(ev, &desc) {
+                    match &player_event {
+                        PlayerEvent::Ended { .. } => {
+                            self.playing = false;
                         }
+                        PlayerEvent::Failed { message, .. } => {
+                            self.playing = false;
+                            self.last_error = Some(message.clone());
+                        }
+                        _ => {}
                     }
-                    Ok(None) => break,
-                    Err(err) => {
-                        self.last_error = Some(err.clone());
-                        break;
+                    if let Some(ref tx) = self.events {
+                        let _ = tx.send(player_event.clone());
                     }
+                    emitted.push(player_event);
                 }
             }
         }
