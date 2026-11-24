@@ -49,6 +49,7 @@ dependencies = [
  "crossterm",
  "image",
  "interprocess",
+ "pkg-config",
  "presenceforge",
  "pyo3",
  "ratatui",

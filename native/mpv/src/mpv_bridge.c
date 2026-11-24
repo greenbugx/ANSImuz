@@ -322,6 +322,21 @@ int ansimuz_mpv_create(
 
     *out_player = NULL;
 
+    /* Check that runtime libmpv major version matches the header version */
+    unsigned long runtime = mpv_client_api_version();
+    if ((runtime >> 16) != (MPV_CLIENT_API_VERSION >> 16)) {
+        if (error_buffer && error_buffer_size > 0) {
+            snprintf(
+                error_buffer,
+                error_buffer_size,
+                "libmpv major version mismatch: runtime %lu, headers %lu",
+                runtime >> 16,
+                (unsigned long)(MPV_CLIENT_API_VERSION >> 16)
+            );
+        }
+        return MPV_ERROR_UNSUPPORTED;
+    }
+
     ansimuz_mpv *player = calloc(1, sizeof(*player));
 
     if (!player) {
