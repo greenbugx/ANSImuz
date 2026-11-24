@@ -25,7 +25,7 @@ pub fn run(
     app.init_discord();
     let mut player = AudioPlayer::from_backend(app.settings.backend);
     if let Some(msg) = player.startup_message() {
-        app.set_status(msg);
+        crate::playback::player::log_playback(msg);
     }
 
     let (search_tx, search_rx): (Sender<SearchResponse>, Receiver<SearchResponse>) =

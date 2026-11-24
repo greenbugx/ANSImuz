@@ -39,6 +39,8 @@ struct ansimuz_mpv {
     track_load_entry load_queue[ANSIMUZ_MPV_MAX_TRACKED_LOADS];
     int load_queue_head;
     int load_queue_count;
+
+    FILE *log_file;
 };
 
 /*
@@ -463,7 +465,14 @@ int ansimuz_mpv_create(
         goto fail;
     }
 
-    mpv_request_log_messages(player->handle, "debug");
+    /* Optional log file destination for diagnostics */
+    const char *log_path = getenv("ANSIMUZ_MPV_LOG");
+    if (log_path && *log_path) {
+        player->log_file = fopen(log_path, "a");
+        if (player->log_file) {
+            mpv_request_log_messages(player->handle, "info");
+        }
+    }
 
     /*
      * Register property observers immediately after initialize succeeds.
@@ -496,6 +505,11 @@ fail:
 void ansimuz_mpv_destroy(ansimuz_mpv *player) {
     if (!player) {
         return;
+    }
+
+    if (player->log_file) {
+        fclose(player->log_file);
+        player->log_file = NULL;
     }
 
     /*
@@ -592,12 +606,15 @@ int ansimuz_mpv_loadfile(ansimuz_mpv *player, const char *path) {
         return MPV_ERROR_GENERIC;
     }
 
-    fprintf(stderr,
-        "[LOAD BIND] load_id=%llu playlist_entry_id=%lld path=%s\n",
-        (unsigned long long)load_id,
-        (long long)playlist_entry_id,
-        path
-    );
+    if (player->log_file) {
+        fprintf(player->log_file,
+            "[LOAD BIND] load_id=%llu playlist_entry_id=%lld path=%s\n",
+            (unsigned long long)load_id,
+            (long long)playlist_entry_id,
+            path
+        );
+        fflush(player->log_file);
+    }
 
     return 0;
 }
@@ -885,10 +902,11 @@ int ansimuz_mpv_poll_event(
                 mpv_event_log_message *msg =
                     (mpv_event_log_message *)event->data;
 
-                if (msg) {
-                    fprintf(stderr, "[MPV:%s] %s",
+                if (msg && player->log_file) {
+                    fprintf(player->log_file, "[MPV:%s] %s",
                             msg->level ? msg->level : "unknown",
                             msg->text ? msg->text : "");
+                    fflush(player->log_file);
                 }
 
                 continue;
@@ -902,10 +920,13 @@ int ansimuz_mpv_poll_event(
                     player->current_playlist_entry_id =
                         start->playlist_entry_id;
 
-                    fprintf(stderr,
-                        "[NATIVE START_FILE] playlist_entry_id=%lld\n",
-                        (long long)start->playlist_entry_id
-                    );
+                    if (player->log_file) {
+                        fprintf(player->log_file,
+                            "[NATIVE START_FILE] playlist_entry_id=%lld\n",
+                            (long long)start->playlist_entry_id
+                        );
+                        fflush(player->log_file);
+                    }
                 }
 
                 continue;
@@ -993,13 +1014,14 @@ int ansimuz_mpv_poll_event(
                 mpv_event_end_file *end =
                     (mpv_event_end_file *)event->data;
 
-                if (end) {
-                    fprintf(stderr,
+                if (end && player->log_file) {
+                    fprintf(player->log_file,
                         "[NATIVE END_FILE] playlist_entry_id=%lld reason=%d error=%d\n",
                         (long long)end->playlist_entry_id,
                         end->reason,
                         end->error
                     );
+                    fflush(player->log_file);
                 }
 
                 out_event->type = ANSIMUZ_MPV_EVENT_END_FILE;
