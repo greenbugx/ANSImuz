@@ -1,15 +1,32 @@
 param(
     [Parameter(Mandatory = $false)]
-    [string] $Url = "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20261111/mpv-dev-x86_64-20261111-git-bcde6b93cc.7z",
+    [string] $Url,
 
     [Parameter(Mandatory = $false)]
-    [string] $Sha256 = "273C079B11EA5575822F972756F4C9A71149A5C10130353ABEB8586738938452"
+    [string] $Sha256
 )
 
 $ErrorActionPreference = 'Stop'
 
-if ([string]::IsNullOrWhiteSpace($Url) -or [string]::IsNullOrWhiteSpace($Sha256)) {
-    throw "Both Url and Sha256 parameters must be provided"
+$root = Split-Path -Parent $PSScriptRoot
+$configFile = Join-Path $root 'native/mpv/WINDOWS_LIBMPV'
+
+if (Test-Path $configFile) {
+    Get-Content $configFile | ForEach-Object {
+        if ($_ -match '^\s*MPV_DEV_URL\s*=\s*(.+)$' -and [string]::IsNullOrWhiteSpace($Url)) {
+            $Url = $matches[1].Trim()
+        }
+        if ($_ -match '^\s*MPV_DEV_SHA256\s*=\s*(.+)$' -and [string]::IsNullOrWhiteSpace($Sha256)) {
+            $Sha256 = $matches[1].Trim()
+        }
+    }
+}
+
+if ([string]::IsNullOrWhiteSpace($Url)) {
+    $Url = "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20261111/mpv-dev-x86_64-20261111-git-bcde6b93cc.7z"
+}
+if ([string]::IsNullOrWhiteSpace($Sha256)) {
+    $Sha256 = "273C079B11EA5575822F972756F4C9A71149A5C10130353ABEB8586738938452"
 }
 
 if (-not (Get-Command 7z -ErrorAction SilentlyContinue)) {

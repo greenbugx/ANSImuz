@@ -115,6 +115,15 @@ Ensure both tools are installed and accessible in your system `PATH`:
   ```bash
   sudo dnf install mpv yt-dlp
   ```
+- **Debian / Ubuntu**:
+  ```bash
+  sudo apt install mpv libmpv2 yt-dlp
+  # Note: older releases use libmpv1
+  ```
+- **macOS (Homebrew)**:
+  ```bash
+  brew install mpv yt-dlp
+  ```
 
 ---
 
