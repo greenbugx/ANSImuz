@@ -155,14 +155,15 @@ int main(void)
     }
 
     /*
-     * Let any remaining events arrive, then drain them.
+     * Stop active playback and drain remaining events to ensure core is idle.
      */
-    sleep_ms(500);
+    ansimuz_mpv_stop(player);
+    sleep_ms(200);
 
-    if (drain_events(player, load_id, &file_loaded,
-                     &playback_restart, &event_count) != 0) {
-        ansimuz_mpv_destroy(player);
-        return 1;
+    while (ansimuz_mpv_poll_event(player, &event) > 0) {
+        printf("[CLEANUP EVENT] type=%d load_id=%llu\n",
+               event.type,
+               (unsigned long long)event.load_id);
     }
 
     /*
@@ -188,16 +189,6 @@ int main(void)
     }
 
     printf("[INFO] Total events received: %d\n", event_count);
-
-    /* Clean up playback before terminating instance */
-    ansimuz_mpv_stop(player);
-    sleep_ms(200);
-
-    while (ansimuz_mpv_poll_event(player, &event) > 0) {
-        printf("[CLEANUP EVENT] type=%d load_id=%llu\n",
-               event.type,
-               (unsigned long long)event.load_id);
-    }
 
     ansimuz_mpv_destroy(player);
 
