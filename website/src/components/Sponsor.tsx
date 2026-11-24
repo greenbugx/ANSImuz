@@ -5,7 +5,7 @@ export default function Sponsor() {
         <div className="sponsor-inner">
           <p className="sponsor-heading">SPONSORED BY</p>
           <a
-            href="https://github.com/PIYUSH-NEXTGEN/Manabi"
+            href="https://manabi-bsh.pages.dev"
             className="sponsor-brand"
             target="_blank"
             rel="noreferrer"
