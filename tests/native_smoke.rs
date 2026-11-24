@@ -52,7 +52,9 @@ fn plays_a_short_file_to_eof() {
     write_silence_wav(&wav, 1);
 
     let Some(mut mpv) = new_player() else { return };
-    let id = mpv.loadfile(wav.to_str().expect("valid path")).expect("loadfile");
+    let id = mpv
+        .loadfile(wav.to_str().expect("valid path"))
+        .expect("loadfile");
 
     let deadline = Instant::now() + Duration::from_secs(10);
     let (mut loaded, mut ended, mut saw_pos) = (false, false, false);
@@ -92,8 +94,12 @@ fn rapid_replace_does_not_emit_eof_for_first_track() {
     write_silence_wav(&wav_b, 1);
 
     let Some(mut mpv) = new_player() else { return };
-    let first = mpv.loadfile(wav_a.to_str().expect("valid path")).expect("loadfile a");
-    let second = mpv.loadfile(wav_b.to_str().expect("valid path")).expect("loadfile b");
+    let first = mpv
+        .loadfile(wav_a.to_str().expect("valid path"))
+        .expect("loadfile a");
+    let second = mpv
+        .loadfile(wav_b.to_str().expect("valid path"))
+        .expect("loadfile b");
 
     let mut events: Vec<NativeEventData> = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -159,9 +165,12 @@ fn native_dump_stream_cancelled() {
     }
 
     let cancel = std::sync::atomic::AtomicBool::new(true);
-    let res = NativeMpv::dump_stream(wav_src.to_str().expect("valid src"), &wav_dst, Some(&cancel));
+    let res = NativeMpv::dump_stream(
+        wav_src.to_str().expect("valid src"),
+        &wav_dst,
+        Some(&cancel),
+    );
     assert!(res.is_err(), "expected cancelled error");
     let _ = fs::remove_file(&wav_src);
     let _ = fs::remove_file(&wav_dst);
 }
-

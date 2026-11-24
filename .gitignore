@@ -26,3 +26,4 @@ Thumbs.db
 *.local.toml
 *.local.json
 *.obj
+.ansimuz-settings.toml

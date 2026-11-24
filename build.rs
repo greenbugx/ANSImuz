@@ -40,13 +40,13 @@ fn main() {
 
         // Copy libmpv-2.dll next to compiled binaries for direct execution
         let dll_src = lib_dir.join("libmpv-2.dll");
-        if dll_src.exists() {
-            if let Ok(out_dir) = env::var("OUT_DIR") {
-                let out_path = PathBuf::from(out_dir);
-                if let Some(profile_dir) = out_path.ancestors().nth(3) {
-                    let dll_dest = profile_dir.join("libmpv-2.dll");
-                    let _ = std::fs::copy(&dll_src, &dll_dest);
-                }
+        if dll_src.exists()
+            && let Ok(out_dir) = env::var("OUT_DIR")
+        {
+            let out_path = PathBuf::from(out_dir);
+            if let Some(profile_dir) = out_path.ancestors().nth(3) {
+                let dll_dest = profile_dir.join("libmpv-2.dll");
+                let _ = std::fs::copy(&dll_src, &dll_dest);
             }
         }
     } else if pkg_config::Config::new().probe("mpv").is_err() {

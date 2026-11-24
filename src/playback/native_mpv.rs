@@ -86,7 +86,7 @@ impl TryFrom<c_int> for NativeEndReason {
     }
 }
 
-// Raw C ABI structure 
+// Raw C ABI structure
 // Enums are represented as raw c_int to prevent undefined behavior from invalid C integers
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -134,61 +134,31 @@ unsafe extern "C" {
 
     fn ansimuz_mpv_destroy(player: *mut c_void);
 
-    fn ansimuz_mpv_loadfile(
-        player: *mut c_void,
-        path: *const c_char,
-    ) -> c_int;
+    fn ansimuz_mpv_loadfile(player: *mut c_void, path: *const c_char) -> c_int;
 
     fn ansimuz_mpv_get_last_load_id(player: *const c_void) -> u64;
 
-    fn ansimuz_mpv_set_pause(
-        player: *mut c_void,
-        paused: c_int,
-    ) -> c_int;
+    fn ansimuz_mpv_set_pause(player: *mut c_void, paused: c_int) -> c_int;
 
     fn ansimuz_mpv_stop(player: *mut c_void) -> c_int;
 
-    fn ansimuz_mpv_seek(
-        player: *mut c_void,
-        seconds: c_double,
-    ) -> c_int;
+    fn ansimuz_mpv_seek(player: *mut c_void, seconds: c_double) -> c_int;
 
-    fn ansimuz_mpv_get_time_pos(
-        player: *mut c_void,
-        out_seconds: *mut c_double,
-    ) -> c_int;
+    fn ansimuz_mpv_get_time_pos(player: *mut c_void, out_seconds: *mut c_double) -> c_int;
 
-    fn ansimuz_mpv_get_duration(
-        player: *mut c_void,
-        out_seconds: *mut c_double,
-    ) -> c_int;
+    fn ansimuz_mpv_get_duration(player: *mut c_void, out_seconds: *mut c_double) -> c_int;
 
-    fn ansimuz_mpv_set_volume(
-        player: *mut c_void,
-        volume: c_double,
-    ) -> c_int;
+    fn ansimuz_mpv_set_volume(player: *mut c_void, volume: c_double) -> c_int;
 
-    fn ansimuz_mpv_get_volume(
-        player: *mut c_void,
-        out_volume: *mut c_double,
-    ) -> c_int;
+    fn ansimuz_mpv_get_volume(player: *mut c_void, out_volume: *mut c_double) -> c_int;
 
-    fn ansimuz_mpv_set_mute(
-        player: *mut c_void,
-        muted: c_int,
-    ) -> c_int;
+    fn ansimuz_mpv_set_mute(player: *mut c_void, muted: c_int) -> c_int;
 
-    fn ansimuz_mpv_get_mute(
-        player: *mut c_void,
-        out_muted: *mut c_int,
-    ) -> c_int;
+    fn ansimuz_mpv_get_mute(player: *mut c_void, out_muted: *mut c_int) -> c_int;
 
     fn ansimuz_mpv_error_string(status: c_int) -> *const c_char;
 
-    fn ansimuz_mpv_poll_event(
-        player: *mut c_void,
-        out_event: *mut NativeEvent,
-    ) -> c_int;
+    fn ansimuz_mpv_poll_event(player: *mut c_void, out_event: *mut NativeEvent) -> c_int;
 
     fn ansimuz_mpv_dump_stream(
         url: *const c_char,
@@ -238,40 +208,27 @@ impl NativeMpv {
         let path = CString::new(path)
             .map_err(|_| "Media path contains an interior NUL byte".to_string())?;
 
-        let status = unsafe {
-            ansimuz_mpv_loadfile(self.handle.as_ptr(), path.as_ptr())
-        };
+        let status = unsafe { ansimuz_mpv_loadfile(self.handle.as_ptr(), path.as_ptr()) };
 
         self.check_status(status)?;
 
-        Ok(unsafe {
-            ansimuz_mpv_get_last_load_id(self.handle.as_ptr())
-        })
+        Ok(unsafe { ansimuz_mpv_get_last_load_id(self.handle.as_ptr()) })
     }
 
     pub fn set_pause(&mut self, paused: bool) -> Result<(), String> {
-        let status = unsafe {
-            ansimuz_mpv_set_pause(
-                self.handle.as_ptr(),
-                i32::from(paused),
-            )
-        };
+        let status = unsafe { ansimuz_mpv_set_pause(self.handle.as_ptr(), i32::from(paused)) };
 
         self.check_status(status)
     }
 
     pub fn stop(&mut self) -> Result<(), String> {
-        let status = unsafe {
-            ansimuz_mpv_stop(self.handle.as_ptr())
-        };
+        let status = unsafe { ansimuz_mpv_stop(self.handle.as_ptr()) };
 
         self.check_status(status)
     }
 
     pub fn seek(&mut self, seconds: f64) -> Result<(), String> {
-        let status = unsafe {
-            ansimuz_mpv_seek(self.handle.as_ptr(), seconds)
-        };
+        let status = unsafe { ansimuz_mpv_seek(self.handle.as_ptr(), seconds) };
 
         self.check_status(status)
     }
@@ -279,12 +236,7 @@ impl NativeMpv {
     pub fn time_pos(&self) -> Result<f64, String> {
         let mut seconds = 0.0;
 
-        let status = unsafe {
-            ansimuz_mpv_get_time_pos(
-                self.handle.as_ptr(),
-                &mut seconds,
-            )
-        };
+        let status = unsafe { ansimuz_mpv_get_time_pos(self.handle.as_ptr(), &mut seconds) };
 
         self.check_status(status)?;
         Ok(seconds)
@@ -293,12 +245,7 @@ impl NativeMpv {
     pub fn duration(&self) -> Result<f64, String> {
         let mut seconds = 0.0;
 
-        let status = unsafe {
-            ansimuz_mpv_get_duration(
-                self.handle.as_ptr(),
-                &mut seconds,
-            )
-        };
+        let status = unsafe { ansimuz_mpv_get_duration(self.handle.as_ptr(), &mut seconds) };
 
         self.check_status(status)?;
         Ok(seconds)
@@ -306,39 +253,28 @@ impl NativeMpv {
 
     pub fn set_volume(&mut self, volume: u8) -> Result<(), String> {
         let clamped_volume = volume.min(100) as f64;
-        let status = unsafe {
-            ansimuz_mpv_set_volume(self.handle.as_ptr(), clamped_volume)
-        };
+        let status = unsafe { ansimuz_mpv_set_volume(self.handle.as_ptr(), clamped_volume) };
 
         self.check_status(status)
     }
 
     pub fn volume(&self) -> Result<f64, String> {
         let mut volume = 0.0;
-        let status = unsafe {
-            ansimuz_mpv_get_volume(self.handle.as_ptr(), &mut volume)
-        };
+        let status = unsafe { ansimuz_mpv_get_volume(self.handle.as_ptr(), &mut volume) };
 
         self.check_status(status)?;
         Ok(volume)
     }
 
     pub fn set_mute(&mut self, muted: bool) -> Result<(), String> {
-        let status = unsafe {
-            ansimuz_mpv_set_mute(
-                self.handle.as_ptr(),
-                i32::from(muted),
-            )
-        };
+        let status = unsafe { ansimuz_mpv_set_mute(self.handle.as_ptr(), i32::from(muted)) };
 
         self.check_status(status)
     }
 
     pub fn is_muted(&self) -> Result<bool, String> {
         let mut muted = 0;
-        let status = unsafe {
-            ansimuz_mpv_get_mute(self.handle.as_ptr(), &mut muted)
-        };
+        let status = unsafe { ansimuz_mpv_get_mute(self.handle.as_ptr(), &mut muted) };
 
         self.check_status(status)?;
         Ok(muted != 0)
@@ -354,12 +290,7 @@ impl NativeMpv {
             error_code: 0,
         };
 
-        let status = unsafe {
-            ansimuz_mpv_poll_event(
-                self.handle.as_ptr(),
-                &mut event,
-            )
-        };
+        let status = unsafe { ansimuz_mpv_poll_event(self.handle.as_ptr(), &mut event) };
 
         if status < 0 {
             return Err(self.error_message(status));
@@ -389,9 +320,7 @@ impl NativeMpv {
                 return format!("Native mpv error: {status}");
             }
 
-            CStr::from_ptr(ptr)
-                .to_string_lossy()
-                .into_owned()
+            CStr::from_ptr(ptr).to_string_lossy().into_owned()
         }
     }
 
@@ -412,9 +341,8 @@ impl NativeMpv {
             .map(|c| c.as_ptr() as *const u8)
             .unwrap_or(std::ptr::null());
 
-        let status = unsafe {
-            ansimuz_mpv_dump_stream(url_c.as_ptr(), path_c.as_ptr(), cancel_ptr)
-        };
+        let status =
+            unsafe { ansimuz_mpv_dump_stream(url_c.as_ptr(), path_c.as_ptr(), cancel_ptr) };
 
         if status == 0 {
             Ok(())
@@ -474,29 +402,59 @@ mod tests {
     #[test]
     fn test_enum_conversions() {
         assert_eq!(NativeEventType::try_from(0).unwrap(), NativeEventType::None);
-        assert_eq!(NativeEventType::try_from(1).unwrap(), NativeEventType::FileLoaded);
-        assert_eq!(NativeEventType::try_from(2).unwrap(), NativeEventType::PlaybackRestart);
-        assert_eq!(NativeEventType::try_from(3).unwrap(), NativeEventType::PropertyChange);
-        assert_eq!(NativeEventType::try_from(4).unwrap(), NativeEventType::EndFile);
-        assert_eq!(NativeEventType::try_from(5).unwrap(), NativeEventType::Error);
+        assert_eq!(
+            NativeEventType::try_from(1).unwrap(),
+            NativeEventType::FileLoaded
+        );
+        assert_eq!(
+            NativeEventType::try_from(2).unwrap(),
+            NativeEventType::PlaybackRestart
+        );
+        assert_eq!(
+            NativeEventType::try_from(3).unwrap(),
+            NativeEventType::PropertyChange
+        );
+        assert_eq!(
+            NativeEventType::try_from(4).unwrap(),
+            NativeEventType::EndFile
+        );
+        assert_eq!(
+            NativeEventType::try_from(5).unwrap(),
+            NativeEventType::Error
+        );
         assert!(NativeEventType::try_from(6).is_err());
         assert!(NativeEventType::try_from(-1).is_err());
 
         assert_eq!(NativeProperty::try_from(0).unwrap(), NativeProperty::None);
-        assert_eq!(NativeProperty::try_from(1).unwrap(), NativeProperty::TimePos);
-        assert_eq!(NativeProperty::try_from(2).unwrap(), NativeProperty::Duration);
+        assert_eq!(
+            NativeProperty::try_from(1).unwrap(),
+            NativeProperty::TimePos
+        );
+        assert_eq!(
+            NativeProperty::try_from(2).unwrap(),
+            NativeProperty::Duration
+        );
         assert_eq!(NativeProperty::try_from(3).unwrap(), NativeProperty::Pause);
         assert_eq!(NativeProperty::try_from(4).unwrap(), NativeProperty::Volume);
         assert_eq!(NativeProperty::try_from(5).unwrap(), NativeProperty::Mute);
         assert!(NativeProperty::try_from(6).is_err());
         assert!(NativeProperty::try_from(-1).is_err());
 
-        assert_eq!(NativeEndReason::try_from(0).unwrap(), NativeEndReason::Unknown);
+        assert_eq!(
+            NativeEndReason::try_from(0).unwrap(),
+            NativeEndReason::Unknown
+        );
         assert_eq!(NativeEndReason::try_from(1).unwrap(), NativeEndReason::Eof);
         assert_eq!(NativeEndReason::try_from(2).unwrap(), NativeEndReason::Stop);
         assert_eq!(NativeEndReason::try_from(3).unwrap(), NativeEndReason::Quit);
-        assert_eq!(NativeEndReason::try_from(4).unwrap(), NativeEndReason::Error);
-        assert_eq!(NativeEndReason::try_from(5).unwrap(), NativeEndReason::Redirect);
+        assert_eq!(
+            NativeEndReason::try_from(4).unwrap(),
+            NativeEndReason::Error
+        );
+        assert_eq!(
+            NativeEndReason::try_from(5).unwrap(),
+            NativeEndReason::Redirect
+        );
         assert!(NativeEndReason::try_from(6).is_err());
         assert!(NativeEndReason::try_from(-1).is_err());
     }

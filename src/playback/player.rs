@@ -1,9 +1,9 @@
-use std::path::PathBuf;
-use std::sync::mpsc::Sender;
 use super::events::PlayerEvent;
 use super::mpv::{CliPlayer, PrefetchResult};
 #[cfg(feature = "native-mpv")]
 use super::native_backend::NativeBackend;
+use std::path::PathBuf;
+use std::sync::mpsc::Sender;
 
 pub enum Inner {
     Cli(CliPlayer),
@@ -17,7 +17,11 @@ pub(crate) fn log_playback(msg: &str) {
     let log_dir = crate::config::cache_base_dir();
     let _ = std::fs::create_dir_all(&log_dir);
     let log_path = log_dir.join("playback.log");
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(log_path) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+    {
         let secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -83,7 +87,9 @@ impl AudioPlayer {
                             Self::from_native(native)
                         }
                         Err(e) => {
-                            let msg = format!("Native mpv initialization failed ({e}), falling back to CLI");
+                            let msg = format!(
+                                "Native mpv initialization failed ({e}), falling back to CLI"
+                            );
                             log_playback(&msg);
                             let mut player = Self::new();
                             player.startup_message = Some(msg);
