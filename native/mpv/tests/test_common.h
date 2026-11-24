@@ -34,13 +34,20 @@ static inline uint32_t get_tick_ms(void) {
 #endif
 
 static inline void ensure_test_audio_file(const char *path, uint32_t secs) {
+    uint64_t min_wav_size = 44ULL + 44100ULL * (uint64_t)secs * 2ULL;
     FILE *check = fopen(path, "rb");
     if (check) {
+        char magic[4] = {0};
+        size_t n = fread(magic, 1, 4, check);
         fseek(check, 0, SEEK_END);
         long sz = ftell(check);
         fclose(check);
         if (sz > 44) {
-            return;
+            int is_wav = (n == 4 && magic[0] == 'R' && magic[1] == 'I' &&
+                          magic[2] == 'F' && magic[3] == 'F');
+            if (!is_wav || (uint64_t)sz >= min_wav_size) {
+                return;
+            }
         }
     }
 

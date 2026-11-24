@@ -155,28 +155,59 @@ int main(void)
     }
 
     /*
-     * Stop active playback and drain remaining events to ensure core is idle.
+     * Stop active playback and wait for END_FILE to ensure core is idle.
      */
     ansimuz_mpv_stop(player);
-    sleep_ms(200);
+    uint32_t stop_start = get_tick_ms();
+    int stopped = 0;
+
+    while (get_tick_ms() - stop_start < MAX_WAIT_MS) {
+        while (ansimuz_mpv_poll_event(player, &event) > 0) {
+            printf("[CLEANUP EVENT] type=%d load_id=%llu reason=%d\n",
+                   event.type,
+                   (unsigned long long)event.load_id,
+                   event.end_reason);
+            if (event.type == ANSIMUZ_MPV_EVENT_END_FILE) {
+                stopped = 1;
+            }
+        }
+
+        if (stopped) {
+            break;
+        }
+
+        sleep_ms(POLL_INTERVAL_MS);
+    }
+
+    sleep_ms(50);
 
     while (ansimuz_mpv_poll_event(player, &event) > 0) {
-        printf("[CLEANUP EVENT] type=%d load_id=%llu\n",
+        printf("[CLEANUP EVENT] type=%d load_id=%llu reason=%d\n",
                event.type,
-               (unsigned long long)event.load_id);
+               (unsigned long long)event.load_id,
+               event.end_reason);
     }
 
     /*
      * Repeatedly poll an idle queue.
      */
-    int idle_ok = 1;
+    int idle_ok = stopped;
 
-    for (int i = 0; i < 20; i++) {
+    if (!stopped) {
+        printf("[FAIL] END_FILE was not received after stop\n");
+    }
+
+    for (int i = 0; idle_ok && i < 20; i++) {
         int status = ansimuz_mpv_poll_event(player, &event);
 
         if (status != 0) {
-            printf("[FAIL] Unexpected event/status during idle poll: %d\n",
-                   status);
+            printf("[FAIL] Unexpected event/status during idle poll: %d (type=%d load_id=%llu property=%d reason=%d error=%d)\n",
+                   status,
+                   event.type,
+                   (unsigned long long)event.load_id,
+                   event.property,
+                   event.end_reason,
+                   event.error_code);
             idle_ok = 0;
             break;
         }

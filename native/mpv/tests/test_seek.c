@@ -81,7 +81,7 @@ int main(void)
 
     /* Step 1: Load test audio file */
     printf("\n--- Test 1: Load music1.mp3 ---\n");
-    ensure_test_audio_file("native/mpv/music1.mp3", 10);
+    ensure_test_audio_file("native/mpv/music1.mp3", 30);
 
     if (ansimuz_mpv_loadfile(
             player, "native/mpv/music1.mp3") != 0) {
