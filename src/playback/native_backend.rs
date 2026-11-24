@@ -1,15 +1,17 @@
 use std::sync::mpsc::Sender;
 use super::events::PlayerEvent;
 use super::mpv::PrefetchResult;
+use super::native_adapter::Translator;
 use super::native_mpv::NativeMpv;
 
 // Native libmpv backend implementing the playback interface
 pub struct NativeBackend {
     mpv: Option<NativeMpv>,
-    paused: bool,
+    translator: Translator,
     playing: bool,
     generation: u64,
     last_error: Option<String>,
+    events: Option<Sender<PlayerEvent>>,
     is_mock: bool,
     mock_playing: bool,
     mock_fail: bool,
@@ -20,10 +22,11 @@ impl NativeBackend {
         let mpv = NativeMpv::new().map_err(|e| format!("Failed to initialize native mpv: {e}"))?;
         Ok(Self {
             mpv: Some(mpv),
-            paused: false,
+            translator: Translator::new(),
             playing: false,
             generation: 0,
             last_error: None,
+            events: None,
             is_mock: false,
             mock_playing: false,
             mock_fail: false,
@@ -33,10 +36,11 @@ impl NativeBackend {
     pub fn new_mock() -> Self {
         Self {
             mpv: None,
-            paused: false,
+            translator: Translator::new(),
             playing: false,
             generation: 0,
             last_error: None,
+            events: None,
             is_mock: true,
             mock_playing: false,
             mock_fail: false,
@@ -72,9 +76,9 @@ impl NativeBackend {
 
     pub fn is_playing(&mut self) -> bool {
         if self.is_mock {
-            return self.mock_playing && !self.paused;
+            return self.mock_playing && !self.translator.is_paused();
         }
-        self.playing && !self.paused
+        self.playing && !self.translator.is_paused()
     }
 
     pub fn error(&self) -> Option<&str> {
@@ -85,12 +89,11 @@ impl NativeBackend {
         &mut self,
         url: &str,
         volume: u8,
-        _events: Sender<PlayerEvent>,
+        events: Sender<PlayerEvent>,
     ) -> Result<(), String> {
         if self.is_mock {
             self.stop();
             self.last_error = None;
-            self.paused = false;
             self.generation += 1;
             if self.mock_fail {
                 self.mock_playing = false;
@@ -98,33 +101,69 @@ impl NativeBackend {
                 return Err("Failed to launch mpv: process failed to start".into());
             }
             self.mock_playing = true;
+            self.events = Some(events);
             return Ok(());
         }
 
         self.stop();
         self.last_error = None;
-        self.paused = false;
         self.generation += 1;
+        let generation = self.generation;
 
         if let Some(ref mut mpv) = self.mpv {
             mpv.set_volume(volume)?;
-            mpv.loadfile(url)?;
+            let load_id = mpv.loadfile(url)?;
+            self.translator.begin(load_id, generation);
             self.playing = true;
+            self.events = Some(events);
             Ok(())
         } else {
             Err("Native player instance not initialized".into())
         }
     }
 
+    pub fn poll_events(&mut self) -> Result<Vec<PlayerEvent>, String> {
+        let mut emitted = Vec::new();
+        if let Some(ref mut mpv) = self.mpv {
+            loop {
+                match mpv.poll_event() {
+                    Ok(Some(ev)) => {
+                        let desc = |code| mpv.error_message(code);
+                        if let Some(player_event) = self.translator.translate(ev, &desc) {
+                            match &player_event {
+                                PlayerEvent::Ended { .. } => {
+                                    self.playing = false;
+                                }
+                                PlayerEvent::Failed { message, .. } => {
+                                    self.playing = false;
+                                    self.last_error = Some(message.clone());
+                                }
+                                _ => {}
+                            }
+                            if let Some(ref tx) = self.events {
+                                let _ = tx.send(player_event.clone());
+                            }
+                            emitted.push(player_event);
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(err) => {
+                        self.last_error = Some(err.clone());
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(emitted)
+    }
+
     pub fn toggle_pause(&mut self) -> Result<(), String> {
         if self.is_mock {
-            self.paused = !self.paused;
             return Ok(());
         }
         if let Some(ref mut mpv) = self.mpv {
-            let target = !self.paused;
+            let target = !self.translator.is_paused();
             mpv.set_pause(target)?;
-            self.paused = target;
             Ok(())
         } else {
             Err("Native player instance not initialized".into())
@@ -146,14 +185,12 @@ impl NativeBackend {
     pub fn stop(&mut self) {
         if self.is_mock {
             self.mock_playing = false;
-            self.paused = false;
             return;
         }
         if let Some(ref mut mpv) = self.mpv {
             let _ = mpv.stop();
         }
         self.playing = false;
-        self.paused = false;
         self.generation += 1;
     }
 }
@@ -169,4 +206,3 @@ impl Drop for NativeBackend {
         self.stop();
     }
 }
-

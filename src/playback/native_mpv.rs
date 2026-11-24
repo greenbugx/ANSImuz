@@ -356,7 +356,7 @@ impl NativeMpv {
         };
 
         if status < 0 {
-            return Err(self.error_string(status));
+            return Err(self.error_message(status));
         }
 
         if status == 0 {
@@ -369,13 +369,13 @@ impl NativeMpv {
 
     fn check_status(&self, status: c_int) -> Result<(), String> {
         if status < 0 {
-            Err(self.error_string(status))
+            Err(self.error_message(status))
         } else {
             Ok(())
         }
     }
 
-    fn error_string(&self, status: c_int) -> String {
+    pub fn error_message(&self, status: c_int) -> String {
         unsafe {
             let ptr = ansimuz_mpv_error_string(status);
 

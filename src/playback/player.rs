@@ -105,6 +105,13 @@ impl AudioPlayer {
         }
     }
 
+    pub fn poll_events(&mut self) -> Result<Vec<PlayerEvent>, String> {
+        match &mut self.inner {
+            Inner::Cli(_) => Ok(Vec::new()),
+            Inner::Native(p) => p.poll_events(),
+        }
+    }
+
     pub fn toggle_pause(&mut self) -> Result<(), String> {
         match &mut self.inner {
             Inner::Cli(p) => p.toggle_pause(),
@@ -171,4 +178,3 @@ mod tests {
         assert_eq!(player.error(), None);
     }
 }
-
