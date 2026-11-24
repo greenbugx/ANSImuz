@@ -105,6 +105,8 @@ Ensure both tools are installed and accessible in your system `PATH`:
   winget install --id shinchiro.mpv -e
   winget install --id yt-dlp.yt-dlp -e
   ```
+
+  For native libmpv development on Windows, run `.\scripts\setup_mpv_windows.ps1` to download the pinned dev archive and generate the MSVC import library. The setup script requires `7z` on your system PATH.
 - **Arch Linux**:
   ```bash
   sudo pacman -S mpv yt-dlp

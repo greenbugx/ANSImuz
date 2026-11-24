@@ -3,6 +3,7 @@
 /scripts/*
 !/scripts/install_linux.sh
 !/scripts/install_windows.ps1
+!/scripts/setup_mpv_windows.ps1
 venv/
 .venv/
 __pycache__/

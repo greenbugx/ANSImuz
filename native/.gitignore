@@ -2,6 +2,7 @@
 /mpv/*.dll
 /mpv/*.dll.a
 /mpv/*.exe
+/mpv/lib/*.dll
 /mpv/lib/*.lib
 /mpv/lib/*.dll.a
 /mpv/lib/*.exp
