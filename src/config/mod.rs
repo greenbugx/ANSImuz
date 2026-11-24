@@ -33,6 +33,37 @@ impl Provider {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Backend {
+    #[default]
+    Cli,
+    Native,
+}
+
+impl Backend {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Cli => "CLI (MPV)",
+            Self::Native => "NATIVE (LIBMPV)",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cli => "cli",
+            Self::Native => "native",
+        }
+    }
+
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Cli => Self::Native,
+            Self::Native => Self::Cli,
+        }
+    }
+}
+
 fn default_true() -> bool {
     true
 }
@@ -180,6 +211,8 @@ pub struct Settings {
     pub provider: Provider,
     #[serde(default)]
     pub discord: DiscordConfig,
+    #[serde(default)]
+    pub backend: Backend,
 }
 
 #[derive(Deserialize)]
@@ -216,6 +249,8 @@ struct SettingsDeser {
     discord_rpc: Option<bool>,
     #[serde(default)]
     discord: DiscordConfigDeser,
+    #[serde(default)]
+    backend: Backend,
 }
 
 impl<'de> Deserialize<'de> for Settings {
@@ -236,6 +271,7 @@ impl<'de> Deserialize<'de> for Settings {
                 artwork_enabled: raw.discord.artwork_enabled,
                 artwork: raw.discord.artwork,
             },
+            backend: raw.backend,
         })
     }
 }
@@ -248,6 +284,7 @@ impl Default for Settings {
             art_palette: false,
             provider: Provider::YtMusic,
             discord: DiscordConfig::default(),
+            backend: Backend::Cli,
         }
     }
 }
@@ -285,6 +322,13 @@ impl Settings {
                 }
                 "discord_rpc" => {
                     settings.discord.enabled = value.trim() == "true";
+                }
+                "backend" => {
+                    settings.backend = match value.trim().trim_matches('"').to_lowercase().as_str()
+                    {
+                        "native" => Backend::Native,
+                        _ => Backend::Cli,
+                    };
                 }
                 _ => {}
             }
@@ -571,6 +615,7 @@ mod tests {
                 artwork_enabled: true,
                 artwork: DiscordArtworkConfig::default(),
             },
+            backend: Backend::Cli,
         };
 
         let toml_str = toml::to_string_pretty(&settings).expect("serialize toml");
@@ -578,6 +623,7 @@ mod tests {
         assert!(toml_str.contains("art_hq = false"));
         assert!(toml_str.contains("art_palette = true"));
         assert!(toml_str.contains("provider = \"spotify\""));
+        assert!(toml_str.contains("backend = \"cli\""));
         assert!(!toml_str.contains("discord_rpc"));
         assert!(toml_str.contains("[discord]"));
         assert!(toml_str.contains("enabled = true"));

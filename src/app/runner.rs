@@ -23,7 +23,10 @@ pub fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::new();
     app.init_discord();
-    let mut player = AudioPlayer::new();
+    let mut player = AudioPlayer::from_backend(app.settings.backend);
+    if let Some(msg) = player.startup_message() {
+        app.set_status(msg);
+    }
 
     let (search_tx, search_rx): (Sender<SearchResponse>, Receiver<SearchResponse>) =
         mpsc::channel();
@@ -44,6 +47,8 @@ pub fn run(
         while let Ok(response) = search_rx.try_recv() {
             handle_search_result(&mut app, response);
         }
+
+        let _ = player.poll_events();
 
         while let Ok(response) = resolve_rx.try_recv() {
             handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, response);

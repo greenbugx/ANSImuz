@@ -35,6 +35,7 @@ pub(crate) const NATIVE_WORKER_POLL_TIMEOUT: Duration = Duration::from_millis(15
 
 // Strongly typed playback commands sent from CliPlayer to the native worker thread
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub(crate) enum PlayerCommand {
     Load {
         url: String,
@@ -51,6 +52,7 @@ pub(crate) enum PlayerCommand {
 
 // Tracks application level playback state inside the native worker
 #[derive(Debug, Default, Clone, PartialEq)]
+#[allow(dead_code)]
 pub(crate) struct WorkerState {
     pub current_generation: u64,
     pub current_load_id: u64,
@@ -59,6 +61,7 @@ pub(crate) struct WorkerState {
     pub playing: bool,
 }
 
+#[allow(dead_code)]
 impl WorkerState {
     pub fn new() -> Self {
         Self::default()
@@ -137,19 +140,22 @@ impl CliPlayer {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn command_sender(&self) -> Option<&Sender<PlayerCommand>> {
         self.command_tx.as_ref()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn set_command_sender(&mut self, tx: Sender<PlayerCommand>) {
         self.command_tx = Some(tx);
     }
 
     // Lazily initializes the native mpv worker thread on demand
     // Spawns the dedicated worker thread and verifies native engine initialization
+    #[allow(dead_code)]
     pub(crate) fn ensure_worker(
         &mut self,
-        events: Sender<PlayerEvent>,
+        #[allow(unused_variables)] events: Sender<PlayerEvent>,
     ) -> Result<&Sender<PlayerCommand>, String> {
         if self.is_mock {
             if self.command_tx.is_none() {
@@ -159,36 +165,45 @@ impl CliPlayer {
             return Ok(self.command_tx.as_ref().unwrap());
         }
 
-        if self.command_tx.is_some() && self.worker_handle.is_some() {
-            return Ok(self.command_tx.as_ref().unwrap());
+        #[cfg(not(feature = "native-mpv"))]
+        {
+            Err("Native player support is not compiled in this build".to_string())
         }
 
-        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<PlayerCommand>();
-        let (init_tx, init_rx) = std::sync::mpsc::channel::<Result<(), String>>();
-
-        let handle = thread::Builder::new()
-            .name("native-mpv-worker".to_string())
-            .spawn(move || {
-                run_native_worker(cmd_rx, events, init_tx);
-            })
-            .map_err(|e| format!("Failed to spawn native player worker thread: {e}"))?;
-
-        match init_rx.recv() {
-            Ok(Ok(())) => {
-                self.command_tx = Some(cmd_tx);
-                self.worker_handle = Some(handle);
-                Ok(self.command_tx.as_ref().unwrap())
+        #[cfg(feature = "native-mpv")]
+        {
+            #[allow(clippy::unnecessary_unwrap)]
+            if self.command_tx.is_some() && self.worker_handle.is_some() {
+                return Ok(self.command_tx.as_ref().unwrap());
             }
-            Ok(Err(err)) => {
-                let _ = handle.join();
-                self.last_error = Some(err.clone());
-                Err(err)
-            }
-            Err(_) => {
-                let _ = handle.join();
-                let err = "Native player worker thread terminated during initialization".to_string();
-                self.last_error = Some(err.clone());
-                Err(err)
+
+            let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<PlayerCommand>();
+            let (init_tx, init_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+
+            let handle = thread::Builder::new()
+                .name("native-mpv-worker".to_string())
+                .spawn(move || {
+                    run_native_worker(cmd_rx, events, init_tx);
+                })
+                .map_err(|e| format!("Failed to spawn native player worker thread: {e}"))?;
+
+            match init_rx.recv() {
+                Ok(Ok(())) => {
+                    self.command_tx = Some(cmd_tx);
+                    self.worker_handle = Some(handle);
+                    Ok(self.command_tx.as_ref().unwrap())
+                }
+                Ok(Err(err)) => {
+                    let _ = handle.join();
+                    self.last_error = Some(err.clone());
+                    Err(err)
+                }
+                Err(_) => {
+                    let _ = handle.join();
+                    let err = "Native player worker thread terminated during initialization".to_string();
+                    self.last_error = Some(err.clone());
+                    Err(err)
+                }
             }
         }
     }
@@ -518,6 +533,7 @@ impl Drop for CliPlayer {
 }
 
 // Dedicated worker loop that owns NativeMpv and serializes commands and event polling
+#[cfg(feature = "native-mpv")]
 #[allow(dead_code)]
 fn run_native_worker(
     cmd_rx: std::sync::mpsc::Receiver<PlayerCommand>,
@@ -628,14 +644,14 @@ fn run_native_worker(
             }
         }
 
-        if state.playing && !state.paused {
-            if let Ok(elapsed) = native_player.time_pos() {
-                let _ = events.send(PlayerEvent::Position {
-                    generation: state.current_generation,
-                    elapsed,
-                    duration: state.duration,
-                });
-            }
+        if state.playing && !state.paused
+            && let Ok(elapsed) = native_player.time_pos()
+        {
+            let _ = events.send(PlayerEvent::Position {
+                generation: state.current_generation,
+                elapsed,
+                duration: state.duration,
+            });
         }
     }
 }

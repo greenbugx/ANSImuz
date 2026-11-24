@@ -20,6 +20,10 @@ sha2 = "0.10.9"
 toml = "1.1.8"
 unicode-width = "0.2.3"
 
+[features]
+default = []
+native-mpv = []
+
 [build-dependencies]
 cc = "1.11.3"
 pkg-config = "0.3"

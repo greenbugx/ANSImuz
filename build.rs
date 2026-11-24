@@ -1,6 +1,13 @@
 use std::{env, path::PathBuf};
 
 fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=MPV_LIB_DIR");
+
+    if env::var_os("CARGO_FEATURE_NATIVE_MPV").is_none() {
+        return;
+    }
+
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
 
@@ -9,8 +16,6 @@ fn main() {
     let source_file = mpv_dir.join("src").join("mpv_bridge.c");
     let lib_dir = mpv_dir.join("lib");
 
-    println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-env-changed=MPV_LIB_DIR");
     println!("cargo:rerun-if-changed={}", source_file.display());
     println!(
         "cargo:rerun-if-changed={}",
