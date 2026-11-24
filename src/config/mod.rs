@@ -37,8 +37,8 @@ impl Provider {
 #[serde(rename_all = "lowercase")]
 pub enum Backend {
     #[default]
-    Cli,
     Native,
+    Cli,
 }
 
 impl Backend {
@@ -284,7 +284,7 @@ impl Default for Settings {
             art_palette: false,
             provider: Provider::YtMusic,
             discord: DiscordConfig::default(),
-            backend: Backend::Cli,
+            backend: Backend::Native,
         }
     }
 }
@@ -326,8 +326,8 @@ impl Settings {
                 "backend" => {
                     settings.backend = match value.trim().trim_matches('"').to_lowercase().as_str()
                     {
-                        "native" => Backend::Native,
-                        _ => Backend::Cli,
+                        "cli" => Backend::Cli,
+                        _ => Backend::Native,
                     };
                 }
                 _ => {}
@@ -631,6 +631,16 @@ mod tests {
 
         let loaded: Settings = toml::from_str(&toml_str).expect("deserialize toml");
         assert_eq!(loaded, settings);
+    }
+
+    #[test]
+    fn test_settings_default_backend_is_native() {
+        let default_settings = Settings::default();
+        assert_eq!(default_settings.backend, Backend::Native);
+        assert_eq!(Backend::default(), Backend::Native);
+
+        let parsed: Settings = toml::from_str("").expect("deserialize empty config");
+        assert_eq!(parsed.backend, Backend::Native);
     }
 
     #[test]
