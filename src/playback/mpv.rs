@@ -29,32 +29,76 @@ const REQ_ID_VOLUME: u64 = 1;
 const REQ_ID_TIME_POS: u64 = 2;
 const REQ_ID_DURATION: u64 = 3;
 
-pub struct AudioPlayer {
-    child: Option<Child>,
-    endpoint: IpcEndpoint,
+// Polling interval for native worker command receiver
+#[allow(dead_code)]
+pub(crate) const NATIVE_WORKER_POLL_TIMEOUT: Duration = Duration::from_millis(15);
+
+// Strongly typed playback commands sent from CliPlayer to the native worker thread
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PlayerCommand {
+    Load {
+        url: String,
+        volume: u8,
+        generation: u64,
+    },
+    Pause(bool),
+    Stop,
+    Seek(f64),
+    SetVolume(u8),
+    SetMute(bool),
+    Shutdown,
+}
+
+// Tracks application level playback state inside the native worker
+#[derive(Debug, Default, Clone, PartialEq)]
+pub(crate) struct WorkerState {
+    pub current_generation: u64,
+    pub current_load_id: u64,
+    pub duration: Option<f64>,
+    pub paused: bool,
+    pub playing: bool,
+}
+
+impl WorkerState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+pub struct CliPlayer {
+    command_tx: Option<Sender<PlayerCommand>>,
+    worker_handle: Option<thread::JoinHandle<()>>,
+
     paused: bool,
+    playing: bool,
     last_error: Option<String>,
     generation: u64,
+
     dumping: Arc<Mutex<HashSet<String>>>,
-    stderr_lines: Arc<Mutex<Vec<String>>>,
-    cancel_observer: Option<Arc<AtomicBool>>,
-    observer_handle: Option<thread::JoinHandle<()>>,
     cancel_prefetch: Arc<AtomicBool>,
     prefetch_results: Arc<Mutex<HashMap<String, PrefetchResult>>>,
+
     is_mock: bool,
     mock_playing: bool,
     mock_fail: bool,
+
+    child: Option<Child>,
+    endpoint: IpcEndpoint,
+    stderr_lines: Arc<Mutex<Vec<String>>>,
+    cancel_observer: Option<Arc<AtomicBool>>,
+    observer_handle: Option<thread::JoinHandle<()>>,
 }
 
-impl AudioPlayer {
+impl CliPlayer {
     pub fn new() -> Self {
         let generation = 0;
         let endpoint = IpcEndpoint::new(generation);
 
         Self {
-            child: None,
-            endpoint,
+            command_tx: None,
+            worker_handle: None,
             paused: false,
+            playing: false,
             last_error: None,
             generation,
             dumping: Arc::new(Mutex::new(HashSet::new())),
@@ -66,14 +110,17 @@ impl AudioPlayer {
             is_mock: false,
             mock_playing: false,
             mock_fail: false,
+            child: None,
+            endpoint,
         }
     }
 
     pub fn new_mock() -> Self {
         Self {
-            child: None,
-            endpoint: IpcEndpoint::from_string(String::new()),
+            command_tx: None,
+            worker_handle: None,
             paused: false,
+            playing: false,
             last_error: None,
             generation: 0,
             dumping: Arc::new(Mutex::new(HashSet::new())),
@@ -85,6 +132,64 @@ impl AudioPlayer {
             is_mock: true,
             mock_playing: false,
             mock_fail: false,
+            child: None,
+            endpoint: IpcEndpoint::from_string(String::new()),
+        }
+    }
+
+    pub(crate) fn command_sender(&self) -> Option<&Sender<PlayerCommand>> {
+        self.command_tx.as_ref()
+    }
+
+    pub(crate) fn set_command_sender(&mut self, tx: Sender<PlayerCommand>) {
+        self.command_tx = Some(tx);
+    }
+
+    // Lazily initializes the native mpv worker thread on demand
+    // Spawns the dedicated worker thread and verifies native engine initialization
+    pub(crate) fn ensure_worker(
+        &mut self,
+        events: Sender<PlayerEvent>,
+    ) -> Result<&Sender<PlayerCommand>, String> {
+        if self.is_mock {
+            if self.command_tx.is_none() {
+                let (tx, _rx) = std::sync::mpsc::channel();
+                self.command_tx = Some(tx);
+            }
+            return Ok(self.command_tx.as_ref().unwrap());
+        }
+
+        if self.command_tx.is_some() && self.worker_handle.is_some() {
+            return Ok(self.command_tx.as_ref().unwrap());
+        }
+
+        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<PlayerCommand>();
+        let (init_tx, init_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+
+        let handle = thread::Builder::new()
+            .name("native-mpv-worker".to_string())
+            .spawn(move || {
+                run_native_worker(cmd_rx, events, init_tx);
+            })
+            .map_err(|e| format!("Failed to spawn native player worker thread: {e}"))?;
+
+        match init_rx.recv() {
+            Ok(Ok(())) => {
+                self.command_tx = Some(cmd_tx);
+                self.worker_handle = Some(handle);
+                Ok(self.command_tx.as_ref().unwrap())
+            }
+            Ok(Err(err)) => {
+                let _ = handle.join();
+                self.last_error = Some(err.clone());
+                Err(err)
+            }
+            Err(_) => {
+                let _ = handle.join();
+                let err = "Native player worker thread terminated during initialization".to_string();
+                self.last_error = Some(err.clone());
+                Err(err)
+            }
         }
     }
 
@@ -164,6 +269,10 @@ impl AudioPlayer {
     pub fn is_playing(&mut self) -> bool {
         if self.is_mock {
             return self.mock_playing && !self.paused;
+        }
+
+        if self.command_tx.is_some() {
+            return self.playing && !self.paused;
         }
 
         if let Some(child) = self.child.as_mut() {
@@ -324,6 +433,12 @@ impl AudioPlayer {
             return;
         }
 
+        if let Some(ref tx) = self.command_tx {
+            let _ = tx.send(PlayerCommand::Stop);
+        }
+        self.playing = false;
+        self.paused = false;
+
         // Immediately signal observer and prefetch tasks to cancel before any shutdown actions
         if let Some(cancel) = self.cancel_observer.take() {
             cancel.store(true, Ordering::SeqCst);
@@ -384,15 +499,144 @@ impl AudioPlayer {
     }
 }
 
-impl Default for AudioPlayer {
+impl Default for CliPlayer {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Drop for AudioPlayer {
+impl Drop for CliPlayer {
     fn drop(&mut self) {
+        if let Some(ref tx) = self.command_tx {
+            let _ = tx.send(PlayerCommand::Shutdown);
+        }
+        if let Some(handle) = self.worker_handle.take() {
+            let _ = handle.join();
+        }
         self.stop();
+    }
+}
+
+// Dedicated worker loop that owns NativeMpv and serializes commands and event polling
+#[allow(dead_code)]
+fn run_native_worker(
+    cmd_rx: std::sync::mpsc::Receiver<PlayerCommand>,
+    events: Sender<PlayerEvent>,
+    init_tx: std::sync::mpsc::Sender<Result<(), String>>,
+) {
+    let mut native_player = match crate::playback::native_mpv::NativeMpv::new() {
+        Ok(player) => {
+            if init_tx.send(Ok(())).is_err() {
+                return;
+            }
+            player
+        }
+        Err(err) => {
+            let _ = init_tx.send(Err(err));
+            return;
+        }
+    };
+
+    let mut state = WorkerState::new();
+
+    loop {
+        match cmd_rx.recv_timeout(NATIVE_WORKER_POLL_TIMEOUT) {
+            Ok(PlayerCommand::Shutdown) => {
+                let _ = native_player.stop();
+                break;
+            }
+            Ok(PlayerCommand::Load { url, volume, generation }) => {
+                state.current_generation = generation;
+                state.duration = None;
+                state.paused = false;
+                state.playing = true;
+
+                let _ = native_player.set_volume(volume);
+                match native_player.loadfile(&url) {
+                    Ok(load_id) => {
+                        state.current_load_id = load_id;
+                    }
+                    Err(err) => {
+                        state.playing = false;
+                        let _ = events.send(PlayerEvent::Failed {
+                            generation,
+                            message: err,
+                        });
+                    }
+                }
+            }
+            Ok(PlayerCommand::Pause(pause)) => {
+                state.paused = pause;
+                let _ = native_player.set_pause(pause);
+            }
+            Ok(PlayerCommand::Stop) => {
+                state.playing = false;
+                state.paused = false;
+                let _ = native_player.stop();
+            }
+            Ok(PlayerCommand::Seek(seconds)) => {
+                let _ = native_player.seek(seconds);
+            }
+            Ok(PlayerCommand::SetVolume(volume)) => {
+                let _ = native_player.set_volume(volume);
+            }
+            Ok(PlayerCommand::SetMute(muted)) => {
+                let _ = native_player.set_mute(muted);
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                let _ = native_player.stop();
+                break;
+            }
+        }
+
+        while let Ok(Some(event)) = native_player.poll_event() {
+            if event.load_id != state.current_load_id && state.current_load_id != 0 {
+                continue;
+            }
+
+            match event.event_type {
+                crate::playback::native_mpv::NativeEventType::PropertyChange => {
+                    match event.property {
+                        crate::playback::native_mpv::NativeProperty::Duration => {
+                            state.duration = Some(event.value);
+                        }
+                        crate::playback::native_mpv::NativeProperty::Pause => {
+                            state.paused = event.value > 0.5;
+                        }
+                        _ => {}
+                    }
+                }
+                crate::playback::native_mpv::NativeEventType::EndFile => {
+                    state.playing = false;
+                    match event.end_reason {
+                        crate::playback::native_mpv::NativeEndReason::Eof => {
+                            let _ = events.send(PlayerEvent::Ended {
+                                generation: state.current_generation,
+                            });
+                        }
+                        crate::playback::native_mpv::NativeEndReason::Error => {
+                            let _ = events.send(PlayerEvent::Failed {
+                                generation: state.current_generation,
+                                message: format!("Playback failed with error code: {}", event.error_code),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if state.playing && !state.paused {
+            if let Ok(elapsed) = native_player.time_pos() {
+                let _ = events.send(PlayerEvent::Position {
+                    generation: state.current_generation,
+                    elapsed,
+                    duration: state.duration,
+                });
+            }
+        }
     }
 }
 
@@ -1094,7 +1338,7 @@ mod tests {
         }
 
         let cancel = Arc::new(AtomicBool::new(false));
-        let mut player = AudioPlayer::new();
+        let mut player = CliPlayer::new();
         player.set_child_for_test(child, endpoint.clone(), cancel.clone());
 
         player.stop();
@@ -1122,7 +1366,7 @@ mod tests {
         }
 
         let cancel = Arc::new(AtomicBool::new(false));
-        let mut player = AudioPlayer::new();
+        let mut player = CliPlayer::new();
         player.set_child_for_test(child, endpoint.clone(), cancel.clone());
 
         player.stop();
@@ -1154,7 +1398,7 @@ mod tests {
 
         let cancel = Arc::new(AtomicBool::new(false));
         {
-            let mut player = AudioPlayer::new();
+            let mut player = CliPlayer::new();
             player.set_child_for_test(child, endpoint.clone(), cancel.clone());
             // player dropped here
         }
@@ -1242,7 +1486,7 @@ mod tests {
 
     #[test]
     fn test_player_stop_signals_prefetch_cancellation() {
-        let mut player = AudioPlayer::new();
+        let mut player = CliPlayer::new();
         assert!(!player.cancel_prefetch.load(Ordering::Relaxed));
 
         player.stop();
@@ -1405,5 +1649,112 @@ mod tests {
         server_handle.join().expect("join server");
         obs_handle.join().expect("join observer");
         endpoint.cleanup();
+    }
+
+    #[test]
+    fn test_player_command_channel_delivery() {
+        use std::sync::mpsc::channel;
+
+        assert_eq!(NATIVE_WORKER_POLL_TIMEOUT, Duration::from_millis(15));
+
+        let (tx, rx) = channel();
+        tx.send(PlayerCommand::Load {
+            url: "https://example.com/audio.mp3".to_string(),
+            volume: 80,
+            generation: 1,
+        }).expect("send load command");
+        tx.send(PlayerCommand::Pause(true)).expect("send pause command");
+        tx.send(PlayerCommand::Seek(15.5)).expect("send seek command");
+        tx.send(PlayerCommand::SetVolume(90)).expect("send set_volume command");
+        tx.send(PlayerCommand::SetMute(true)).expect("send set_mute command");
+        tx.send(PlayerCommand::Stop).expect("send stop command");
+        tx.send(PlayerCommand::Shutdown).expect("send shutdown command");
+
+        match rx.recv_timeout(Duration::from_millis(100)).expect("recv load") {
+            PlayerCommand::Load { url, volume, generation } => {
+                assert_eq!(url, "https://example.com/audio.mp3");
+                assert_eq!(volume, 80);
+                assert_eq!(generation, 1);
+            }
+            other => panic!("expected Load, got {other:?}"),
+        }
+
+        match rx.recv_timeout(Duration::from_millis(100)).expect("recv pause") {
+            PlayerCommand::Pause(paused) => assert!(paused),
+            other => panic!("expected Pause, got {other:?}"),
+        }
+
+        match rx.recv_timeout(Duration::from_millis(100)).expect("recv seek") {
+            PlayerCommand::Seek(seconds) => assert_eq!(seconds, 15.5),
+            other => panic!("expected Seek, got {other:?}"),
+        }
+
+        match rx.recv_timeout(Duration::from_millis(100)).expect("recv volume") {
+            PlayerCommand::SetVolume(vol) => assert_eq!(vol, 90),
+            other => panic!("expected SetVolume, got {other:?}"),
+        }
+
+        match rx.recv_timeout(Duration::from_millis(100)).expect("recv mute") {
+            PlayerCommand::SetMute(muted) => assert!(muted),
+            other => panic!("expected SetMute, got {other:?}"),
+        }
+
+        match rx.recv_timeout(Duration::from_millis(100)).expect("recv stop") {
+            PlayerCommand::Stop => {}
+            other => panic!("expected Stop, got {other:?}"),
+        }
+
+        match rx.recv_timeout(Duration::from_millis(100)).expect("recv shutdown") {
+            PlayerCommand::Shutdown => {}
+            other => panic!("expected Shutdown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_worker_state_isolation_and_correlation() {
+        let mut state = WorkerState::new();
+        assert_eq!(state.current_generation, 0);
+        assert_eq!(state.current_load_id, 0);
+        assert_eq!(state.duration, None);
+        assert!(!state.paused);
+        assert!(!state.playing);
+
+        state.current_generation = 42;
+        state.current_load_id = 7;
+        state.duration = Some(180.5);
+        state.paused = false;
+        state.playing = true;
+
+        assert_eq!(state.current_generation, 42);
+        assert_eq!(state.current_load_id, 7);
+        assert_eq!(state.duration, Some(180.5));
+        assert!(!state.paused);
+        assert!(state.playing);
+    }
+
+    #[test]
+    fn test_cli_player_command_sender_association() {
+        use std::sync::mpsc::channel;
+
+        let mut player = CliPlayer::new();
+        assert!(player.command_sender().is_none());
+
+        let (tx, _rx) = channel();
+        player.set_command_sender(tx);
+        assert!(player.command_sender().is_some());
+    }
+
+    #[test]
+    fn test_ensure_worker_mock_lazy_initialization() {
+        let mut player = CliPlayer::new_mock();
+        assert!(player.command_sender().is_none());
+
+        let (events_tx, _events_rx) = std::sync::mpsc::channel();
+        let res = player.ensure_worker(events_tx.clone());
+        assert!(res.is_ok());
+        assert!(player.command_sender().is_some());
+
+        let res2 = player.ensure_worker(events_tx);
+        assert!(res2.is_ok());
     }
 }
