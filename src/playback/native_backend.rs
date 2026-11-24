@@ -310,4 +310,18 @@ mod tests {
         assert!(!backend.is_playing());
         assert_eq!(backend.generation(), 1);
     }
+
+    #[test]
+    fn test_native_backend_thread_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<NativeBackend>();
+
+        let backend = NativeBackend::new_mock();
+        let handle = std::thread::spawn(move || {
+            let mut b = backend;
+            assert_eq!(b.generation(), 0);
+            b.stop();
+        });
+        handle.join().expect("join native backend thread");
+    }
 }

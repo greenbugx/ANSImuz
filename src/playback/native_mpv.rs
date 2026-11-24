@@ -398,6 +398,11 @@ impl Drop for NativeMpv {
     }
 }
 
+// SAFETY: The handle is only ever accessed by one thread at a time because
+// all mutating methods require exclusive mutable access and the value is owned.
+// libmpv client API functions are thread-safe and the C bridge holds no thread-local state.
+unsafe impl Send for NativeMpv {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,6 +419,12 @@ mod tests {
         assert_eq!(offset_of!(NativeEvent, value), 24);
         assert_eq!(offset_of!(NativeEvent, end_reason), 32);
         assert_eq!(offset_of!(NativeEvent, error_code), 36);
+    }
+
+    #[test]
+    fn native_mpv_is_send_but_not_sync() {
+        fn assert_send<T: Send>() {}
+        assert_send::<NativeMpv>();
     }
 
     #[test]

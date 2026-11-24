@@ -177,4 +177,10 @@ mod tests {
         player.clear_error();
         assert_eq!(player.error(), None);
     }
+
+    #[test]
+    fn test_audio_player_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<AudioPlayer>();
+    }
 }
