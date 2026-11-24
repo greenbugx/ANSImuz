@@ -256,14 +256,25 @@ int ansimuz_mpv_poll_event(
  */
 typedef int (*ansimuz_mpv_cancel_fn)(const void *ctx);
 
+#define ANSIMUZ_MPV_DEFAULT_MAX_DUMP_BYTES (64ULL * 1024ULL * 1024ULL)
+#define ANSIMUZ_MPV_DEFAULT_MAX_DUMP_SECS  600U
+
+#define ANSIMUZ_MPV_DUMP_CANCELLED (-1001)
+#define ANSIMUZ_MPV_DUMP_TOO_LARGE (-1002)
+#define ANSIMUZ_MPV_DUMP_TIMEOUT   (-1003)
+
 /*
  * Dumps an audio stream to disk using a secondary libmpv instance
  * Runs headless with video and audio rendering disabled
- * Returns 0 on success, -2 when cancelled, or a negative mpv error code
+ * Enforces max_bytes and timeout_secs bounds (0 uses default limits)
+ * Returns 0 on success, ANSIMUZ_MPV_DUMP_* on cancel or limit exceeded,
+ * or a negative mpv error code
  */
 int ansimuz_mpv_dump_stream(
     const char *url,
     const char *output_path,
+    uint64_t max_bytes,
+    uint32_t timeout_secs,
     ansimuz_mpv_cancel_fn is_cancelled,
     const void *cancel_ctx
 );

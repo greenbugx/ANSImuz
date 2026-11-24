@@ -8,6 +8,9 @@
 #include <string.h>
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <sys/stat.h>
+#include <time.h>
 #endif
 
 /*
@@ -330,6 +333,16 @@ int ansimuz_mpv_create(
      */
     status = configure_option(
         player->handle, "idle", "yes",
+        error_buffer, error_buffer_size
+    );
+
+    if (status < 0) goto fail;
+
+    /*
+     * Clear pause state automatically whenever a replacement file loads.
+     */
+    status = configure_option(
+        player->handle, "reset-on-next-file", "pause",
         error_buffer, error_buffer_size
     );
 
@@ -941,14 +954,74 @@ static int dump_cancelled(
     return is_cancelled && is_cancelled(cancel_ctx) != 0;
 }
 
+static uint64_t monotonic_ms(void) {
+#ifdef _WIN32
+    return (uint64_t)GetTickCount64();
+#elif defined(CLOCK_MONOTONIC)
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
+        return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)(ts.tv_nsec / 1000000L);
+    }
+    return (uint64_t)time(NULL) * 1000ULL;
+#else
+    return (uint64_t)time(NULL) * 1000ULL;
+#endif
+}
+
+static int get_file_size(const char *path, uint64_t *out_size) {
+    if (!path || !out_size) {
+        return -1;
+    }
+#ifdef _WIN32
+    wchar_t wpath[MAX_PATH * 4];
+    int wlen = MultiByteToWideChar(
+        CP_UTF8, 0, path, -1,
+        wpath, (int)(sizeof(wpath) / sizeof(wpath[0]))
+    );
+    if (wlen <= 0) {
+        return -1;
+    }
+    HANDLE fh = CreateFileW(
+        wpath,
+        FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        NULL,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        NULL
+    );
+    if (fh == INVALID_HANDLE_VALUE) {
+        return -1;
+    }
+    LARGE_INTEGER li;
+    BOOL ok = GetFileSizeEx(fh, &li);
+    CloseHandle(fh);
+    if (!ok || li.QuadPart < 0) {
+        return -1;
+    }
+    *out_size = (uint64_t)li.QuadPart;
+    return 0;
+#else
+    struct stat st;
+    if (stat(path, &st) != 0 || st.st_size < 0) {
+        return -1;
+    }
+    *out_size = (uint64_t)st.st_size;
+    return 0;
+#endif
+}
+
 /*
  * Dumps an audio stream to a file using a secondary headless mpv instance
- * Polls for completion while checking is_cancelled periodically
- * Returns 0 on success, -2 when cancelled, or a negative mpv error code
+ * Polls for completion while checking cancellation, size cap, and timeout
+ * Returns 0 on success, ANSIMUZ_MPV_DUMP_* on cancel or limit exceeded,
+ * or a negative mpv error code
  */
 int ansimuz_mpv_dump_stream(
     const char *url,
     const char *output_path,
+    uint64_t max_bytes,
+    uint32_t timeout_secs,
     ansimuz_mpv_cancel_fn is_cancelled,
     const void *cancel_ctx
 ) {
@@ -956,8 +1029,16 @@ int ansimuz_mpv_dump_stream(
         return MPV_ERROR_INVALID_PARAMETER;
     }
 
+    uint64_t effective_max_bytes = max_bytes > 0
+        ? max_bytes
+        : ANSIMUZ_MPV_DEFAULT_MAX_DUMP_BYTES;
+    uint32_t effective_timeout_secs = timeout_secs > 0
+        ? timeout_secs
+        : ANSIMUZ_MPV_DEFAULT_MAX_DUMP_SECS;
+    uint64_t timeout_ms = (uint64_t)effective_timeout_secs * 1000ULL;
+
     if (dump_cancelled(is_cancelled, cancel_ctx)) {
-        return -2;
+        return ANSIMUZ_MPV_DUMP_CANCELLED;
     }
 
     mpv_handle *handle = mpv_create();
@@ -976,6 +1057,7 @@ int ansimuz_mpv_dump_stream(
     mpv_set_option_string(handle, "osc", "no");
     mpv_set_option_string(handle, "input-default-bindings", "no");
     mpv_set_option_string(handle, "input-vo-keyboard", "no");
+    mpv_set_option_string(handle, "network-timeout", "30");
     int status = configure_ytdl(handle, is_youtube_url(url), NULL, 0);
     if (status < 0) {
         mpv_destroy(handle);
@@ -991,7 +1073,7 @@ int ansimuz_mpv_dump_stream(
 
     if (dump_cancelled(is_cancelled, cancel_ctx)) {
         mpv_terminate_destroy(handle);
-        return -2;
+        return ANSIMUZ_MPV_DUMP_CANCELLED;
     }
 
     const char *args[] = {
@@ -1007,11 +1089,30 @@ int ansimuz_mpv_dump_stream(
         return status;
     }
 
+    uint64_t start_ms = monotonic_ms();
+    uint64_t last_size_check_ms = start_ms;
+
     int result = -1;
     while (1) {
         if (dump_cancelled(is_cancelled, cancel_ctx)) {
-            result = -2;
+            result = ANSIMUZ_MPV_DUMP_CANCELLED;
             break;
+        }
+
+        uint64_t now_ms = monotonic_ms();
+        if (now_ms - start_ms >= timeout_ms) {
+            result = ANSIMUZ_MPV_DUMP_TIMEOUT;
+            break;
+        }
+
+        if (now_ms - last_size_check_ms >= 200) {
+            last_size_check_ms = now_ms;
+            uint64_t current_size = 0;
+            if (get_file_size(output_path, &current_size) == 0 &&
+                current_size > effective_max_bytes) {
+                result = ANSIMUZ_MPV_DUMP_TOO_LARGE;
+                break;
+            }
         }
 
         mpv_event *event = mpv_wait_event(handle, 0.1);
@@ -1023,7 +1124,13 @@ int ansimuz_mpv_dump_stream(
             mpv_event_end_file *end = (mpv_event_end_file *)event->data;
             if (end) {
                 if (end->reason == MPV_END_FILE_REASON_EOF) {
-                    result = 0;
+                    uint64_t final_size = 0;
+                    if (get_file_size(output_path, &final_size) == 0 &&
+                        final_size > effective_max_bytes) {
+                        result = ANSIMUZ_MPV_DUMP_TOO_LARGE;
+                    } else {
+                        result = 0;
+                    }
                 } else if (end->reason == MPV_END_FILE_REASON_ERROR) {
                     result = end->error < 0 ? end->error : MPV_ERROR_GENERIC;
                 } else {

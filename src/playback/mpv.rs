@@ -15,8 +15,9 @@ use std::{
 
 use super::{events::PlayerEvent, ipc::IpcEndpoint};
 
-const MAX_DUMP_BYTES: u64 = 64 * 1024 * 1024;
-const MIN_DUMP_BYTES: u64 = 100 * 1024;
+pub(crate) const MAX_DUMP_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const MIN_DUMP_BYTES: u64 = 100 * 1024;
+pub(crate) const MAX_DUMP_SECS: u32 = 600;
 pub const MAX_PREFETCH_RESULTS: usize = 50;
 
 /// Comprehensive fallback chain of YouTube player clients supported by yt-dlp.
@@ -830,7 +831,7 @@ pub fn start_dump_cancellable(
     let mut failure_reason: Option<String> = None;
     let mut completed_ok = false;
 
-    for _ in 0..600 {
+    for _ in 0..MAX_DUMP_SECS {
         if cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
             let _ = child.kill();
             let _ = child.wait();
@@ -874,7 +875,9 @@ pub fn start_dump_cancellable(
     if let Ok(None) = child.try_wait() {
         let _ = child.kill();
         let _ = child.wait();
-        failure_reason = Some("mpv stream-dump timed out after 600 seconds".into());
+        failure_reason = Some(format!(
+            "mpv stream-dump timed out after {MAX_DUMP_SECS} seconds"
+        ));
     }
 
     if let Some(err) = failure_reason {

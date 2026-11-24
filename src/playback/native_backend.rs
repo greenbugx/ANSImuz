@@ -113,8 +113,18 @@ pub(crate) fn dump_stream_native(
                 }
             };
 
-            if file_size == 0 {
-                return PrefetchResult::Failed("Stream dump produced empty cache file".to_string());
+            if file_size < super::mpv::MIN_DUMP_BYTES {
+                return PrefetchResult::Failed(format!(
+                    "Prefetched audio file too small: {file_size} bytes (minimum is {} bytes)",
+                    super::mpv::MIN_DUMP_BYTES
+                ));
+            }
+
+            if file_size > super::mpv::MAX_DUMP_BYTES {
+                return PrefetchResult::Failed(format!(
+                    "Prefetched audio file too large: {file_size} bytes (maximum is {} bytes)",
+                    super::mpv::MAX_DUMP_BYTES
+                ));
             }
 
             if let Err(e) = std::fs::rename(&part, &final_path) {
@@ -318,6 +328,7 @@ impl NativeBackend {
         let target = resolve_playback_target(url)?;
 
         if let Some(ref mut mpv) = self.mpv {
+            mpv.set_pause(false)?;
             mpv.set_volume(volume)?;
             let load_id = mpv.loadfile(&target)?;
             self.translator.begin(load_id, generation);
@@ -357,11 +368,14 @@ impl NativeBackend {
 
     pub fn toggle_pause(&mut self) -> Result<(), String> {
         if self.is_mock {
+            let target = !self.translator.is_paused();
+            self.translator.set_paused(target);
             return Ok(());
         }
         if let Some(ref mut mpv) = self.mpv {
             let target = !self.translator.is_paused();
             mpv.set_pause(target)?;
+            self.translator.set_paused(target);
             Ok(())
         } else {
             Err("Native player instance not initialized".into())
@@ -383,12 +397,15 @@ impl NativeBackend {
     pub fn stop(&mut self) {
         if self.is_mock {
             self.mock_playing = false;
+            self.translator.set_paused(false);
             return;
         }
         self.cancel_prefetch.store(true, Ordering::SeqCst);
         if let Some(ref mut mpv) = self.mpv {
+            let _ = mpv.set_pause(false);
             let _ = mpv.stop();
         }
+        self.translator.set_paused(false);
         self.playing = false;
         self.generation += 1;
     }

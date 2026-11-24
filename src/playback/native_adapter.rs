@@ -33,6 +33,10 @@ impl Translator {
         self.paused
     }
 
+    pub fn set_paused(&mut self, paused: bool) {
+        self.paused = paused;
+    }
+
     pub fn translate(
         &mut self,
         ev: NativeEventData,

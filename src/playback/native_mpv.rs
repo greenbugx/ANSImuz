@@ -5,6 +5,9 @@ use std::{
 };
 
 const ERROR_BUFFER_SIZE: usize = 512;
+const DUMP_CANCELLED: c_int = -1001;
+const DUMP_TOO_LARGE: c_int = -1002;
+const DUMP_TIMEOUT: c_int = -1003;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,6 +167,8 @@ unsafe extern "C" {
     fn ansimuz_mpv_dump_stream(
         url: *const c_char,
         output_path: *const c_char,
+        max_bytes: u64,
+        timeout_secs: u32,
         is_cancelled: Option<unsafe extern "C" fn(*const c_void) -> c_int>,
         cancel_ctx: *const c_void,
     ) -> c_int;
@@ -331,6 +336,22 @@ impl NativeMpv {
         output_path: &std::path::Path,
         cancel: Option<&AtomicBool>,
     ) -> Result<(), String> {
+        Self::dump_stream_with_limits(
+            url,
+            output_path,
+            super::mpv::MAX_DUMP_BYTES,
+            super::mpv::MAX_DUMP_SECS,
+            cancel,
+        )
+    }
+
+    pub fn dump_stream_with_limits(
+        url: &str,
+        output_path: &std::path::Path,
+        max_bytes: u64,
+        timeout_secs: u32,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<(), String> {
         // Invoked by the C bridge to load AtomicBool atomically across threads
         unsafe extern "C" fn check_cancelled(ctx: *const c_void) -> c_int {
             if ctx.is_null() {
@@ -358,23 +379,36 @@ impl NativeMpv {
         };
 
         let status = unsafe {
-            ansimuz_mpv_dump_stream(url_c.as_ptr(), path_c.as_ptr(), cancel_cb, cancel_ctx)
+            ansimuz_mpv_dump_stream(
+                url_c.as_ptr(),
+                path_c.as_ptr(),
+                max_bytes,
+                timeout_secs,
+                cancel_cb,
+                cancel_ctx,
+            )
         };
 
-        if status == 0 {
-            Ok(())
-        } else if status == -2 {
-            Err("Stream dump cancelled".to_string())
-        } else {
-            let msg = unsafe {
-                let ptr = ansimuz_mpv_error_string(status);
-                if ptr.is_null() {
-                    format!("Stream dump failed with status {status}")
-                } else {
-                    CStr::from_ptr(ptr).to_string_lossy().into_owned()
-                }
-            };
-            Err(msg)
+        match status {
+            0 => Ok(()),
+            DUMP_CANCELLED => Err("Stream dump cancelled".to_string()),
+            DUMP_TOO_LARGE => Err(format!(
+                "Stream dump exceeded maximum size ({max_bytes} bytes)"
+            )),
+            DUMP_TIMEOUT => Err(format!(
+                "Stream dump timed out after {timeout_secs} seconds"
+            )),
+            _ => {
+                let msg = unsafe {
+                    let ptr = ansimuz_mpv_error_string(status);
+                    if ptr.is_null() {
+                        format!("Stream dump failed with status {status}")
+                    } else {
+                        CStr::from_ptr(ptr).to_string_lossy().into_owned()
+                    }
+                };
+                Err(msg)
+            }
         }
     }
 }
