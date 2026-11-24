@@ -28,7 +28,7 @@ Ensure the following tools and development libraries are installed on your syste
   - Windows: MSVC toolchain (C++ Build Tools with MSVC and Windows SDK) and `7z` (7-Zip on system PATH).
 - **libmpv Development Libraries**:
   Native playback links directly to the C library API without spawning an external player process.
-  - Linux: The shared library headers are required for compiling (`libmpv-dev` on Debian/Ubuntu, `mpv-devel` on Fedora, or `mpv` on Arch Linux).
+  - Linux: The shared library headers are required for compiling (`libmpv-dev` on Debian/Ubuntu, `mpv-libs-devel` on Fedora, or `mpv` on Arch Linux).
   - Windows: The dev archive and MSVC import library are set up automatically using `.\scripts\setup_mpv_windows.ps1`.
 - **[yt-dlp](https://github.com/yt-dlp/yt-dlp)**: For stream URL resolution and media extraction.
 - **[mpv](https://mpv.io/)** (CLI binary): Only needed as an optional fallback when compiling with `--no-default-features`.
@@ -103,7 +103,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
    **Linux (Fedora)**:
    ```bash
-   sudo dnf install -y openssl-devel mpv-devel pkg-config
+   sudo dnf install -y openssl-devel mpv-libs-devel pkg-config
    ```
 
    **Linux (Arch Linux)**:
@@ -363,11 +363,14 @@ ANSImuz supports two interchangeable playback engines behind a unified facade (`
 - **Zero-Allocation Track Correlation**:
   Rather than allocating heap ring buffers or traversing recursive playlist node trees, the bridge tracks `current_load_id`, `active_load_id`, `current_entry_id`, and `previous_entry_id` in O(1) storage.
   When a new track loads via `loadfile` replace mode, libmpv emits `MPV_EVENT_END_FILE` for the displaced track. The bridge correlates the displaced track's entry ID with `previous_entry_id` and tags it with `previous_load_id`. The Rust translator drops the displaced stop event without disrupting active track playback.
-- **TUI Display Protection**:
-  Terminal music players are sensitive to background engine logs corrupting terminal cells. During `ansimuz_mpv_create`, the bridge explicitly sets:
+- **TUI Display & Playback Isolation**:
+  Terminal music players are sensitive to background engine logs corrupting terminal cells or stale engine state across transitions. During `ansimuz_mpv_create`, the bridge explicitly sets:
   - `terminal=no` and `msg-level=all=no`: Silences console and stderr logging.
-  - `load-scripts=no`: Completely stops built-in Lua/JS scripts (`console.lua`, `stats.lua`, `select.lua`) from initializing or triggering background command hooks.
+  - `load-scripts=no`: Stops user/external Lua/JS scripts from loading while keeping built-in hooks isolated.
   - `osc=no`, `input-default-bindings=no`, and `input-vo-keyboard=no`: Disables on-screen controllers and keyboard intercepts.
+  - `reset-on-next-file=pause`: Clears pause mode automatically whenever a replacement track opens (matched in `NativeBackend::play` and `Translator::set_paused`).
+  - `ao` fallback (`wasapi,null` on Windows, `auto,null` on Linux): Respects `ANSIMUZ_MPV_AO` (via both `getenv` and Windows `GetEnvironmentVariableA`) and falls back to `null` audio on headless environments.
+  - Selective `ytdl` and client fallback: Enables `ytdl` for YouTube URLs while disabling it for direct/local targets in `ansimuz_mpv_loadfile`, and passes the `YTDL_PLAYER_CLIENTS` chain to `ytdl-raw-options` via `MPV_FORMAT_NODE_MAP` so commas inside `extractor-args` are preserved.
 - **Discrete Property Observation**:
   Registers discrete integer reply tags for `time-pos`, `duration`, `pause`, `volume`, and `mute`. Property change notifications are dispatched without string lookups.
 - **Rust Event Translation (`src/playback/native_adapter.rs`)**:
@@ -376,8 +379,9 @@ ANSImuz supports two interchangeable playback engines behind a unified facade (`
 #### C. Headless Stream Prefetching
 To ensure gapless transitions between queued tracks, ANSImuz prefetches upcoming songs into the local disk cache:
 - When a queued song is scheduled for prefetch, `NativeBackend::prefetch_later` invokes `ansimuz_mpv_dump_stream`.
-- A dedicated secondary headless `mpv_handle` is initialized with `stream-dump` and `ytdl=yes`.
-- The dump worker polls in a background thread while checking an atomic `cancel_flag` (`AtomicBool` in Rust). If the user skips or changes tracks, the dump aborts immediately and incomplete `.part` files are removed.
+- A dedicated secondary headless `mpv_handle` is initialized with `stream-dump`, `network-timeout=30`, and the same selective `ytdl` and `MPV_FORMAT_NODE_MAP` YouTube client fallback chain.
+- The dump loop polls in a background thread while querying Rust's `AtomicBool` cancellation flag safely through an `extern "C"` callback (`ansimuz_mpv_cancel_fn`), avoiding unsynchronized cross-language pointer reads.
+- Prefetching enforces CLI-equivalent safety bounds (`64 MiB` maximum dump size, `100 KiB` minimum cached size, and a `600s` timeout), terminating `mpv` via `mpv_terminate_destroy` and deleting incomplete `.part` files on cancellation or limit violations.
 - Once completed, the file is atomically renamed into the audio cache directory (`~/.cache/ansimuz/audio/` or `%LOCALAPPDATA%\ansimuz\audio`). When the track plays, it loads instantly from disk.
 
 #### D. Build Automation and DLL Deployment (`build.rs`)

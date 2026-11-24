@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Automated Windows installation script for ANSImuz.
 .DESCRIPTION
@@ -91,28 +91,47 @@ if ($HasWinget) {
 }
 
 # -------------------------------------------------------------
-# Verify or install mpv and yt-dlp
+# Verify or install libmpv, optional mpv CLI, and yt-dlp
 # -------------------------------------------------------------
-Write-Step "2" "Verifying media prerequisites (mpv and yt-dlp)..."
+Write-Step "2" "Verifying media prerequisites (libmpv and yt-dlp)..."
 
-# MPV
-$MpvCmd = Get-Command mpv -ErrorAction SilentlyContinue
-if (-not $MpvCmd) {
-    Write-Info "mpv was not found in PATH. Attempting automated install..."
-    if ($HasWinget) {
-        Write-Info "Installing mpv via winget..."
-        winget install --id shinchiro.mpv -e --accept-package-agreements --accept-source-agreements --silent
-    } elseif ($HasChoco) {
-        choco install mpv -y
-    } elseif ($HasScoop) {
-        scoop install mpv
-    } else {
-        Write-ErrorExit "mpv is required for audio playback. Please install mpv from https://mpv.io/ and add it to your PATH."
+# Ensure 7z is available for libmpv dev archive extraction if setup is needed
+$MpvLibPath = Join-Path $RepoRoot "native\mpv\lib\mpv.lib"
+$MpvDllPath = Join-Path $RepoRoot "native\mpv\lib\libmpv-2.dll"
+if (-not (Test-Path $MpvLibPath) -or -not (Test-Path $MpvDllPath)) {
+    if (-not (Get-Command 7z -ErrorAction SilentlyContinue)) {
+        Write-Info "7z not found in PATH. Attempting automated install for libmpv extraction..."
+        if ($HasWinget) {
+            winget install --id 7zip.7zip -e --accept-package-agreements --accept-source-agreements --silent
+        } elseif ($HasChoco) {
+            choco install 7zip -y
+        } elseif ($HasScoop) {
+            scoop install 7zip
+        }
+        $env:PATH = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+        $SevenZipDir = "C:\Program Files\7-Zip"
+        if ((Test-Path $SevenZipDir) -and ($env:PATH -notlike "*$SevenZipDir*")) {
+            $env:PATH = "$SevenZipDir;$env:PATH"
+        }
     }
-    # Refresh PATH environment variable
-    $env:PATH = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+
+    if (-not (Get-Command 7z -ErrorAction SilentlyContinue)) {
+        Write-ErrorExit "7z (7-Zip) is required to extract the pinned libmpv developer archive. Install 7-Zip and rerun."
+    }
+
+    Write-Info "Setting up pinned native libmpv headers, DLL, and MSVC import library..."
+    $SetupMpvScript = Join-Path $ScriptDir "setup_mpv_windows.ps1"
+    & $SetupMpvScript
 } else {
-    Write-Success "mpv is already installed: $($MpvCmd.Source)"
+    Write-Success "Native libmpv libraries are already present in native\mpv\lib"
+}
+
+# Optional mpv CLI fallback
+$MpvCmd = Get-Command mpv -ErrorAction SilentlyContinue
+if ($MpvCmd) {
+    Write-Success "Optional mpv CLI found: $($MpvCmd.Source)"
+} else {
+    Write-Info "mpv CLI not found (optional since native libmpv is compiled by default)"
 }
 
 # yt-dlp
