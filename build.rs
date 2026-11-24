@@ -37,6 +37,18 @@ fn main() {
     } else if target_os == "windows" {
         println!("cargo:rustc-link-search=native={}", lib_dir.display());
         println!("cargo:rustc-link-lib=dylib=mpv");
+
+        // Copy libmpv-2.dll next to compiled binaries for direct execution
+        let dll_src = lib_dir.join("libmpv-2.dll");
+        if dll_src.exists() {
+            if let Ok(out_dir) = env::var("OUT_DIR") {
+                let out_path = PathBuf::from(out_dir);
+                if let Some(profile_dir) = out_path.ancestors().nth(3) {
+                    let dll_dest = profile_dir.join("libmpv-2.dll");
+                    let _ = std::fs::copy(&dll_src, &dll_dest);
+                }
+            }
+        }
     } else if pkg_config::Config::new().probe("mpv").is_err() {
         println!("cargo:warning=pkg-config could not find mpv, falling back to -lmpv");
         println!("cargo:rustc-link-lib=dylib=mpv");
