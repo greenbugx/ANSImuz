@@ -20,7 +20,7 @@ depends=(
     'python-requests'
 )
 
-makedepends=('git' 'cargo' 'cmake')
+makedepends=('git' 'cargo' 'cmake' 'mpv')
 
 provides=('ansimuz')
 conflicts=('ansimuz')

@@ -15,8 +15,9 @@ use std::{
 
 use super::{events::PlayerEvent, ipc::IpcEndpoint};
 
-const MAX_DUMP_BYTES: u64 = 64 * 1024 * 1024;
-const MIN_DUMP_BYTES: u64 = 100 * 1024;
+pub(crate) const MAX_DUMP_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const MIN_DUMP_BYTES: u64 = 100 * 1024;
+pub(crate) const MAX_DUMP_SECS: u32 = 600;
 pub const MAX_PREFETCH_RESULTS: usize = 50;
 
 /// Comprehensive fallback chain of YouTube player clients supported by yt-dlp.
@@ -29,32 +30,35 @@ const REQ_ID_VOLUME: u64 = 1;
 const REQ_ID_TIME_POS: u64 = 2;
 const REQ_ID_DURATION: u64 = 3;
 
-pub struct AudioPlayer {
-    child: Option<Child>,
-    endpoint: IpcEndpoint,
+pub struct CliPlayer {
     paused: bool,
+    playing: bool,
     last_error: Option<String>,
     generation: u64,
+
     dumping: Arc<Mutex<HashSet<String>>>,
-    stderr_lines: Arc<Mutex<Vec<String>>>,
-    cancel_observer: Option<Arc<AtomicBool>>,
-    observer_handle: Option<thread::JoinHandle<()>>,
     cancel_prefetch: Arc<AtomicBool>,
     prefetch_results: Arc<Mutex<HashMap<String, PrefetchResult>>>,
+
     is_mock: bool,
     mock_playing: bool,
     mock_fail: bool,
+
+    child: Option<Child>,
+    endpoint: IpcEndpoint,
+    stderr_lines: Arc<Mutex<Vec<String>>>,
+    cancel_observer: Option<Arc<AtomicBool>>,
+    observer_handle: Option<thread::JoinHandle<()>>,
 }
 
-impl AudioPlayer {
+impl CliPlayer {
     pub fn new() -> Self {
         let generation = 0;
         let endpoint = IpcEndpoint::new(generation);
 
         Self {
-            child: None,
-            endpoint,
             paused: false,
+            playing: false,
             last_error: None,
             generation,
             dumping: Arc::new(Mutex::new(HashSet::new())),
@@ -66,14 +70,15 @@ impl AudioPlayer {
             is_mock: false,
             mock_playing: false,
             mock_fail: false,
+            child: None,
+            endpoint,
         }
     }
 
     pub fn new_mock() -> Self {
         Self {
-            child: None,
-            endpoint: IpcEndpoint::from_string(String::new()),
             paused: false,
+            playing: false,
             last_error: None,
             generation: 0,
             dumping: Arc::new(Mutex::new(HashSet::new())),
@@ -85,6 +90,8 @@ impl AudioPlayer {
             is_mock: true,
             mock_playing: false,
             mock_fail: false,
+            child: None,
+            endpoint: IpcEndpoint::from_string(String::new()),
         }
     }
 
@@ -324,6 +331,9 @@ impl AudioPlayer {
             return;
         }
 
+        self.playing = false;
+        self.paused = false;
+
         // Immediately signal observer and prefetch tasks to cancel before any shutdown actions
         if let Some(cancel) = self.cancel_observer.take() {
             cancel.store(true, Ordering::SeqCst);
@@ -384,13 +394,13 @@ impl AudioPlayer {
     }
 }
 
-impl Default for AudioPlayer {
+impl Default for CliPlayer {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Drop for AudioPlayer {
+impl Drop for CliPlayer {
     fn drop(&mut self) {
         self.stop();
     }
@@ -671,7 +681,7 @@ pub fn audio_cache_dir() -> PathBuf {
     crate::config::audio_cache_dir()
 }
 
-fn audio_hash(url: &str) -> String {
+pub(crate) fn audio_hash(url: &str) -> String {
     url.bytes()
         .fold(14695981039346656037u64, |hash, byte| {
             (hash ^ u64::from(byte)).wrapping_mul(1099511628211)
@@ -821,7 +831,7 @@ pub fn start_dump_cancellable(
     let mut failure_reason: Option<String> = None;
     let mut completed_ok = false;
 
-    for _ in 0..600 {
+    for _ in 0..MAX_DUMP_SECS {
         if cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
             let _ = child.kill();
             let _ = child.wait();
@@ -865,7 +875,9 @@ pub fn start_dump_cancellable(
     if let Ok(None) = child.try_wait() {
         let _ = child.kill();
         let _ = child.wait();
-        failure_reason = Some("mpv stream-dump timed out after 600 seconds".into());
+        failure_reason = Some(format!(
+            "mpv stream-dump timed out after {MAX_DUMP_SECS} seconds"
+        ));
     }
 
     if let Some(err) = failure_reason {
@@ -1094,7 +1106,7 @@ mod tests {
         }
 
         let cancel = Arc::new(AtomicBool::new(false));
-        let mut player = AudioPlayer::new();
+        let mut player = CliPlayer::new();
         player.set_child_for_test(child, endpoint.clone(), cancel.clone());
 
         player.stop();
@@ -1122,7 +1134,7 @@ mod tests {
         }
 
         let cancel = Arc::new(AtomicBool::new(false));
-        let mut player = AudioPlayer::new();
+        let mut player = CliPlayer::new();
         player.set_child_for_test(child, endpoint.clone(), cancel.clone());
 
         player.stop();
@@ -1154,7 +1166,7 @@ mod tests {
 
         let cancel = Arc::new(AtomicBool::new(false));
         {
-            let mut player = AudioPlayer::new();
+            let mut player = CliPlayer::new();
             player.set_child_for_test(child, endpoint.clone(), cancel.clone());
             // player dropped here
         }
@@ -1242,7 +1254,7 @@ mod tests {
 
     #[test]
     fn test_player_stop_signals_prefetch_cancellation() {
-        let mut player = AudioPlayer::new();
+        let mut player = CliPlayer::new();
         assert!(!player.cancel_prefetch.load(Ordering::Relaxed));
 
         player.stop();

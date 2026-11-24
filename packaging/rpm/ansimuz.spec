@@ -17,6 +17,7 @@ BuildRequires:  cmake
 BuildRequires:  gcc
 BuildRequires:  make
 BuildRequires:  python3-devel
+BuildRequires:  mpv-libs-devel
 
 Requires:       mpv
 Requires:       yt-dlp

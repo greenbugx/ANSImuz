@@ -115,7 +115,7 @@ check_dev_pkg() {
 }
 
 if [ "$PKG_MANAGER" = "apt" ]; then
-    for p in python3-venv python3-pip python3-dev build-essential libssl-dev; do
+    for p in python3-venv python3-pip python3-dev build-essential libssl-dev libmpv-dev; do
         check_dev_pkg "$p"
     done
 elif [ "$PKG_MANAGER" = "pacman" ]; then
@@ -123,7 +123,7 @@ elif [ "$PKG_MANAGER" = "pacman" ]; then
         check_dev_pkg "$p"
     done
 elif [ "$PKG_MANAGER" = "dnf" ]; then
-    for p in python3-pip python3-devel gcc openssl-devel; do
+    for p in python3-pip python3-devel gcc openssl-devel mpv-libs-devel; do
         check_dev_pkg "$p"
     done
 fi

@@ -479,7 +479,7 @@ bridge.resolve_playable = mock_resolve
 "#,
         )
         .unwrap();
-        py.run(code.as_c_str(), None, Some(&locals))?;
+        py.run(code.as_c_str(), Some(&locals), Some(&locals))?;
         Ok(())
     })
     .expect("Failed to install mock bridge functions with barrier");
@@ -517,7 +517,7 @@ if hasattr(bridge, "orig_resolve"):
 "#,
         )
         .unwrap();
-        py.run(code.as_c_str(), None, Some(&locals))?;
+        py.run(code.as_c_str(), Some(&locals), Some(&locals))?;
         Ok(())
     });
 

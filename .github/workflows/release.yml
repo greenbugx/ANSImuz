@@ -140,7 +140,8 @@ jobs:
             python \
             openssl \
             pkgconf \
-            shadow
+            shadow \
+            mpv
 
       - name: Checkout packaging configuration
         uses: actions/checkout@v7
@@ -259,5 +260,77 @@ jobs:
         with:
           name: fedora-srpm
           path: dist/fedora/*.src.rpm
+          if-no-files-found: error
+          retention-days: 14
+
+  windows:
+    name: Build Windows release package
+    needs: prepare
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout packaging configuration
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'main' || github.ref }}
+
+      - name: Set up MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+          architecture: "x64"
+          cache: "pip"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-pc-windows-msvc
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Set up libmpv
+        shell: pwsh
+        run: |
+          ./scripts/setup_mpv_windows.ps1
+          Add-Content $env:GITHUB_PATH (Resolve-Path native/mpv/lib).Path
+
+      - name: Build release binary with native-mpv
+        run: cargo build --release --features native-mpv
+
+      - name: Package Windows release artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist/package | Out-Null
+          Copy-Item target/release/ansimuz.exe dist/package/
+          Copy-Item native/mpv/lib/*.dll dist/package/
+          Copy-Item THIRD-PARTY-LICENSES.md dist/package/
+          Copy-Item LICENSE dist/package/
+          Compress-Archive dist/package/* dist/ansimuz-windows-x64.zip
+
+      - name: Smoke-test packaged artifact
+        shell: pwsh
+        run: |
+          Expand-Archive dist/ansimuz-windows-x64.zip -DestinationPath dist/smoke_test
+          if (-not (Test-Path dist/smoke_test/ansimuz.exe)) {
+            throw "Packaged binary ansimuz.exe missing in release archive"
+          }
+          if (-not (Test-Path dist/smoke_test/*mpv*.dll)) {
+            throw "Packaged runtime DLL missing in release archive"
+          }
+
+      - name: Upload Windows package artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-package
+          path: dist/ansimuz-windows-x64.zip
           if-no-files-found: error
           retention-days: 14
