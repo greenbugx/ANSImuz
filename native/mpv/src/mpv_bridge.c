@@ -434,6 +434,19 @@ int ansimuz_mpv_create(
     if (status < 0) goto fail;
 
     /*
+     * Optional audio output driver override for headless or test environments
+     */
+    const char *ao_env = getenv("ANSIMUZ_MPV_AO");
+    if (ao_env && *ao_env) {
+        status = configure_option(
+            player->handle, "ao", ao_env,
+            error_buffer, error_buffer_size
+        );
+
+        if (status < 0) goto fail;
+    }
+
+    /*
      * Commit options and spawn internal playback threads.
      * Once initialized most core options become read only or require property writes.
      */
