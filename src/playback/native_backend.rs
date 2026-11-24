@@ -6,17 +6,15 @@ use std::thread;
 use std::time::Duration;
 
 use super::events::PlayerEvent;
-use super::mpv::{PrefetchResult, resolve_stream, start_dump_cancellable};
+use super::mpv::{PrefetchResult, start_dump_cancellable};
 use super::native_adapter::Translator;
 use super::native_mpv::NativeMpv;
 use super::player::AudioPlayer;
 
-// Resolves playback target by checking disk cache first then resolving web streams
+// Resolves playback target by checking disk cache first then delegating to mpv
 pub(crate) fn resolve_playback_target(url: &str) -> Result<String, String> {
     if let Some(path) = AudioPlayer::cached_audio(url) {
         Ok(path.to_string_lossy().into_owned())
-    } else if url.contains("youtube.com") || url.contains("youtu.be") {
-        resolve_stream(url)
     } else {
         Ok(url.to_string())
     }

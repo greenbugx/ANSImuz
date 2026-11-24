@@ -105,6 +105,11 @@ static int observe_properties(mpv_handle *handle) {
     int status;
 
     status = mpv_observe_property(
+        handle, 1, "time-pos", MPV_FORMAT_DOUBLE
+    );
+    if (status < 0) return status;
+
+    status = mpv_observe_property(
         handle, 2, "duration", MPV_FORMAT_DOUBLE
     );
     if (status < 0) return status;
@@ -409,10 +414,10 @@ int ansimuz_mpv_create(
     if (status < 0) goto fail;
 
     /*
-     * Disable mpv internal ytdl hook because Rust resolves stream URLs directly.
+     * Enable mpv internal ytdl hook for direct stream URL resolution.
      */
     status = configure_option(
-        player->handle, "ytdl", "no",
+        player->handle, "ytdl", "yes",
         error_buffer, error_buffer_size
     );
 
@@ -428,8 +433,12 @@ int ansimuz_mpv_create(
 
     if (status < 0) goto fail;
 
+    /*
+     * Enable idle mode in libmpv so the player waits idly for commands
+     * rather than exiting immediately when the playlist is empty.
+     */
     status = configure_option(
-        player->handle, "idle", "no",
+        player->handle, "idle", "yes",
         error_buffer, error_buffer_size
     );
 

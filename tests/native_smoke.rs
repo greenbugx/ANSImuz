@@ -55,7 +55,7 @@ fn plays_a_short_file_to_eof() {
     let id = mpv.loadfile(wav.to_str().expect("valid path")).expect("loadfile");
 
     let deadline = Instant::now() + Duration::from_secs(10);
-    let (mut loaded, mut ended) = (false, false);
+    let (mut loaded, mut ended, mut saw_pos) = (false, false, false);
     while Instant::now() < deadline && !ended {
         while let Ok(Some(ev)) = mpv.poll_event() {
             if ev.load_id != id {
@@ -63,6 +63,11 @@ fn plays_a_short_file_to_eof() {
             }
             match ev.event_type {
                 NativeEventType::FileLoaded => loaded = true,
+                NativeEventType::PropertyChange
+                    if ev.property == ansimuz::playback::native_mpv::NativeProperty::TimePos =>
+                {
+                    saw_pos = true;
+                }
                 NativeEventType::EndFile => {
                     assert_eq!(ev.end_reason, NativeEndReason::Eof);
                     ended = true;
@@ -73,6 +78,7 @@ fn plays_a_short_file_to_eof() {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(loaded, "never saw FileLoaded");
+    assert!(saw_pos, "never saw TimePos property change");
     assert!(ended, "never saw EndFile");
 }
 

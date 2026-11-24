@@ -21,7 +21,7 @@ toml = "1.1.8"
 unicode-width = "0.2.3"
 
 [features]
-default = []
+default = ["native-mpv"]
 native-mpv = []
 
 [build-dependencies]
