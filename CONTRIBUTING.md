@@ -15,17 +15,23 @@ All contributors and participants are expected to adhere to our [Code of Conduct
 ## Supported Operating Systems & Prerequisites
 
 ANSImuz supports:
-- **Linux** (x86_64): Primary platform (tested on Arch Linux, Fedora). Uses Unix-domain sockets for MPV IPC.
-- **Windows** (x86_64): Native Windows 10/11 support via PowerShell installer (`scripts/install_windows.ps1`), native `mpv`/`yt-dlp`, and cross-platform IPC over Windows Named Pipes (`\\.\pipe\...`). Also supported through `WSL2`.
+- **Linux** (x86_64): Primary platform (tested on Arch Linux, Fedora, Debian/Ubuntu).
+- **Windows** (x86_64): Windows 10/11 support via native libmpv or PowerShell installer (`scripts/install_windows.ps1`). Also supported through WSL2.
 
 Ensure the following tools and development libraries are installed on your system:
 
 ### Required Toolchains & Libraries
 - **Rust toolchain**: 1.85+ (compatible with the Rust 2024 edition).
 - **Python**: 3.10 or higher with development headers (`python3-dev` / `python3-devel`) for PyO3 linking.
-- **C Compiler & System Libraries**: `gcc` / `clang`, `glibc`, and OpenSSL development headers (`libssl-dev` / `openssl-devel`).
-- **[mpv](https://mpv.io/)**: Version 0.35+ recommended, with JSON IPC enabled (Unix-domain sockets on Linux, Named Pipes on Windows).
+- **C Compiler & Build Tools**:
+  - Linux: `gcc` / `clang`, OpenSSL development headers (`libssl-dev` / `openssl-devel`), and `pkg-config`.
+  - Windows: MSVC toolchain (C++ Build Tools with MSVC and Windows SDK) and `7z` (7-Zip on system PATH).
+- **libmpv Development Libraries**:
+  Native playback links directly to the C library API without spawning an external player process.
+  - Linux: The shared library headers are required for compiling (`libmpv-dev` on Debian/Ubuntu, `mpv-devel` on Fedora, or `mpv` on Arch Linux).
+  - Windows: The dev archive and MSVC import library are set up automatically using `.\scripts\setup_mpv_windows.ps1`.
 - **[yt-dlp](https://github.com/yt-dlp/yt-dlp)**: For stream URL resolution and media extraction.
+- **[mpv](https://mpv.io/)** (CLI binary): Only needed as an optional fallback when compiling with `--no-default-features`.
 
 ---
 
@@ -82,16 +88,41 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
    pip install -r requirements.txt
    ```
 
-4. **Verify the build and tests**:
+4. **Set up libmpv development libraries**:
+
+   **Windows (PowerShell)**:
+   ```powershell
+   .\scripts\setup_mpv_windows.ps1
+   ```
+   This downloads the pinned libmpv developer package (`native/mpv/WINDOWS_LIBMPV`), verifies its SHA256 checksum, places the C headers and dynamic library in `native/mpv/`, and generates the MSVC import library `native/mpv/lib/mpv.lib`.
+
+   **Linux (Debian / Ubuntu)**:
+   ```bash
+   sudo apt install -y libssl-dev libmpv-dev pkg-config
+   ```
+
+   **Linux (Fedora)**:
+   ```bash
+   sudo dnf install -y openssl-devel mpv-devel pkg-config
+   ```
+
+   **Linux (Arch Linux)**:
+   ```bash
+   sudo pacman -S --needed openssl mpv pkgconf
+   ```
+
+5. **Verify the build and tests**:
    ```bash
    cargo fmt --check
    cargo check --all-targets
+   cargo check --no-default-features --all-targets
    cargo clippy --all-targets -- -D warnings
+   cargo clippy --no-default-features --all-targets -- -D warnings
    cargo test
    python -m unittest discover -s backend/tests -p "test_*.py"
    ```
 
-5. **Run ANSImuz locally**:
+6. **Run ANSImuz locally**:
    ```bash
    cargo run
    ```
@@ -146,6 +177,13 @@ The codebase is organized into clean, modular boundaries:
 
 ```text
 ANSImuz/
+├── native/
+│   └── mpv/
+│       ├── include/          # Native C headers
+│       ├── lib/              # libmpv-2.dll, mpv.lib import library, mpv.def
+│       ├── src/              # C bridge implementation
+│       ├── tests/            # C bridge test suite
+│       └── WINDOWS_LIBMPV    # Pinned archive URL and SHA256 checksum
 ├── src/
 │   ├── app/              # Application loop, state machine, and orchestration
 │   │   ├── runner.rs         # Main event loop and terminal drawing
@@ -171,10 +209,14 @@ ANSImuz/
 │   │   ├── model.rs          # Serialized lyrics models and converter helpers
 │   │   └── mod.rs            # Lyrics module exports
 │   ├── music/            # Track model, identity policy, backend PyO3 bridge execution
-│   ├── playback/         # MPV IPC process supervision, cross-platform transport (ipc.rs)
+│   ├── playback/         # Audio playback subsystem
 │   │   ├── events.rs         # PlayerEvent enum (Position, Ended, Failed)
-│   │   ├── ipc.rs            # Cross-platform local IPC endpoints & streams (interprocess)
-│   │   ├── mpv.rs            # AudioPlayer implementation, observer loop, stream dumping
+│   │   ├── native_mpv.rs     # Safe Rust FFI wrapper around ansimuz_mpv_bridge
+│   │   ├── native_backend.rs # NativeBackend implementation and stream prefetching
+│   │   ├── native_adapter.rs # Zero-allocation event translator for native mpv events
+│   │   ├── mpv.rs            # Fallback CLI player (CliPlayer) via IPC
+│   │   ├── ipc.rs            # Cross-platform local IPC endpoints and streams (interprocess)
+│   │   ├── player.rs         # Unified AudioPlayer facade with automatic backend selection
 │   │   ├── repeat.rs         # Repeat mode sequencing
 │   │   └── mod.rs            # Playback module exports
 │   ├── terminal/         # Terminal raw mode setup and clean teardown
@@ -229,7 +271,8 @@ ANSImuz/
 - **Queue Deduplication**: Use `app.enqueue()` or `app.queue_contains()` to prevent duplicate tracks from being enqueued.
 - **Unicode Safety**: Never slice strings by raw byte offsets when displaying text in the TUI. Use character-based bounds or the project's `truncate` helper (`crate::ui::theme::truncate`) to prevent panics on multibyte characters.
 - **Runtime Data Paths**: Locate `backend/` and `assets/` only through `crate::paths::data_dir()`. Never use `env!("CARGO_MANIFEST_DIR")` or other compile-time paths for runtime assets, because that bakes the build directory into release binaries and breaks packaged installs. Use `option_env!` only for optional build-time overrides such as `ANSIMUZ_DATA_DIR`.
-- **Cross-Platform IPC**: MPV communication uses `IpcEndpoint` and `IpcStream` (`crate::playback::ipc`). On Unix, endpoints use filesystem paths (`.sock`); on Windows, endpoints use named pipes (`\\.\pipe\...`). Never invoke filesystem existence checks or deletions (`Path::exists()`, `fs::remove_file()`) on Windows named pipes.
+- **Cross-Platform IPC**: MPV communication uses `IpcEndpoint` and `IpcStream` (`crate::playback::ipc`). On Unix, endpoints use filesystem paths (`.sock`), and on Windows, endpoints use named pipes (`\\.\pipe\...`). Never invoke filesystem existence checks or deletions (`Path::exists()`, `fs::remove_file()`) on Windows named pipes.
+- **Native libmpv Safety**: Never allocate dynamic heap structures or parse recursive property nodes across FFI in high-frequency event loops. All track transitions must use direct O(1) state correlation. Always disable internal script engines (`load-scripts=no`, `osc=no`, `input-default-bindings=no`) to ensure libmpv never corrupts terminal TUI drawing.
 - **Observer Thread Concurrency & Reaping**: Decouple periodic query writing from continuous response reading. Background writer threads must always be wrapped in a RAII guard (`WriterThreadGuard`) and joined when the observer exits, and `AudioPlayer::stop()` must join the observer thread.
 - **Test Concurrency & State Isolation**: Tests that mutate shared global caches (such as `RESIZE_CACHE`, `art_cache()`, or `lyrics::cache`) must acquire their respective test locks (`ARTWORK_TEST_LOCK` or `LYRICS_CACHE_TEST_LOCK`) to prevent race conditions during parallel test runs. Self-contained data structure tests must instantiate local, isolated instances.
 
@@ -276,7 +319,7 @@ The lyrics subsystem provides real-time word and syllable-synchronized lyrics wi
 - **Terminal UI (`src/ui/screens/lyrics.rs`)**:
   - Multi-vocal layout: Lead vocals left-aligned (`▶`), secondary duet singer right-aligned (`◀`), and background vocals styled in dim italics (`▷`).
   - Zero-allocation rendering: Uses borrowed `WordItem` and `WordSpan` slices rather than cloning word vectors every frame.
-  - Explicit scroll policy: Viewport automatically follows the active lyric. When manual scroll is triggered (`k`/`j`/`PageUp`/`PageDown`), an indicator badge is shown; pressing `c` re-centers and resumes auto-scroll.
+  - Explicit scroll policy: Viewport automatically follows the active lyric. When manual scroll is triggered (`k`/`j`/`PageUp`/`PageDown`), an indicator badge is shown, and pressing `c` re-centers and resumes auto-scroll.
   - Transition guard: `resolve_sync_point` verifies track and generation identity to prevent flashing stale active lyrics across song changes.
 
 ---
@@ -287,12 +330,12 @@ The Discord Rich Presence subsystem (`src/discord/`) integrates real-time playba
 
 1. **Activity Builder (`src/discord/activity.rs`)**:
    - Constructs Discord `Activity` payloads (`ActivityType::Listening`).
-   - Timestamps: Live start and end timestamps calculated for playing tracks; timestamps omitted when paused.
+   - Timestamps: Live start and end timestamps calculated for playing tracks, with timestamps omitted when paused.
    - Interactive Buttons: "Listen on YouTube Music" or "Listen on Spotify" (pointing to public canonical URLs) and "Get ANSImuz". Temporary streaming URLs are strictly rejected.
    - Truncation: Safe UTF-8 grapheme truncation preventing multibyte panic or Discord API rejection.
    
 2. **IPC Client & Transport (`src/discord/client.rs` & `vendor/presenceforge/`)**:
-   - Cross-platform local IPC: Unix-domain sockets (`/run/user/.../discord-ipc-0`) on Linux; Windows Named Pipes (`\\.\pipe\discord-ipc-0`) on Windows.
+   - Cross-platform local IPC: Unix-domain sockets (`/run/user/.../discord-ipc-0`) on Linux, and Windows Named Pipes (`\\.\pipe\discord-ipc-0`) on Windows.
    - Offline safety: If Discord is closed or unreachable, calls return `DiscordError::NotConnected` safely without blocking the application.
 
 3. **Background Worker Actor (`src/discord/worker.rs`)**:
@@ -301,6 +344,45 @@ The Discord Rich Presence subsystem (`src/discord/`) integrates real-time playba
    
 4. **Artwork Pipeline (`src/discord/artwork/`)**:
    - Format detection, dimensions checks, multipart uploaders (Imgdb, Catbox, Litterbox), SSRF validation, and persistent disk caching with LRU pruning.
+
+---
+
+### 3. Playback Subsystem Architecture (Native libmpv & CLI Fallback)
+
+The playback subsystem (`src/playback/` and `native/mpv/`) manages audio playback, stream decoding, volume control, track transition lifecycles, and background stream prefetching.
+
+#### A. Dual-Backend Strategy
+ANSImuz supports two interchangeable playback engines behind a unified facade (`AudioPlayer` in `src/playback/player.rs`):
+- **Native libmpv Backend (`NativeBackend` in `src/playback/native_backend.rs`)**:
+  Enabled by default via the `native-mpv` Cargo feature. It links directly against `libmpv-2.dll` on Windows and `-lmpv` on Linux through an isolated C bridge. It eliminates process supervision overhead, removes external CLI binary requirements, and provides instantaneous track replacement. The command-line `mpv` executable is never invoked on either Windows or Linux.
+- **CLI Fallback Backend (`CliPlayer` in `src/playback/mpv.rs`)**:
+  Used when compiled with `--no-default-features`, or when runtime native initialization fails. It spawns an external `mpv` process and controls it via cross-platform JSON IPC (Unix domain sockets on Linux, Named Pipes on Windows).
+
+#### B. The Native C Bridge (`native/mpv/src/mpv_bridge.c` and `native/mpv/include/ansimuz_mpv.h`)
+- **ABI Isolation**: The C bridge encapsulates `mpv_handle` within an opaque pointer (`ansimuz_mpv`). This insulates the Rust FFI layer from upstream libmpv client header drift.
+- **Zero-Allocation Track Correlation**:
+  Rather than allocating heap ring buffers or traversing recursive playlist node trees, the bridge tracks `current_load_id`, `active_load_id`, `current_entry_id`, and `previous_entry_id` in O(1) storage.
+  When a new track loads via `loadfile` replace mode, libmpv emits `MPV_EVENT_END_FILE` for the displaced track. The bridge correlates the displaced track's entry ID with `previous_entry_id` and tags it with `previous_load_id`. The Rust translator drops the displaced stop event without disrupting active track playback.
+- **TUI Display Protection**:
+  Terminal music players are sensitive to background engine logs corrupting terminal cells. During `ansimuz_mpv_create`, the bridge explicitly sets:
+  - `terminal=no` and `msg-level=all=no`: Silences console and stderr logging.
+  - `load-scripts=no`: Completely stops built-in Lua/JS scripts (`console.lua`, `stats.lua`, `select.lua`) from initializing or triggering background command hooks.
+  - `osc=no`, `input-default-bindings=no`, and `input-vo-keyboard=no`: Disables on-screen controllers and keyboard intercepts.
+- **Discrete Property Observation**:
+  Registers discrete integer reply tags for `time-pos`, `duration`, `pause`, `volume`, and `mute`. Property change notifications are dispatched without string lookups.
+- **Rust Event Translation (`src/playback/native_adapter.rs`)**:
+  The `Translator` struct maps raw C event structs into high-level `PlayerEvent` variants (`Position`, `Ended`, `Failed`). It drops events belonging to superseded load IDs and filters high-frequency position ticks.
+
+#### C. Headless Stream Prefetching
+To ensure gapless transitions between queued tracks, ANSImuz prefetches upcoming songs into the local disk cache:
+- When a queued song is scheduled for prefetch, `NativeBackend::prefetch_later` invokes `ansimuz_mpv_dump_stream`.
+- A dedicated secondary headless `mpv_handle` is initialized with `stream-dump` and `ytdl=yes`.
+- The dump worker polls in a background thread while checking an atomic `cancel_flag` (`AtomicBool` in Rust). If the user skips or changes tracks, the dump aborts immediately and incomplete `.part` files are removed.
+- Once completed, the file is atomically renamed into the audio cache directory (`~/.cache/ansimuz/audio/` or `%LOCALAPPDATA%\ansimuz\audio`). When the track plays, it loads instantly from disk.
+
+#### D. Build Automation and DLL Deployment (`build.rs`)
+- `build.rs` compiles `native/mpv/src/mpv_bridge.c` using the `cc` crate and links against `mpv.lib` (Windows) or `-lmpv` (Linux).
+- On Windows, `build.rs` automatically detects the compiled output directory (`target/debug` or `target/release`) and copies `libmpv-2.dll` directly next to `ansimuz.exe`. Developers and users can run `cargo run` without manually modifying system PATH or copying DLLs.
 
 ---
 
@@ -337,7 +419,7 @@ The Windows portable release embeds its own Python 3.14 runtime so users do not 
 2. Extract the Python Windows Embeddable package into a staging directory.
 3. Install dependencies into `Lib\site-packages` using `pip install --target "$StagingDir\Lib\site-packages" -r requirements.txt`.
 4. Append `Lib\site-packages` to the `._pth` file.
-5. Copy `ansimuz.exe`, `backend\`, and `assets\` next to `python3XX.dll`.
+5. Copy `ansimuz.exe`, `libmpv-2.dll`, `backend\`, and `assets\` next to `python3XX.dll`.
 6. Package into `ansimuz-windows-v<version>-x64.rar`.
 
 ---
@@ -350,19 +432,35 @@ Before submitting a pull request, verify that all local checks pass cleanly:
 # 1. Check code formatting
 cargo fmt --check
 
-# 2. Check compilation across all targets
+# 2. Check compilation across both feature sets
 cargo check --all-targets
+cargo check --no-default-features --all-targets
 
-# 3. Run Clippy lints (warnings treated as errors)
+# 3. Run Clippy lints across both feature sets (warnings treated as errors)
 cargo clippy --all-targets -- -D warnings
+cargo clippy --no-default-features --all-targets -- -D warnings
 
 # 4. Run all Rust unit and integration tests
 cargo test
 
-# 5. Run subsystem-specific test suites:
+# 5. Run native libmpv smoke and playback tests (headless with null audio output)
+# Linux:
+ANSIMUZ_MPV_AO=null cargo test --test native_smoke -- --test-threads=1
+ANSIMUZ_MPV_AO=null cargo test --test queue_playback
+cargo test --lib playback
+
+# Windows PowerShell:
+$env:ANSIMUZ_MPV_AO="null"
+$nativeLib = (Resolve-Path "native/mpv/lib").Path
+$env:PATH = [string]::Join([System.IO.Path]::PathSeparator, @($nativeLib, $env:PATH))
+cargo test --test native_smoke -- --test-threads=1
+cargo test --test queue_playback
+cargo test --lib playback
+
+# 6. Run subsystem-specific test suites
 cargo test lyrics                   # All 76 lyrics unit and integration tests
 cargo test --lib discord::          # Discord activity, worker, and cache tests
-cargo test --lib playback::         # MPV process supervision and IPC transport tests
+cargo test --lib playback::         # Playback engine and IPC transport tests
 cargo test --test queue             # Queue operations and cursor focus
 cargo test --test queue_playback    # Queue priority, repeat modes, error recovery
 cargo test --test resolution        # Async track resolution, stale generation rejection
@@ -370,7 +468,7 @@ cargo test --test lifecycle         # Explicit Ended/Failed lifecycle events, tr
 cargo test --test memory_session    # Bounded cache capacities, memory stability
 cargo test --test artwork           # Disk caching, format detection, corruption recovery
 
-# 6. Verify Python syntax and run backend unit tests
+# 7. Verify Python syntax and run backend unit tests
 python -m py_compile backend/bridge.py backend/exceptions.py backend/providers/lyrics/*.py backend/providers/lyrics/parsers/*.py
 python -m unittest discover -s backend/tests -p "test_*.py" -v
 ```
