@@ -8,20 +8,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <math.h>
-#ifdef _WIN32
-#include <windows.h>
-#define sleep_ms(ms) Sleep(ms)
-#else
-#include <time.h>
-static void sleep_ms(unsigned int ms)
-{
-    struct timespec ts;
-    ts.tv_sec = ms / 1000;
-    ts.tv_nsec = (long)(ms % 1000) * 1000000L;
-    nanosleep(&ts, NULL);
-}
-#endif
-
+#include "test_common.h"
 #include "ansimuz_mpv.h"
 
 #define POSITION_TOLERANCE 0.75
@@ -94,6 +81,7 @@ int main(void)
 
     /* Step 1: Load test audio file */
     printf("\n--- Test 1: Load music1.mp3 ---\n");
+    ensure_test_audio_file("native/mpv/music1.mp3", 10);
 
     if (ansimuz_mpv_loadfile(
             player, "native/mpv/music1.mp3") != 0) {

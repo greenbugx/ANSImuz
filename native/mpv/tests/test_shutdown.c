@@ -6,7 +6,7 @@
  */
 
 #include <stdio.h>
-#include <windows.h>
+#include "test_common.h"
 
 #include "ansimuz_mpv.h"
 
@@ -18,10 +18,10 @@
  */
 static int wait_for_file_loaded(ansimuz_mpv *player)
 {
-    DWORD start = GetTickCount();
+    uint32_t start = get_tick_ms();
     ansimuz_mpv_event event;
 
-    while (GetTickCount() - start < MAX_WAIT_MS) {
+    while (get_tick_ms() - start < MAX_WAIT_MS) {
         int status = ansimuz_mpv_poll_event(player, &event);
 
         if (status < 0) {
@@ -36,7 +36,7 @@ static int wait_for_file_loaded(ansimuz_mpv *player)
             return 1;
         }
 
-        Sleep(10);
+        sleep_ms(10);
     }
 
     return 0;
@@ -45,6 +45,9 @@ static int wait_for_file_loaded(ansimuz_mpv *player)
 int main(void)
 {
     char error[256];
+
+    ensure_test_audio_file("native/mpv/music1.mp3", 10);
+    ensure_test_audio_file("native/mpv/music2.mp3", 10);
 
     printf("=== Test 10: Shutdown and Resource Cleanup ===\n\n");
 
@@ -68,7 +71,7 @@ int main(void)
         ansimuz_mpv_destroy(player);
 
         printf("[PASS] Cycle %d destroyed\n", i + 1);
-        Sleep(100);
+        sleep_ms(100);
     }
 
     /*
@@ -101,13 +104,13 @@ int main(void)
             return 1;
         }
 
-        Sleep(500);
+        sleep_ms(500);
 
         printf("[INFO] Destroying player during playback...\n");
         ansimuz_mpv_destroy(player);
 
         printf("[PASS] Playback cycle %d destroyed cleanly\n", i + 1);
-        Sleep(250);
+        sleep_ms(250);
     }
 
     /*

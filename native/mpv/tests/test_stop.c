@@ -6,22 +6,7 @@
  */
 
 #include <stdio.h>
-#ifdef _WIN32
-#include <windows.h>
-static void wait_ms(unsigned int ms) {
-    Sleep(ms);
-}
-#else
-#include <time.h>
-static void wait_ms(unsigned int ms) {
-    struct timespec req = {
-        .tv_sec = ms / 1000,
-        .tv_nsec = (long)(ms % 1000) * 1000000L
-    };
-    nanosleep(&req, NULL);
-}
-#endif
-
+#include "test_common.h"
 #include "ansimuz_mpv.h"
 
 /*
@@ -87,6 +72,7 @@ int main(void) {
 
     /* Step 1: Start playback */
     printf("\n--- Test 1: Start playback ---\n");
+    ensure_test_audio_file("native/mpv/music1.mp3", 10);
 
     status = ansimuz_mpv_loadfile(
         player,

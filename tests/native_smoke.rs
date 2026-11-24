@@ -71,7 +71,12 @@ fn plays_a_short_file_to_eof() {
                     saw_pos = true;
                 }
                 NativeEventType::EndFile => {
-                    assert_eq!(ev.end_reason, NativeEndReason::Eof);
+                    assert_eq!(
+                        ev.end_reason,
+                        NativeEndReason::Eof,
+                        "EndFile error code: {}",
+                        ev.error_code
+                    );
                     ended = true;
                 }
                 _ => {}
@@ -118,7 +123,15 @@ fn rapid_replace_does_not_emit_eof_for_first_track() {
         std::thread::sleep(Duration::from_millis(20));
     }
 
-    assert!(second_ended, "second track never reached EOF");
+    assert!(
+        second_ended,
+        "second track never reached EOF (events: {:?})",
+        events
+            .iter()
+            .filter(|e| e.load_id == second)
+            .map(|e| (e.event_type, e.end_reason, e.error_code))
+            .collect::<Vec<_>>()
+    );
     assert!(
         !events.iter().any(|e| e.load_id == first
             && e.event_type == NativeEventType::EndFile

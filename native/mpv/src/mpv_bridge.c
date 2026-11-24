@@ -6,6 +6,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 /*
  * Internal handle holder
@@ -280,6 +283,16 @@ int ansimuz_mpv_create(
      * Optional audio output driver override for headless or test environments
      */
     const char *ao_env = getenv("ANSIMUZ_MPV_AO");
+#ifdef _WIN32
+    char win_ao_buf[64] = {0};
+    if (!ao_env || !*ao_env) {
+        DWORD len = GetEnvironmentVariableA("ANSIMUZ_MPV_AO", win_ao_buf, sizeof(win_ao_buf));
+        if (len > 0 && len < sizeof(win_ao_buf)) {
+            ao_env = win_ao_buf;
+        }
+    }
+#endif
+
     if (ao_env && *ao_env) {
         status = configure_option(
             player->handle, "ao", ao_env,
@@ -287,6 +300,24 @@ int ansimuz_mpv_create(
         );
 
         if (status < 0) goto fail;
+    } else {
+#ifdef _WIN32
+        /* Default to wasapi with null fallback on headless Windows runners */
+        status = configure_option(
+            player->handle, "ao", "wasapi,null",
+            error_buffer, error_buffer_size
+        );
+
+        if (status < 0) goto fail;
+#else
+        /* Default to auto with null fallback on headless Linux runners */
+        status = configure_option(
+            player->handle, "ao", "auto,null",
+            error_buffer, error_buffer_size
+        );
+
+        if (status < 0) goto fail;
+#endif
     }
 
     /*

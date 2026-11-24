@@ -8,7 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
-#include <windows.h>
+#include "test_common.h"
 
 #include "ansimuz_mpv.h"
 
@@ -58,7 +58,7 @@ static void record_events(ansimuz_mpv *player, int duration_ms)
                    event.end_reason);
         }
 
-        Sleep(10);
+        sleep_ms(10);
         elapsed += 10;
     }
 }
@@ -75,6 +75,10 @@ int main(void)
     }
 
     printf("[OK] Backend initialized\n");
+
+    ensure_test_audio_file("native/mpv/music1.mp3", 10);
+    ensure_test_audio_file("native/mpv/music2.mp3", 10);
+    ensure_test_audio_file("native/mpv/music3.mp3", 10);
 
     const char *tracks[] = {
         "native/mpv/music1.mp3",
@@ -132,7 +136,7 @@ int main(void)
         if (final_loaded)
             break;
 
-        Sleep(50);
+        sleep_ms(50);
     }
 
     /* Verify final track attribution and cleanup */

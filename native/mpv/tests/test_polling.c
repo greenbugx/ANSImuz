@@ -7,7 +7,7 @@
 
 #include <stdio.h>
 #include <stdint.h>
-#include <windows.h>
+#include "test_common.h"
 
 #include "ansimuz_mpv.h"
 
@@ -104,6 +104,7 @@ int main(void)
     /*
      * Load a track.
      */
+    ensure_test_audio_file("native/mpv/music1.mp3", 10);
     if (ansimuz_mpv_loadfile(player, "native/mpv/music1.mp3") != 0) {
         printf("[FAIL] loadfile command failed\n");
         ansimuz_mpv_destroy(player);
@@ -118,9 +119,9 @@ int main(void)
     /*
      * Collect events until both important events arrive.
      */
-    DWORD start = GetTickCount();
+    uint32_t start = get_tick_ms();
 
-    while (GetTickCount() - start < MAX_WAIT_MS) {
+    while (get_tick_ms() - start < MAX_WAIT_MS) {
         if (drain_events(player, load_id, &file_loaded,
                          &playback_restart, &event_count) != 0) {
             ansimuz_mpv_destroy(player);
@@ -131,7 +132,7 @@ int main(void)
             break;
         }
 
-        Sleep(POLL_INTERVAL_MS);
+        sleep_ms(POLL_INTERVAL_MS);
     }
 
     printf("\n=== Results ===\n");
@@ -156,7 +157,7 @@ int main(void)
     /*
      * Let any remaining events arrive, then drain them.
      */
-    Sleep(500);
+    sleep_ms(500);
 
     if (drain_events(player, load_id, &file_loaded,
                      &playback_restart, &event_count) != 0) {
@@ -179,7 +180,7 @@ int main(void)
             break;
         }
 
-        Sleep(10);
+        sleep_ms(10);
     }
 
     if (idle_ok) {
@@ -190,7 +191,7 @@ int main(void)
 
     /* Clean up playback before terminating instance */
     ansimuz_mpv_stop(player);
-    Sleep(200);
+    sleep_ms(200);
 
     while (ansimuz_mpv_poll_event(player, &event) > 0) {
         printf("[CLEANUP EVENT] type=%d load_id=%llu\n",

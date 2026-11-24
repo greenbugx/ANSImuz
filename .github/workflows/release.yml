@@ -140,7 +140,8 @@ jobs:
             python \
             openssl \
             pkgconf \
-            shadow
+            shadow \
+            mpv
 
       - name: Checkout packaging configuration
         uses: actions/checkout@v7

@@ -85,7 +85,7 @@ jobs:
           cargo build --verbose --features native-mpv
 
       - name: Run tests (CLI backend)
-        run: cargo test --verbose
+        run: cargo test --no-default-features --verbose
 
       - name: Run tests (native, null audio)
         env:
@@ -99,8 +99,8 @@ jobs:
         run: |
           for t in native/mpv/tests/test_*.c; do
             echo "Running $t..."
-            gcc -Wall -Inative/mpv/include "$t" native/mpv/src/mpv_bridge.c \
-              $(pkg-config --cflags --libs mpv) -pthread -o /tmp/bridge_test
+            gcc -Wall -Inative/mpv/include -Inative/mpv/tests "$t" native/mpv/src/mpv_bridge.c \
+              $(pkg-config --cflags --libs mpv) -lm -pthread -o /tmp/bridge_test
             /tmp/bridge_test || exit 1
           done
 
@@ -161,7 +161,7 @@ jobs:
           cargo clippy --all-targets --features native-mpv -- -D warnings
 
       - name: Run tests (CLI backend)
-        run: cargo test --verbose
+        run: cargo test --no-default-features --verbose
 
       - name: Run tests (native, null audio)
         env:
