@@ -565,6 +565,31 @@ main:focus {
   color: var(--fg-soft);
 }
 
+.hero-platform-logos {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 20px;
+}
+
+.platform-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg-soft);
+  transition: color var(--dur) var(--ease);
+}
+
+.platform-badge:hover {
+  color: var(--bone);
+}
+
+.platform-sep {
+  font-size: 12px;
+  color: var(--muted-2);
+  line-height: 1;
+}
+
 .hero-screenshots {
   position: relative;
   justify-self: end;
