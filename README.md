@@ -15,6 +15,28 @@
 
 ANSImuz is built with Rust, Ratatui, Python, [`ytmusicapi`](https://github.com/sigma67/ytmusicapi), [`spotifyscraper`](https://github.com/AliAkhtari78/SpotifyScraper), and [`interprocess`](https://github.com/kotauskas/interprocess).
 
+## Screenshots
+
+<p align="center">
+  <img src="website/public/screenshots/1.webp" alt="ANSImuz main player view" width="90%" />
+  <br />
+  <sub><em>Main player view with search results, album art, adaptive palette, and queue</em></sub>
+</p>
+
+<p align="center">
+  <img src="website/public/screenshots/2.webp" alt="ANSImuz synchronized lyrics view" width="90%" />
+  <br />
+  <sub><em>Synchronized word-level karaoke lyrics alongside the player</em></sub>
+</p>
+
+<p align="center">
+  <img src="website/public/screenshots/3.webp" alt="ANSImuz command palette overlay" width="90%" />
+  <br />
+  <sub><em>Command palette overlay with keyboard shortcuts</em></sub>
+</p>
+
+---
+
 ## Features
 
 - **Multi-Source Streaming**: Search and stream high-quality music directly from YouTube Music and Spotify.
