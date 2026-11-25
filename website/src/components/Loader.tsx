@@ -33,7 +33,7 @@ export default function Loader({ onComplete }: LoaderProps) {
     let animId: number;
     let finishTimeout: number | undefined;
     const startTime = performance.now();
-    const minDuration = 3000;
+    const minDuration = 1500;
 
     const tick = () => {
       const elapsed = performance.now() - startTime;
@@ -52,7 +52,7 @@ export default function Loader({ onComplete }: LoaderProps) {
 
       const current = displayProgressRef.current;
       const delta = target - current;
-      const step = Math.max(delta * 0.12, 0.25);
+      const step = Math.max(delta * 0.24, 0.25);
       const next = Math.min(100, current + step);
 
       if (isLoadedRef.current && elapsed >= minDuration && next >= 99.5) {
