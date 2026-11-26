@@ -57,7 +57,7 @@ jobs:
 
       - name: Python syntax check and unit tests
         run: |
-          python -m py_compile backend/bridge.py backend/exceptions.py backend/artwork/thumbnails.py backend/providers/spotify/spotify.py backend/providers/ytmusic/ytmusic.py backend/providers/ytdlp/__init__.py backend/providers/ytdlp/errors.py backend/providers/ytdlp/options.py backend/providers/ytdlp/resolver.py backend/providers/ytdlp/runtime.py backend/tests/test_ytdlp.py
+          python -m py_compile backend/bridge.py backend/exceptions.py backend/artwork/thumbnails.py backend/providers/spotify/spotify.py backend/providers/ytmusic/ytmusic.py backend/providers/ytdlp/__init__.py backend/providers/ytdlp/errors.py backend/providers/ytdlp/options.py backend/providers/ytdlp/resolver.py backend/providers/ytdlp/runtime.py backend/providers/ytdlp/self_test.py backend/tests/test_ytdlp.py
           python -m unittest discover -s backend/tests -p "test_*.py" -v
 
   ci:
@@ -84,7 +84,7 @@ jobs:
 
       - name: Python syntax check and unit tests
         run: |
-          python -m py_compile backend/bridge.py backend/exceptions.py backend/artwork/thumbnails.py backend/providers/spotify/spotify.py backend/providers/ytmusic/ytmusic.py backend/providers/ytdlp/__init__.py backend/providers/ytdlp/errors.py backend/providers/ytdlp/options.py backend/providers/ytdlp/resolver.py backend/providers/ytdlp/runtime.py backend/tests/test_ytdlp.py
+          python -m py_compile backend/bridge.py backend/exceptions.py backend/artwork/thumbnails.py backend/providers/spotify/spotify.py backend/providers/ytmusic/ytmusic.py backend/providers/ytdlp/__init__.py backend/providers/ytdlp/errors.py backend/providers/ytdlp/options.py backend/providers/ytdlp/resolver.py backend/providers/ytdlp/runtime.py backend/providers/ytdlp/self_test.py backend/tests/test_ytdlp.py
           python -m unittest discover -s backend/tests -p "test_*.py" -v
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -130,6 +130,9 @@ jobs:
           ANSIMUZ_MPV_AO: "null"
           ANSIMUZ_REQUIRE_MPV: "1"
         run: cargo test --features native-mpv -- --test-threads=1
+
+      - name: Run self-test (Linux native binary)
+        run: ./target/debug/ansimuz --self-test
 
       - name: Run C bridge tests
         env:
@@ -188,7 +191,7 @@ jobs:
 
       - name: Python syntax check and unit tests
         run: |
-          python -m py_compile backend/bridge.py backend/exceptions.py backend/artwork/thumbnails.py backend/providers/spotify/spotify.py backend/providers/ytmusic/ytmusic.py backend/providers/ytdlp/__init__.py backend/providers/ytdlp/errors.py backend/providers/ytdlp/options.py backend/providers/ytdlp/resolver.py backend/providers/ytdlp/runtime.py backend/tests/test_ytdlp.py
+          python -m py_compile backend/bridge.py backend/exceptions.py backend/artwork/thumbnails.py backend/providers/spotify/spotify.py backend/providers/ytmusic/ytmusic.py backend/providers/ytdlp/__init__.py backend/providers/ytdlp/errors.py backend/providers/ytdlp/options.py backend/providers/ytdlp/resolver.py backend/providers/ytdlp/runtime.py backend/providers/ytdlp/self_test.py backend/tests/test_ytdlp.py
           python -m unittest discover -s backend/tests -p "test_*.py" -v
 
       - name: Format check
@@ -215,3 +218,11 @@ jobs:
 
       - name: Release build (native)
         run: cargo build --release --features native-mpv
+
+      - name: Run self-test (Windows native binary)
+        shell: pwsh
+        run: |
+          $pyDir = (Get-Command python).Source | Split-Path -Parent
+          $mpvDir = (Resolve-Path native/mpv/lib).Path
+          $env:PATH = "$pyDir;$mpvDir;$env:SystemRoot\System32"
+          ./target/release/ansimuz.exe --self-test

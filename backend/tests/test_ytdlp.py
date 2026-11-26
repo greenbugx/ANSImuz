@@ -333,3 +333,35 @@ class TestYtdlpResolverWithFakeYdl(unittest.TestCase):
         apply_hermetic_globals()
         self.assertEqual(yt_dlp.globals.plugin_dirs.value, [])
         self.assertTrue(yt_dlp.globals.all_plugins_loaded.value)
+
+    def test_self_test_runs_offline_and_requires_js_runtime(self):
+        import bridge
+        from providers.ytdlp import runtime, self_test
+
+        with patch.object(runtime, "detect_runtime", return_value=({}, "none", None)):
+            with self.assertRaises(RuntimeError):
+                bridge.self_test()
+
+        def fake_subprocess_run(cmd, **_kwargs):
+            self.assertIn("--script", cmd)
+
+            class FakeProc:
+                returncode = 0
+                stdout = '{"type":"result","responses":[{"type":"result","data":{"abc123":"abc123_ok"}}]}\n'
+                stderr = ""
+
+            return FakeProc()
+
+        with patch.object(
+            runtime,
+            "detect_runtime",
+            return_value=({"quickjs": {"path": "/tmp/qjs"}}, "bundled-quickjs", "/tmp/qjs"),
+        ):
+            with patch.object(self_test.subprocess, "run", side_effect=fake_subprocess_run):
+                report = bridge.self_test()
+
+        self.assertEqual(report["js_runtime"], "bundled-quickjs")
+        self.assertEqual(report["solver_output"], "abc123_ok")
+        self.assertFalse(report["ytdlp_binary_needed"])
+        self.assertTrue(report["ytdlp_version"])
+        self.assertTrue(report["ejs_version"])

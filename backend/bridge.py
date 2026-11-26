@@ -36,6 +36,7 @@ __all__ = [
     "resolve_playable",
     "resolve_stream",
     "search_music",
+    "self_test",
     "ytdlp_status",
     "ytdlp_warmup",
 ]
@@ -113,3 +114,8 @@ def ytdlp_status() -> dict[str, Any]:
 def ytdlp_warmup() -> dict[str, Any]:
     """Pre-initializes yt-dlp imports and interactive extractor state."""
     return ytdlp.ytdlp_warmup()
+
+
+def self_test(data_dir: str | None = None) -> dict[str, Any]:
+    """Runs offline deterministic self-checks for embedded yt-dlp and JS runtime."""
+    return ytdlp.run_self_test(data_dir=data_dir)

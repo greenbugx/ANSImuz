@@ -64,22 +64,12 @@ export default function Docs() {
               <li>
                 <span className="step-index">01</span>
                 <div>
-                  <h3>Install yt-dlp</h3>
-                  <p>
-                    Install <a href={LINKS.ytdlp} target="_blank" rel="noreferrer">yt-dlp</a> on
-                    your PATH for stream resolution.
-                  </p>
+                  <h3>Install ANSImuz</h3>
+                  <p>Use the portable archive or system package below. Dependencies come bundled.</p>
                 </div>
               </li>
               <li>
                 <span className="step-index">02</span>
-                <div>
-                  <h3>Install ANSImuz</h3>
-                  <p>Use the package for your system. The download section has the commands.</p>
-                </div>
-              </li>
-              <li>
-                <span className="step-index">03</span>
                 <div>
                   <h3>Run it</h3>
                   <p>

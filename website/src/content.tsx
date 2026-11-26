@@ -16,7 +16,6 @@ export const LINKS = {
   copr: 'https://copr.fedorainfracloud.org/coprs/greenbugx/ansimuz/',
   sourceforge: 'https://sourceforge.net/projects/ansimuz/files/latest/download',
   mpv: 'https://mpv.io/',
-  ytdlp: 'https://github.com/yt-dlp/yt-dlp',
 };
 
 export const SECTIONS = [
@@ -126,8 +125,8 @@ export const PLATFORMS: Platform[] = [
     commands: ['sudo dnf copr enable greenbugx/ansimuz', 'sudo dnf install ansimuz'],
     note: (
       <>
-        Includes native libmpv and yt-dlp automatically. Or download the prebuilt binary
-        from{' '}
+        Installs native libmpv and Python stream dependencies automatically. Or download the
+        prebuilt binary from{' '}
         <a href={LINKS.releases} target="_blank" rel="noreferrer">
           GitHub Releases
         </a>
@@ -148,7 +147,7 @@ export const PLATFORMS: Platform[] = [
     ],
     note: (
       <>
-        Installs libmpv (via mpv) and yt-dlp automatically. Use yay or manual AUR if you
+        Bundles yt-dlp modules and QuickJS while pulling libmpv via mpv automatically. Use yay or manual AUR if you
         do not use paru, or grab a release from{' '}
         <a href={LINKS.releases} target="_blank" rel="noreferrer">
           GitHub Releases
@@ -162,13 +161,11 @@ export const PLATFORMS: Platform[] = [
   {
     name: 'Windows',
     meta: 'Portable x64 build',
-    commandLabel: 'prerequisite',
-    commands: ['winget install --id yt-dlp.yt-dlp -e'],
     note: (
       <>
-        Bundles the Python runtime and native <kbd>libmpv-2.dll</kbd> with no separate mpv
-        install needed. Extract the archive and run <kbd>ansimuz.exe</kbd> on Windows 10
-        or 11.
+        Bundles embedded Python, yt-dlp modules, pinned QuickJS, and native{' '}
+        <kbd>libmpv-2.dll</kbd> with no external tools needed. Extract the archive and run{' '}
+        <kbd>ansimuz.exe</kbd> on Windows 10 or 11.
       </>
     ),
     action: 'Download .rar',
@@ -210,14 +207,14 @@ export const FAQS: Faq[] = [
       'Not for the Windows portable build. It bundles an embedded Python runtime and its dependencies. The Linux packages wire up system Python modules for you. Building from source uses the virtual environment workflow in CONTRIBUTING.md.',
   },
   {
-    question: 'Do I need mpv and yt-dlp installed?',
+    question: 'Do I need mpv or yt-dlp installed?',
     answer: (
       <>
-        Only <kbd>yt-dlp</kbd> is required on your PATH to resolve audio streams. Playback
-        runs in-process through native <kbd>libmpv</kbd> instead of launching the{' '}
-        <kbd>mpv</kbd> CLI: Windows portable builds bundle <kbd>libmpv-2.dll</kbd>{' '}
-        directly, Fedora and Arch packages install it for you, and Debian/Ubuntu users
-        just need <kbd>libmpv2</kbd>.
+        No external <kbd>yt-dlp</kbd> or <kbd>mpv</kbd> CLI executable is needed.
+        Stream extraction uses embedded Python <kbd>yt-dlp</kbd> with bundled QuickJS,
+        and audio plays in-process through native <kbd>libmpv</kbd>. Windows portable
+        builds bundle everything, Fedora and Arch packages pull dependencies
+        automatically, and Debian/Ubuntu users only need <kbd>libmpv2</kbd>.
       </>
     ),
   },

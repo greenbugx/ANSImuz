@@ -40,7 +40,7 @@ Please provide your environment details:
 - **Terminal Dimensions (Cols x Rows)**: [e.g. 140x35, 80x24]
 - **Active Music Provider**: [e.g. YouTube Music / Spotify]
 - **`mpv` Version** (`mpv --version`):
-- **`yt-dlp` Version** (`yt-dlp --version`):
+- **`yt-dlp` Version** (`ANSImuz -> About -> yt-dlp version`):
 - **Rust Version** (`rustc --version`):
 - **Python Version** (`python3 --version`):
 

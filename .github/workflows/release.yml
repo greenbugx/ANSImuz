@@ -280,14 +280,14 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
-          python-version: "3.x"
+          python-version: "3.14.5"
           architecture: "x64"
           cache: "pip"
 
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install --require-hashes -r requirements.lock
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -297,10 +297,11 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Set up libmpv
+      - name: Set up libmpv and QuickJS
         shell: pwsh
         run: |
           ./scripts/setup_mpv_windows.ps1
+          ./scripts/setup_qjs_windows.ps1
           Add-Content $env:GITHUB_PATH (Resolve-Path native/mpv/lib).Path
 
       - name: Build release binary with native-mpv
@@ -309,23 +310,66 @@ jobs:
       - name: Package Windows release artifact
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          $pyUrl = "https://www.python.org/ftp/python/3.14.5/python-3.14.5-embed-amd64.zip"
+          $pySha = "BA6BD811C4EEDB19195CF275770EF127E893D63701E24152606E2CB76F6D876A"
+          $pyZip = "$env:TEMP\python-3.14.5-embed-amd64.zip"
+          Invoke-WebRequest $pyUrl -OutFile $pyZip
+          $actual = (Get-FileHash $pyZip -Algorithm SHA256).Hash
+          if ($actual -ne $pySha) {
+            throw "Python embeddable SHA256 mismatch: expected $pySha, got $actual"
+          }
+
           New-Item -ItemType Directory dist/package | Out-Null
+          Expand-Archive $pyZip -DestinationPath dist/package
+          Remove-Item $pyZip -Force
+
+          Set-Content -Path "dist/package/python314._pth" -Value @(
+            "python314.zip",
+            ".",
+            "Lib/site-packages",
+            "backend",
+            "import site"
+          ) -Encoding Ascii
+
+          New-Item -ItemType Directory -Force dist/package/Lib/site-packages | Out-Null
+          python -m pip install --require-hashes --only-binary=:all: --target dist/package/Lib/site-packages -r requirements.lock
+
           Copy-Item target/release/ansimuz.exe dist/package/
           Copy-Item native/mpv/lib/*.dll dist/package/
           Copy-Item THIRD-PARTY-LICENSES.md dist/package/
           Copy-Item LICENSE dist/package/
+          Copy-Item -Recurse backend dist/package/backend
+          Get-ChildItem dist/package/backend -Recurse -Directory -Filter "__pycache__" | Remove-Item -Recurse -Force
+          Copy-Item -Recurse assets dist/package/assets
+          New-Item -ItemType Directory -Force dist/package/runtime | Out-Null
+          Copy-Item runtime/qjs.exe dist/package/runtime/
+          Copy-Item runtime/QUICKJS dist/package/runtime/
+
           Compress-Archive dist/package/* dist/ansimuz-windows-x64.zip
 
       - name: Smoke-test packaged artifact
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           Expand-Archive dist/ansimuz-windows-x64.zip -DestinationPath dist/smoke_test
-          if (-not (Test-Path dist/smoke_test/ansimuz.exe)) {
-            throw "Packaged binary ansimuz.exe missing in release archive"
+          foreach ($required in @(
+            "dist/smoke_test/ansimuz.exe",
+            "dist/smoke_test/python314.zip",
+            "dist/smoke_test/Lib/site-packages/yt_dlp",
+            "dist/smoke_test/backend/bridge.py",
+            "dist/smoke_test/assets",
+            "dist/smoke_test/runtime/qjs.exe"
+          )) {
+            if (-not (Test-Path $required)) {
+              throw "Missing packaged item in release archive: $required"
+            }
           }
           if (-not (Test-Path dist/smoke_test/*mpv*.dll)) {
             throw "Packaged runtime DLL missing in release archive"
           }
+          $env:PATH = "$env:SystemRoot\System32"
+          & ./dist/smoke_test/ansimuz.exe --self-test
 
       - name: Upload Windows package artifact
         uses: actions/upload-artifact@v7

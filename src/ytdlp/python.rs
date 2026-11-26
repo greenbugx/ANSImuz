@@ -5,7 +5,7 @@ use pyo3::types::PyDict;
 
 use super::{
     cache::{cache_stream, get_cached_stream},
-    types::{ResolvedStream, ResolverStatus, StreamResolver},
+    types::{ResolvedStream, ResolverStatus, SelfTestReport, StreamResolver},
 };
 use crate::music::search::with_backend;
 
@@ -99,6 +99,33 @@ pub fn status() -> Result<ResolverStatus, String> {
         let obj = bridge.getattr("ytdlp_status")?.call0()?;
         let dict = obj.cast_into::<PyDict>()?;
         parse_status(&dict)
+    })
+}
+
+pub fn run_self_test() -> Result<SelfTestReport, String> {
+    with_backend(|_py, bridge| {
+        let data_dir = crate::paths::data_dir();
+        let obj = bridge
+            .getattr("self_test")?
+            .call1((data_dir.to_string_lossy().as_ref(),))?;
+        let dict = obj.cast_into::<PyDict>()?;
+        let extract_str = |key: &str| -> PyResult<String> {
+            Ok(dict
+                .get_item(key)?
+                .and_then(|v| v.extract().ok())
+                .unwrap_or_default())
+        };
+        Ok(SelfTestReport {
+            ytdlp_version: extract_str("ytdlp_version")?,
+            ejs_version: extract_str("ejs_version")?,
+            js_runtime: extract_str("js_runtime")?,
+            js_runtime_path: extract_str("js_runtime_path")?,
+            solver_output: extract_str("solver_output")?,
+            ytdlp_binary_needed: dict
+                .get_item("ytdlp_binary_needed")?
+                .and_then(|v| v.extract().ok())
+                .unwrap_or(false),
+        })
     })
 }
 

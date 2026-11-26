@@ -20,12 +20,14 @@ BuildRequires:  python3-devel
 BuildRequires:  mpv-libs-devel
 
 Requires:       mpv
-Requires:       yt-dlp
-Requires:       python3
+Requires:       python3 >= 3.11
+Requires:       python3dist(yt-dlp)
+Requires:       python3dist(yt-dlp-ejs)
 Requires:       python3-pillow
 Requires:       python3-requests
 Requires:       python3-ytmusicapi
 Requires:       python3dist(spotifyscraper)
+Recommends:     (quickjs or nodejs)
 
 %description
 ANSImuz is a lightweight terminal music player that streams music

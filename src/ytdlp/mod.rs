@@ -7,5 +7,7 @@ pub use cache::{
     evict_cached_stream, extract_video_id, get_cached_stream, is_youtube_watch_url,
     stream_cache_len,
 };
-pub use python::{PyResolver, resolve_stream, resolve_with, spawn_warmup, status, warmup};
-pub use types::{ResolvedStream, ResolverStatus, StreamResolver};
+pub use python::{
+    PyResolver, resolve_stream, resolve_with, run_self_test, spawn_warmup, status, warmup,
+};
+pub use types::{ResolvedStream, ResolverStatus, SelfTestReport, StreamResolver};

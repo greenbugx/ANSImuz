@@ -22,7 +22,7 @@ Ensure the following tools and development libraries are installed on your syste
 
 ### Required Toolchains & Libraries
 - **Rust toolchain**: 1.85+ (compatible with the Rust 2024 edition).
-- **Python**: 3.10 or higher with development headers (`python3-dev` / `python3-devel`) for PyO3 linking.
+- **Python**: 3.11 or higher with development headers (`python3-dev` / `python3-devel`) for PyO3 linking (`yt-dlp` and `yt-dlp-ejs` are installed into `.venv` via `requirements.txt`).
 - **C Compiler & Build Tools**:
   - Linux: `gcc` / `clang`, OpenSSL development headers (`libssl-dev` / `openssl-devel`), and `pkg-config`.
   - Windows: MSVC toolchain (C++ Build Tools with MSVC and Windows SDK) and `7z` (7-Zip on system PATH).
@@ -30,7 +30,7 @@ Ensure the following tools and development libraries are installed on your syste
   Native playback links directly to the C library API without spawning an external player process.
   - Linux: The shared library headers are required for compiling (`libmpv-dev` on Debian/Ubuntu, `mpv-libs-devel` on Fedora, or `mpv` on Arch Linux).
   - Windows: The dev archive and MSVC import library are set up automatically using `.\scripts\setup_mpv_windows.ps1`.
-- **[yt-dlp](https://github.com/yt-dlp/yt-dlp)**: For stream URL resolution and media extraction.
+- **QuickJS runtime (`qjs`)**: Set up automatically using `./scripts/setup_qjs_linux.sh` or `.\scripts\setup_qjs_windows.ps1` (with fallback to system `deno`/`node`/`qjs`).
 - **[mpv](https://mpv.io/)** (CLI binary): Only needed as an optional fallback when compiling with `--no-default-features`.
 
 ---
@@ -39,7 +39,7 @@ Ensure the following tools and development libraries are installed on your syste
 
 ### Automated Setup (Recommended)
 
-Run the installer for your operating system. It verifies and installs all prerequisites (including `mpv` and `yt-dlp`), creates the Python virtual environment (`.venv`), installs Python packages, and compiles the project:
+Run the installer for your operating system. It verifies and installs all prerequisites (including `libmpv` and pinned QuickJS), creates the Python virtual environment (`.venv`), installs Python packages (`yt-dlp`, `yt-dlp-ejs`, `ytmusicapi`, `spotifyscraper`, `pillow`, `requests`), and compiles the project:
 
 **Linux:**
 ```bash

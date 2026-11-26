@@ -76,9 +76,9 @@ fi
 success "Detected package manager: ${PKG_MANAGER:-manual}"
 
 # -------------------------------------------------------------
-# Install required system packages (mpv, yt-dlp, dev libs)
+# Install required system packages (mpv and dev libs)
 # -------------------------------------------------------------
-step "2" "Installing system prerequisites (mpv, yt-dlp, build dependencies)..."
+step "2" "Installing system prerequisites (mpv and build dependencies)..."
 
 MISSING_PACKAGES=()
 
@@ -101,7 +101,6 @@ check_or_queue() {
 }
 
 check_or_queue "mpv" "mpv" "mpv" "mpv"
-check_or_queue "yt-dlp" "yt-dlp" "yt-dlp" "yt-dlp"
 check_or_queue "pkg-config" "pkg-config" "pkgconf" "pkgconf-pkg-config"
 check_or_queue "python3" "python3" "python" "python3"
 
@@ -137,15 +136,10 @@ if [ ${#MISSING_PACKAGES[@]} -gt 0 ]; then
     fi
 fi
 
-# Fallback check for yt-dlp if package manager did not provide it
-if ! command -v yt-dlp >/dev/null 2>&1; then
-    info "yt-dlp not found in PATH; attempting standalone binary install..."
-    sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
-    sudo chmod a+rx /usr/local/bin/yt-dlp
-fi
-
 command -v mpv >/dev/null 2>&1 || error_exit "mpv is required for audio playback. Please install mpv manually."
-command -v yt-dlp >/dev/null 2>&1 || error_exit "yt-dlp is required for media streaming. Please install yt-dlp manually."
+
+info "Setting up pinned QuickJS runtime..."
+bash "${SCRIPT_DIR}/setup_qjs_linux.sh"
 
 success "System prerequisites verified."
 
@@ -193,7 +187,7 @@ step "5" "Installing Python dependencies from requirements.txt..."
 
 pip install --upgrade pip --quiet
 pip install -r requirements.txt --quiet
-success "Python packages successfully installed (ytmusicapi, spotifyscraper, pillow, requests)."
+success "Python packages successfully installed (yt-dlp, yt-dlp-ejs, ytmusicapi, spotifyscraper, pillow, requests)."
 
 # -------------------------------------------------------------
 # Compile ANSImuz with Cargo

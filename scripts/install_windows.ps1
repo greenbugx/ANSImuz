@@ -3,10 +3,9 @@
     Automated Windows installation script for ANSImuz.
 .DESCRIPTION
     Installs and verifies all required prerequisites:
-    - mpv (audio playback engine)
-    - yt-dlp (stream resolution)
+    - native libmpv and pinned QuickJS runtime
     - Rust toolchain (cargo, rustc)
-    - Python 3.10+ and .venv virtual environment
+    - Python 3.11+ and .venv virtual environment
     - Python dependencies from requirements.txt
     - Compiles ANSImuz release binary
 #>
@@ -91,9 +90,9 @@ if ($HasWinget) {
 }
 
 # -------------------------------------------------------------
-# Verify or install libmpv, optional mpv CLI, and yt-dlp
+# Verify or install libmpv, QuickJS runtime, and optional mpv CLI
 # -------------------------------------------------------------
-Write-Step "2" "Verifying media prerequisites (libmpv and yt-dlp)..."
+Write-Step "2" "Verifying media prerequisites (libmpv and QuickJS)..."
 
 # Ensure 7z is available for libmpv dev archive extraction if setup is needed
 $MpvLibPath = Join-Path $RepoRoot "native\mpv\lib\mpv.lib"
@@ -134,24 +133,9 @@ if ($MpvCmd) {
     Write-Info "mpv CLI not found (optional since native libmpv is compiled by default)"
 }
 
-# yt-dlp
-$YtdlpCmd = Get-Command yt-dlp -ErrorAction SilentlyContinue
-if (-not $YtdlpCmd) {
-    Write-Info "yt-dlp was not found in PATH. Attempting automated install..."
-    if ($HasWinget) {
-        Write-Info "Installing yt-dlp via winget..."
-        winget install --id yt-dlp.yt-dlp -e --accept-package-agreements --accept-source-agreements --silent
-    } elseif ($HasChoco) {
-        choco install yt-dlp -y
-    } elseif ($HasScoop) {
-        scoop install yt-dlp
-    } else {
-        Write-Info "yt-dlp will be installed in the Python virtual environment as fallback."
-    }
-    $env:PATH = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
-} else {
-    Write-Success "yt-dlp is already installed: $($YtdlpCmd.Source)"
-}
+Write-Info "Setting up pinned QuickJS runtime..."
+$SetupQjsScript = Join-Path $ScriptDir "setup_qjs_windows.ps1"
+& $SetupQjsScript
 
 # -------------------------------------------------------------
 # Verify Rust toolchain
@@ -202,7 +186,7 @@ if (-not $PythonCmd) {
 }
 
 if (-not $PythonCmd) {
-    Write-ErrorExit "Python 3.10+ is required. Please install Python from https://www.python.org/ or Microsoft Store."
+    Write-ErrorExit "Python 3.11+ is required. Please install Python from https://www.python.org/ or Microsoft Store."
 }
 
 $PyVer = & $PythonCmd.Source --version
@@ -231,12 +215,7 @@ Write-Step "5" "Installing Python dependencies from requirements.txt..."
 $ReqFile = Join-Path $RepoRoot "requirements.txt"
 & $VenvPython -m pip install -r "$ReqFile" --quiet
 
-# Also ensure yt-dlp is in virtualenv if not on PATH
-if (-not (Get-Command yt-dlp -ErrorAction SilentlyContinue)) {
-    & $VenvPython -m pip install yt-dlp --quiet
-}
-
-Write-Success "Python packages installed (ytmusicapi, spotifyscraper, pillow, requests)."
+Write-Success "Python packages installed (yt-dlp, yt-dlp-ejs, ytmusicapi, spotifyscraper, pillow, requests)."
 
 # -------------------------------------------------------------
 # Compile ANSImuz release binary

@@ -12,15 +12,14 @@ depends=(
     'gcc-libs'
     'glibc'
     'mpv'
-    'yt-dlp'
-    'python'
+    'python>=3.11'
     'python-ytmusicapi'
     'python-spotifyscraper' #AUR
     'python-pillow'
     'python-requests'
 )
 
-makedepends=('git' 'cargo' 'cmake' 'mpv')
+makedepends=('git' 'cargo' 'cmake' 'mpv' 'curl')
 
 provides=('ansimuz')
 conflicts=('ansimuz')
@@ -45,6 +44,25 @@ prepare() {
     cd "$srcdir/$_name"
     export RUSTUP_TOOLCHAIN=stable
     cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+
+    bash ./scripts/setup_qjs_linux.sh
+
+    local ytdlp_whl="yt_dlp-2026.11.23-py3-none-any.whl"
+    local ytdlp_url="https://files.pythonhosted.org/packages/30/1e/f4bf64ca733135e609696c6df77a6c22c6d4909b6e293e4563ae51ea335c/${ytdlp_whl}"
+    local ytdlp_sha="e9188e0c559905f7ee05acc1ba0b6fb3f310e7565bf6dea5f62b5300e0775e35"
+
+    local ejs_whl="yt_dlp_ejs-0.8.0-py3-none-any.whl"
+    local ejs_url="https://files.pythonhosted.org/packages/e3/bd/520769863744b669440a924271a6159ddd82ad5ae26b4ac4d4b69e9f8d44/${ejs_whl}"
+    local ejs_sha="79300e5fca7f937a1eeede11f0456862c1b41107ce1d726871e0207424f4bdb4"
+
+    mkdir -p "$srcdir/vendor-wheels" "$srcdir/$_name/vendor"
+    curl -fsSL "$ytdlp_url" -o "$srcdir/vendor-wheels/$ytdlp_whl"
+    curl -fsSL "$ejs_url" -o "$srcdir/vendor-wheels/$ejs_whl"
+    echo "$ytdlp_sha  $srcdir/vendor-wheels/$ytdlp_whl" | sha256sum -c --status
+    echo "$ejs_sha  $srcdir/vendor-wheels/$ejs_whl" | sha256sum -c --status
+
+    python3 -m zipfile -e "$srcdir/vendor-wheels/$ytdlp_whl" "$srcdir/$_name/vendor"
+    python3 -m zipfile -e "$srcdir/vendor-wheels/$ejs_whl" "$srcdir/$_name/vendor"
 }
 
 build() {
@@ -67,7 +85,8 @@ package() {
     cd "$srcdir/$_name"
     install -Dm755 target/release/ansimuz "$pkgdir/usr/bin/ansimuz"
     install -d "$pkgdir/usr/share/ansimuz"
-    cp -a backend assets "$pkgdir/usr/share/ansimuz/"
+    cp -a backend assets runtime vendor "$pkgdir/usr/share/ansimuz/"
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 THIRD-PARTY-LICENSES.md "$pkgdir/usr/share/licenses/$pkgname/THIRD-PARTY-LICENSES.md"
     install -Dm644 README.md "$pkgdir/usr/share/doc/ansimuz/README.md"
 }

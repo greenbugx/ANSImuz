@@ -24,6 +24,32 @@ Copyright (c) 2017-2026 Fabrice Bellard, Charlie Gordon, Ben Noordhuis, and Saul
 
 Source: https://github.com/quickjs-ng/quickjs
 
-Binary distribution release: v0.18.0 (`qjs-windows-x86_64.exe` and `qjs-linux-x86_64`, verified by SHA-256).
+Pinned binary release: v0.18.0 (`qjs-windows-x86_64.exe` and `qjs-linux-x86_64`, verified by SHA-256).
 
 Licensed under the [MIT License](https://github.com/quickjs-ng/quickjs/blob/v0.18.0/LICENSE).
+
+## yt-dlp
+
+Authors and contributors: yt-dlp project
+
+Source: https://github.com/yt-dlp/yt-dlp
+
+Distributed as pure-Python package (`yt-dlp` wheel) without standalone GPL-bundled binaries.
+
+Released under [The Unlicense](https://github.com/yt-dlp/yt-dlp/blob/master/LICENSE).
+
+## yt-dlp-ejs
+
+Authors and contributors: yt-dlp project
+
+Source: https://github.com/yt-dlp/ejs
+
+License expression: `Unlicense AND MIT AND ISC` (solver package under The Unlicense, bundled `meriyah` under ISC License, bundled `astring` under MIT License).
+
+## CPython (Windows Embedded Distribution)
+
+Copyright (c) 2001-2026 Python Software Foundation
+
+Source: https://www.python.org/downloads/windows/
+
+Licensed under the [Python Software Foundation License Version 2](https://docs.python.org/3/license.html).

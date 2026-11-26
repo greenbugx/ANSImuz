@@ -159,8 +159,21 @@ static LAST_YTDLP_CONFIG: LazyLock<
     Mutex<Option<(std::path::PathBuf, std::path::PathBuf, std::path::PathBuf)>>,
 > = LazyLock::new(|| Mutex::new(None));
 
-static LAST_YTDLP_CONFIG: LazyLock<Mutex<Option<(std::path::PathBuf, std::path::PathBuf, std::path::PathBuf)>>> =
-    LazyLock::new(|| Mutex::new(None));
+fn prepend_unique_dir(path: &Bound<'_, PyList>, dir: &std::path::Path) -> PyResult<()> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    let dir_str = dir.to_string_lossy();
+    let already_present = path.iter().any(|item| {
+        item.extract::<String>()
+            .map(|s| s == dir_str.as_ref())
+            .unwrap_or(false)
+    });
+    if !already_present {
+        path.insert(0, dir_str.as_ref())?;
+    }
+    Ok(())
+}
 
 pub fn initialize_backend<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyModule>> {
     let backend_dir = crate::paths::backend_dir();
@@ -181,29 +194,30 @@ pub fn initialize_backend<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyModule>
 
     let sys = PyModule::import(py, "sys")?;
     let path = sys.getattr("path")?.cast_into::<PyList>()?;
-    let backend_str = backend_dir.to_string_lossy();
 
-    let already_present = path.iter().any(|item| {
-        item.extract::<String>()
-            .map(|s| s == backend_str.as_ref())
-            .unwrap_or(false)
-    });
-
-    if !already_present {
-        path.insert(0, backend_str.as_ref())?;
+    if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
+        let venv_path = std::path::PathBuf::from(venv);
+        #[cfg(windows)]
+        let venv_site = venv_path.join("Lib").join("site-packages");
+        #[cfg(not(windows))]
+        let venv_site = {
+            let ver = sys.getattr("version_info")?;
+            let major: u32 = ver.getattr("major")?.extract()?;
+            let minor: u32 = ver.getattr("minor")?.extract()?;
+            venv_path
+                .join("lib")
+                .join(format!("python{major}.{minor}"))
+                .join("site-packages")
+        };
+        prepend_unique_dir(&path, &venv_site)?;
     }
 
-    let site_packages = crate::paths::data_dir().join("Lib").join("site-packages");
-    if site_packages.is_dir() {
-        let site_str = site_packages.to_string_lossy();
-        let site_present = path.iter().any(|item| {
-            item.extract::<String>()
-                .map(|s| s == site_str.as_ref())
-                .unwrap_or(false)
-        });
-        if !site_present {
-            path.insert(0, site_str.as_ref())?;
-        }
+    // Order from index 0: active overlay -> vendor -> Lib/site-packages -> backend -> venv -> system
+    prepend_unique_dir(&path, &backend_dir)?;
+    prepend_unique_dir(&path, &crate::paths::site_packages_dir())?;
+    prepend_unique_dir(&path, &crate::paths::vendor_dir())?;
+    if let Some(overlay_dir) = crate::paths::active_overlay_dir() {
+        prepend_unique_dir(&path, &overlay_dir)?;
     }
 
     let bridge = PyModule::import(py, "bridge")?;
@@ -515,6 +529,71 @@ mod tests {
                 "backend directory must appear exactly once in sys.path"
             );
         });
+    }
+
+    #[test]
+    fn test_sys_path_precedence_overlay_vendor_site_packages_backend() {
+        let _guard = crate::paths::ENV_LOCK.lock().unwrap();
+        let base = std::env::temp_dir().join("ansimuz-syspath-order-test");
+        let _ = std::fs::remove_dir_all(&base);
+
+        let data = base.join("data");
+        let user_data = base.join("user_data");
+        let overlay = user_data.join("ytdlp-overlay").join("2026.12.01");
+        let vendor = data.join("vendor");
+        let site_packages = data.join("Lib").join("site-packages");
+        let backend = data.join("backend");
+        let assets = data.join("assets");
+
+        std::fs::create_dir_all(&overlay).unwrap();
+        std::fs::create_dir_all(&vendor).unwrap();
+        std::fs::create_dir_all(&site_packages).unwrap();
+        std::fs::create_dir_all(&backend).unwrap();
+        std::fs::create_dir_all(&assets).unwrap();
+        std::fs::copy(
+            crate::paths::backend_dir().join("bridge.py"),
+            backend.join("bridge.py"),
+        )
+        .ok();
+        std::fs::write(
+            user_data.join("ytdlp-overlay").join("current"),
+            "2026.12.01\n",
+        )
+        .unwrap();
+
+        unsafe {
+            std::env::set_var("ANSIMUZ_DATA_DIR", &data);
+            std::env::set_var("ANSIMUZ_USER_DATA_DIR", &user_data);
+        }
+
+        Python::attach(|py| {
+            let sys = PyModule::import(py, "sys").unwrap();
+            let path = sys.getattr("path").unwrap().cast_into::<PyList>().unwrap();
+            prepend_unique_dir(&path, &backend).unwrap();
+            prepend_unique_dir(&path, &site_packages).unwrap();
+            prepend_unique_dir(&path, &vendor).unwrap();
+            if let Some(active) = crate::paths::active_overlay_dir() {
+                prepend_unique_dir(&path, &active).unwrap();
+            }
+
+            let entries: Vec<String> = path
+                .iter()
+                .filter_map(|item| item.extract::<String>().ok())
+                .collect();
+            let idx = |p: &std::path::Path| {
+                let s = p.to_string_lossy().to_string();
+                entries.iter().position(|e| e == &s).unwrap()
+            };
+            assert!(idx(&overlay) < idx(&vendor));
+            assert!(idx(&vendor) < idx(&site_packages));
+            assert!(idx(&site_packages) < idx(&backend));
+        });
+
+        unsafe {
+            std::env::remove_var("ANSIMUZ_DATA_DIR");
+            std::env::remove_var("ANSIMUZ_USER_DATA_DIR");
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

@@ -117,41 +117,37 @@ litterbox_expiry = "72h" # Retention period when using Litterbox: "1h", "12h", "
 
 ## Prerequisites
 
-ANSImuz uses native `libmpv` for audio playback and never executes the `mpv` command-line player:
+ANSImuz uses native `libmpv` for audio playback and embeds its `yt-dlp` and QuickJS resolver stack, so no standalone `yt-dlp` or `mpv` CLI executable is needed:
 
-1. **[yt-dlp](https://github.com/yt-dlp/yt-dlp)**: Required across all platforms for resolving and streaming audio tracks.
-2. **libmpv shared library**:
-   - **Windows**: `libmpv-2.dll` is bundled directly inside the portable release archive, so no separate mpv installation is needed.
-   - **Linux**: The dynamic library (`libmpv.so`) is provided by your system package manager (`libmpv2` on Debian/Ubuntu, `mpv-libs` or `mpv` on Fedora, and `mpv` on Arch Linux). When installing ANSImuz from the AUR or COPR, this dependency is resolved automatically.
+1. **libmpv shared library**:
+   - **Windows**: `libmpv-2.dll`, the embedded Python runtime, `yt-dlp` + `yt-dlp-ejs` modules, and the pinned QuickJS runtime are bundled directly inside the portable release archive.
+   - **Linux**: The dynamic library (`libmpv.so`) is provided by your system package manager (`libmpv2` on Debian/Ubuntu, `mpv-libs` or `mpv` on Fedora, and `mpv` on Arch Linux). When installing ANSImuz from the AUR or COPR, dependencies (including Python 3.11+ modules) are resolved automatically.
 
 ### Installing Prerequisites
 
-- **Windows (winget)**:
-  ```powershell
-  winget install --id yt-dlp.yt-dlp -e
-  ```
-  *(Note: mpv CLI is optional on Windows because the portable release bundles native libmpv)*
+- **Windows**:
+  No manual prerequisites needed for the portable release.
 
 - **Arch Linux**:
   ```bash
-  sudo pacman -S mpv yt-dlp
+  sudo pacman -S mpv
   ```
 
 - **Fedora**:
   ```bash
-  sudo dnf install mpv-libs yt-dlp
+  sudo dnf install mpv-libs
   # Note: installing mpv also provides mpv-libs
   ```
 
 - **Debian / Ubuntu**:
   ```bash
-  sudo apt install libmpv2 yt-dlp
+  sudo apt install libmpv2
   # Note: older releases use libmpv1
   ```
 
 - **macOS (Homebrew)**:
   ```bash
-  brew install mpv yt-dlp
+  brew install mpv
   ```
 
 ---
@@ -160,12 +156,11 @@ ANSImuz uses native `libmpv` for audio playback and never executes the `mpv` com
 
 ### Windows (Portable Release)
 
-The Windows portable release bundles all runtime files, embedded Python dependencies, and `libmpv-2.dll`. No Python or mpv setup is needed.
+The Windows portable release bundles all runtime files, embedded Python 3.14, `yt-dlp` dependencies, pinned QuickJS, and `libmpv-2.dll`. Just extract and run:
 
-1. Download `ansimuz-windows-v<version>-x64.rar` from the [Latest Release](https://github.com/greenbugx/ANSImuz/releases/latest).
-2. Extract the archive to any folder (using Windows built-in extraction, WinRAR, or 7-Zip).
-3. Ensure [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) is installed in your `PATH` (see [Prerequisites](#prerequisites)).
-4. Launch `ansimuz.exe`.
+1. Download the portable archive from the [Latest Release](https://github.com/greenbugx/ANSImuz/releases/latest).
+2. Extract the archive to any folder (using Windows built-in extraction or 7-Zip).
+3. Launch `ansimuz.exe`.
 
 ### Arch Linux (AUR)
 
