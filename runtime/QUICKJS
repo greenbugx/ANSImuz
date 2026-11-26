@@ -1,0 +1,6 @@
+QUICKJS_VERSION=v0.18.0
+QJS_WIN_X64_URL=https://github.com/quickjs-ng/quickjs/releases/download/v0.18.0/qjs-windows-x86_64.exe
+QJS_WIN_X64_SHA256=ff03398d74ea6e6bd3a8e58058f7003225abcac229d7d57775b7aaae812a49c7
+QJS_LINUX_X64_URL=https://github.com/quickjs-ng/quickjs/releases/download/v0.18.0/qjs-linux-x86_64
+QJS_LINUX_X64_SHA256=85ded23b9fabe8c1644fc40a8d2bbdd71157affcbd807359c618cc717ee24d7d
+

@@ -30,6 +30,7 @@ __all__ = [
     "ResolverOutdatedError",
     "StreamUnavailableError",
     "TrackNotFoundError",
+    "configure_ytdlp",
     "fetch_lyrics",
     "get_lyrics",
     "resolve_playable",
@@ -38,6 +39,15 @@ __all__ = [
     "ytdlp_status",
     "ytdlp_warmup",
 ]
+
+
+def configure_ytdlp(
+    cache_dir: str | None = None,
+    data_dir: str | None = None,
+    log_path: str | None = None,
+) -> None:
+    """Configures ANSImuz-owned paths for the embedded yt-dlp resolver."""
+    ytdlp.configure(cache_dir=cache_dir, data_dir=data_dir, log_path=log_path)
 
 
 def search_music(query: str, provider: str = "ytmusic") -> list[TrackDict]:

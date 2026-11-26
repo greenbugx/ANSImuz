@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import os
+import platform
 import shutil
 import sys
 from pathlib import Path
 
-BUNDLED_QJS_SHA256: dict[str, str] = {}
+BUNDLED_QJS_VERSION = "v0.18.0"
+BUNDLED_QJS_SHA256: dict[str, str] = {
+    "win32-x64": "ff03398d74ea6e6bd3a8e58058f7003225abcac229d7d57775b7aaae812a49c7",
+    "linux-x64": "85ded23b9fabe8c1644fc40a8d2bbdd71157affcbd807359c618cc717ee24d7d",
+}
 
 _CANDIDATE_SYSTEM_RUNTIMES = (
     ("deno", ("deno",)),
@@ -53,14 +58,20 @@ def _verify_sha256(path: Path, expected_hex: str) -> bool:
     return digest.hexdigest().lower() == expected_hex.lower()
 
 
+def _runtime_target_key() -> str:
+    plat = "win32" if sys.platform.startswith("win") else sys.platform
+    machine = platform.machine().lower()
+    arch = "x64" if machine in ("amd64", "x86_64") else machine
+    return f"{plat}-{arch}"
+
+
 def _bundled_qjs_verified(data_dir: str | Path | None = None) -> Path | None:
     candidate = _bundled_qjs_path(data_dir)
     if not candidate.is_file():
         return None
 
-    platform_key = "win32" if sys.platform.startswith("win") else sys.platform
-    expected = BUNDLED_QJS_SHA256.get(platform_key)
-    if expected and not _verify_sha256(candidate, expected):
+    expected = BUNDLED_QJS_SHA256.get(_runtime_target_key())
+    if not expected or not _verify_sha256(candidate, expected):
         return None
 
     return candidate

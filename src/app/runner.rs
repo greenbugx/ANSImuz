@@ -23,7 +23,7 @@ pub fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::new();
     app.init_discord();
-    crate::ytdlp::spawn_warmup();
+    let mut warmup_rx = Some(crate::ytdlp::spawn_warmup());
     let mut player = AudioPlayer::from_backend(app.settings.backend);
     if let Some(msg) = player.startup_message() {
         crate::playback::player::log_playback(msg);
@@ -47,6 +47,15 @@ pub fn run(
     loop {
         while let Ok(response) = search_rx.try_recv() {
             handle_search_result(&mut app, response);
+        }
+
+        if let Some(rx) = warmup_rx.as_ref()
+            && let Ok(res) = rx.try_recv()
+        {
+            if let Ok(status) = res {
+                app.apply_resolver_status(&status);
+            }
+            warmup_rx = None;
         }
 
         let _ = player.poll_events();

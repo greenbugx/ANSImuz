@@ -103,6 +103,27 @@ class TestYtdlpRuntimeDetection(unittest.TestCase):
                 self.assertIsNone(path)
                 self.assertEqual(runtimes, {})
 
+    def test_bundled_qjs_requires_pinned_sha256(self):
+        from providers.ytdlp import runtime
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_dir = Path(tmp) / "runtime"
+            runtime_dir.mkdir(parents=True, exist_ok=True)
+            exe_path = runtime_dir / runtime._bundled_qjs_filename()
+            payload = b"mock-qjs-binary"
+            exe_path.write_bytes(payload)
+            payload_hash = hashlib.sha256(payload).hexdigest()
+            target_key = runtime._runtime_target_key()
+
+            with patch.dict(runtime.BUNDLED_QJS_SHA256, {target_key: payload_hash}, clear=True):
+                self.assertEqual(runtime._bundled_qjs_verified(tmp), exe_path)
+
+            with patch.dict(runtime.BUNDLED_QJS_SHA256, {target_key: "f" * 64}, clear=True):
+                self.assertIsNone(runtime._bundled_qjs_verified(tmp))
+
+            with patch.dict(runtime.BUNDLED_QJS_SHA256, {}, clear=True):
+                self.assertIsNone(runtime._bundled_qjs_verified(tmp))
+
 
 class TestYtdlpErrorMapping(unittest.TestCase):
     def test_classify_all_ytdlp_error_categories(self):

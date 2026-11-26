@@ -99,6 +99,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libssl-dev mpv libmpv-dev pkg-config
 
+      - name: Set up QuickJS runtime
+        run: |
+          bash ./scripts/setup_qjs_linux.sh
+          ./runtime/qjs --version
+
       - name: Format check
         run: cargo fmt --check
 
@@ -169,6 +174,12 @@ jobs:
         run: |
           ./scripts/setup_mpv_windows.ps1
           Add-Content $env:GITHUB_PATH (Resolve-Path native/mpv/lib).Path
+
+      - name: Set up QuickJS runtime
+        shell: pwsh
+        run: |
+          ./scripts/setup_qjs_windows.ps1
+          ./runtime/qjs.exe --version
 
       - name: Install Python dependencies
         run: |

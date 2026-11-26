@@ -4,6 +4,10 @@
 !/scripts/install_linux.sh
 !/scripts/install_windows.ps1
 !/scripts/setup_mpv_windows.ps1
+!/scripts/setup_qjs_linux.sh
+!/scripts/setup_qjs_windows.ps1
+/runtime/*
+!/runtime/QUICKJS
 venv/
 .venv/
 __pycache__/

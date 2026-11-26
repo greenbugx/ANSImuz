@@ -56,6 +56,10 @@ pub fn assets_dir() -> PathBuf {
 pub fn frames_dir() -> PathBuf {
     data_dir().join("assets/frames")
 }
+
+pub fn runtime_dir() -> PathBuf {
+    data_dir().join("runtime")
+}
 #[cfg(test)]
 pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -89,6 +93,10 @@ mod tests {
         assert_eq!(
             frames_dir(),
             PathBuf::from("/tmp/ansimuz-custom-data/assets/frames")
+        );
+        assert_eq!(
+            runtime_dir(),
+            PathBuf::from("/tmp/ansimuz-custom-data/runtime")
         );
         unsafe {
             std::env::remove_var("ANSIMUZ_DATA_DIR");

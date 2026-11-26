@@ -86,10 +86,12 @@ pub fn warmup() -> Result<ResolverStatus, String> {
     })
 }
 
-pub fn spawn_warmup() {
-    std::thread::spawn(|| {
-        let _ = warmup();
+pub fn spawn_warmup() -> std::sync::mpsc::Receiver<Result<ResolverStatus, String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(warmup());
     });
+    rx
 }
 
 pub fn status() -> Result<ResolverStatus, String> {

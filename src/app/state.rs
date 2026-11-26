@@ -160,6 +160,8 @@ pub struct App {
     pub prefetch_in_flight: Option<u64>,
     pub prefetch_tx: Option<std::sync::mpsc::Sender<PrefetchResolveResponse>>,
     pub active_direct_retried: bool,
+    pub resolver_status: Option<crate::ytdlp::ResolverStatus>,
+    pub limited_js_mode: bool,
 }
 
 impl App {
@@ -215,6 +217,8 @@ impl App {
             prefetch_in_flight: None,
             prefetch_tx: None,
             active_direct_retried: false,
+            resolver_status: None,
+            limited_js_mode: false,
         }
     }
 
@@ -517,15 +521,26 @@ impl App {
         self.status_at = Some(Instant::now());
     }
 
+    pub fn apply_resolver_status(&mut self, status: &crate::ytdlp::ResolverStatus) {
+        self.limited_js_mode = status.js_runtime.is_empty() || status.js_runtime == "none";
+        self.resolver_status = Some(status.clone());
+    }
+
     pub fn visible_status(&self) -> String {
         if self.loading {
             return format!(" {} ", crate::artwork::loading_moons());
         }
 
         match self.status_at {
-            Some(at) if at.elapsed() < Duration::from_secs(3) => self.status.clone(),
-            _ => String::new(),
+            Some(at) if at.elapsed() < Duration::from_secs(3) => return self.status.clone(),
+            _ => {}
         }
+
+        if self.limited_js_mode {
+            return "LIMITED MODE: no JS runtime".to_string();
+        }
+
+        String::new()
     }
 
     pub fn move_selection(&mut self, delta: isize) {
@@ -1371,5 +1386,31 @@ mod tests {
         assert_eq!(sync_point.generation, 42);
         assert_eq!(sync_point.position_ms, 5000);
         assert_eq!(sync_point.active_line_index, Some(0));
+    }
+
+    #[test]
+    fn test_limited_js_mode_shows_in_visible_status_when_idle() {
+        let mut app = App::new();
+        assert_eq!(app.visible_status(), "");
+
+        app.apply_resolver_status(&crate::ytdlp::ResolverStatus {
+            version: "2026.11.23".into(),
+            bundle_age: None,
+            js_runtime: "none".into(),
+            js_runtime_path: None,
+        });
+        assert!(app.limited_js_mode);
+        assert_eq!(app.visible_status(), "LIMITED MODE: no JS runtime");
+
+        app.set_status("QUEUED: Track");
+        assert_eq!(app.visible_status(), "QUEUED: Track");
+
+        app.apply_resolver_status(&crate::ytdlp::ResolverStatus {
+            version: "2026.11.23".into(),
+            bundle_age: None,
+            js_runtime: "bundled-quickjs".into(),
+            js_runtime_path: Some("runtime/qjs.exe".into()),
+        });
+        assert!(!app.limited_js_mode);
     }
 }

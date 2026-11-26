@@ -155,6 +155,13 @@ pub fn resolved_cache_len() -> usize {
     guard.len()
 }
 
+static LAST_YTDLP_CONFIG: LazyLock<
+    Mutex<Option<(std::path::PathBuf, std::path::PathBuf, std::path::PathBuf)>>,
+> = LazyLock::new(|| Mutex::new(None));
+
+static LAST_YTDLP_CONFIG: LazyLock<Mutex<Option<(std::path::PathBuf, std::path::PathBuf, std::path::PathBuf)>>> =
+    LazyLock::new(|| Mutex::new(None));
+
 pub fn initialize_backend<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyModule>> {
     let backend_dir = crate::paths::backend_dir();
     if !backend_dir.is_dir() {
@@ -199,7 +206,30 @@ pub fn initialize_backend<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyModule>
         }
     }
 
-    PyModule::import(py, "bridge")
+    let bridge = PyModule::import(py, "bridge")?;
+
+    let cache_base = crate::config::cache_base_dir();
+    let cfg = (
+        cache_base.join("ytdlp"),
+        crate::paths::data_dir(),
+        cache_base.join("ytdlp.log"),
+    );
+    let mut last_cfg = match LAST_YTDLP_CONFIG.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if last_cfg.as_ref() != Some(&cfg) {
+        if let Ok(configure) = bridge.getattr("configure_ytdlp") {
+            let _ = configure.call1((
+                cfg.0.to_string_lossy().as_ref(),
+                cfg.1.to_string_lossy().as_ref(),
+                cfg.2.to_string_lossy().as_ref(),
+            ));
+        }
+        *last_cfg = Some(cfg);
+    }
+
+    Ok(bridge)
 }
 
 pub fn format_py_error(py: Python<'_>, err: PyErr) -> String {
