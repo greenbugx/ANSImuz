@@ -3,6 +3,7 @@ use std::{env, path::PathBuf};
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=MPV_LIB_DIR");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_LEGACY_YTDL");
 
     if env::var_os("CARGO_FEATURE_NATIVE_MPV").is_none() {
         return;
@@ -23,11 +24,15 @@ fn main() {
     );
 
     // Compile the ANSImuz C bridge
-    cc::Build::new()
+    let mut build = cc::Build::new();
+    build
         .file(&source_file)
         .include(&include_dir)
-        .warnings(true)
-        .compile("ansimuz_mpv_bridge");
+        .warnings(true);
+    if env::var_os("CARGO_FEATURE_LEGACY_YTDL").is_some() {
+        build.define("ANSIMUZ_LEGACY_YTDL", "1");
+    }
+    build.compile("ansimuz_mpv_bridge");
 
     // Link against libmpv
     if let Ok(dir) = env::var("MPV_LIB_DIR") {

@@ -23,6 +23,7 @@ unicode-width = "0.2.3"
 [features]
 default = ["native-mpv"]
 native-mpv = []
+legacy-ytdl = []
 
 [build-dependencies]
 cc = "1.11.3"

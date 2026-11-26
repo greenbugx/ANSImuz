@@ -203,10 +203,20 @@ impl AudioPlayer {
         volume: u8,
         events: Sender<PlayerEvent>,
     ) -> Result<(), String> {
+        self.play_direct(url, &[], volume, events)
+    }
+
+    pub fn play_direct(
+        &mut self,
+        url: &str,
+        headers: &[(String, String)],
+        volume: u8,
+        events: Sender<PlayerEvent>,
+    ) -> Result<(), String> {
         match &mut self.inner {
-            Inner::Cli(p) => p.play(url, volume, events),
+            Inner::Cli(p) => p.play_direct(url, headers, volume, events),
             #[cfg(feature = "native-mpv")]
-            Inner::Native(p) => p.play(url, volume, events),
+            Inner::Native(p) => p.play_direct(url, headers, volume, events),
         }
     }
 

@@ -140,6 +140,19 @@ unsafe extern "C" {
 
     fn ansimuz_mpv_loadfile(player: *mut c_void, path: *const c_char) -> c_int;
 
+    fn ansimuz_mpv_loadfile_direct(
+        player: *mut c_void,
+        url: *const c_char,
+        user_agent: *const c_char,
+        header_fields: *const c_char,
+    ) -> c_int;
+
+    fn ansimuz_mpv_get_ytdl(
+        player: *const c_void,
+        buffer: *mut c_char,
+        buffer_size: usize,
+    ) -> c_int;
+
     fn ansimuz_mpv_get_last_load_id(player: *const c_void) -> u64;
 
     fn ansimuz_mpv_set_pause(player: *mut c_void, paused: c_int) -> c_int;
@@ -220,6 +233,54 @@ impl NativeMpv {
         self.check_status(status)?;
 
         Ok(unsafe { ansimuz_mpv_get_last_load_id(self.handle.as_ptr()) })
+    }
+
+    pub fn loadfile_direct(
+        &mut self,
+        url: &str,
+        headers: &[(String, String)],
+    ) -> Result<u64, String> {
+        let c_url =
+            CString::new(url).map_err(|_| "Media URL contains an interior NUL byte".to_string())?;
+
+        let mut user_agent: Option<CString> = None;
+        let mut extra_fields: Vec<String> = Vec::new();
+        for (key, value) in headers {
+            if key.eq_ignore_ascii_case("user-agent") {
+                if let Ok(ua) = CString::new(value.as_str()) {
+                    user_agent = Some(ua);
+                }
+            } else if !value.contains(',') {
+                extra_fields.push(format!("{key}: {value}"));
+            }
+        }
+
+        let header_cstr = if extra_fields.is_empty() {
+            None
+        } else {
+            CString::new(extra_fields.join(",")).ok()
+        };
+
+        let ua_ptr = user_agent.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
+        let hdr_ptr = header_cstr
+            .as_ref()
+            .map_or(std::ptr::null(), |c| c.as_ptr());
+
+        let status = unsafe {
+            ansimuz_mpv_loadfile_direct(self.handle.as_ptr(), c_url.as_ptr(), ua_ptr, hdr_ptr)
+        };
+
+        self.check_status(status)?;
+
+        Ok(unsafe { ansimuz_mpv_get_last_load_id(self.handle.as_ptr()) })
+    }
+
+    pub fn ytdl_property(&self) -> Result<String, String> {
+        let mut buf = [0 as c_char; 32];
+        let status =
+            unsafe { ansimuz_mpv_get_ytdl(self.handle.as_ptr(), buf.as_mut_ptr(), buf.len()) };
+        self.check_status(status)?;
+        Ok(unsafe { CStr::from_ptr(buf.as_ptr()).to_string_lossy().into_owned() })
     }
 
     pub fn set_pause(&mut self, paused: bool) -> Result<(), String> {

@@ -92,8 +92,21 @@ pub(crate) fn dump_stream_native(
         return PrefetchResult::Cancelled;
     }
 
+    let media_url = if crate::ytdlp::is_youtube_watch_url(url) {
+        match crate::ytdlp::resolve_stream(url, true) {
+            Ok(resolved) => resolved.url,
+            Err(err) => return PrefetchResult::Failed(err),
+        }
+    } else {
+        url.to_string()
+    };
+
+    if cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+        return PrefetchResult::Cancelled;
+    }
+
     let cancel_ref = cancel.as_deref();
-    let dump_res = NativeMpv::dump_stream(url, &part, cancel_ref);
+    let dump_res = NativeMpv::dump_stream(&media_url, &part, cancel_ref);
 
     match dump_res {
         Ok(()) => {
@@ -309,6 +322,16 @@ impl NativeBackend {
         volume: u8,
         events: Sender<PlayerEvent>,
     ) -> Result<(), String> {
+        self.play_direct(url, &[], volume, events)
+    }
+
+    pub fn play_direct(
+        &mut self,
+        url: &str,
+        headers: &[(String, String)],
+        volume: u8,
+        events: Sender<PlayerEvent>,
+    ) -> Result<(), String> {
         if self.is_mock {
             self.mock_playing = false;
             self.last_error = None;
@@ -334,7 +357,11 @@ impl NativeBackend {
         if let Some(ref mut mpv) = self.mpv {
             mpv.set_pause(false)?;
             mpv.set_volume(volume)?;
-            let load_id = mpv.loadfile(&target)?;
+            let load_id = if headers.is_empty() && target == url {
+                mpv.loadfile(&target)?
+            } else {
+                mpv.loadfile_direct(&target, headers)?
+            };
             self.translator.begin(load_id, generation);
             self.playing = true;
             self.events = Some(events);

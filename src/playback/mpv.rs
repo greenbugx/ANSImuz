@@ -20,9 +20,7 @@ pub(crate) const MIN_DUMP_BYTES: u64 = 100 * 1024;
 pub(crate) const MAX_DUMP_SECS: u32 = 600;
 pub const MAX_PREFETCH_RESULTS: usize = 50;
 
-/// Comprehensive fallback chain of YouTube player clients supported by yt-dlp.
-/// yt-dlp queries clients in order, collecting and falling back to working formats
-/// if any individual client triggers 429 rate limits, PO token requirements, or missing streams.
+#[cfg(feature = "legacy-ytdl")]
 pub const YTDL_PLAYER_CLIENTS: &str =
     "android,ios,mweb,web,web_music,android_vr,tv,tv_samsung,tv_simply,visionos,default";
 
@@ -209,6 +207,16 @@ impl CliPlayer {
         volume: u8,
         events: Sender<PlayerEvent>,
     ) -> Result<(), String> {
+        self.play_direct(url, &[], volume, events)
+    }
+
+    pub fn play_direct(
+        &mut self,
+        url: &str,
+        headers: &[(String, String)],
+        volume: u8,
+        events: Sender<PlayerEvent>,
+    ) -> Result<(), String> {
         if self.is_mock {
             self.stop();
             self.last_error = None;
@@ -239,13 +247,30 @@ impl CliPlayer {
             .arg("--force-window=no")
             .arg(format!("--input-ipc-server={}", self.endpoint.as_str()));
 
-        let is_direct_or_local = !url.contains("youtube.com") && !url.contains("youtu.be");
-        if is_direct_or_local {
-            cmd.arg("--ytdl=no");
-        } else {
-            cmd.arg(format!(
-                "--ytdl-raw-options-append=extractor-args=youtube:player_client={YTDL_PLAYER_CLIENTS}"
-            ));
+        #[cfg(feature = "legacy-ytdl")]
+        {
+            let is_direct_or_local = !url.contains("youtube.com") && !url.contains("youtu.be");
+            if is_direct_or_local {
+                cmd.arg("--ytdl=no");
+            } else {
+                cmd.arg(format!(
+                    "--ytdl-raw-options-append=extractor-args=youtube:player_client={YTDL_PLAYER_CLIENTS}"
+                ));
+            }
+        }
+        #[cfg(not(feature = "legacy-ytdl"))]
+        cmd.arg("--ytdl=no");
+
+        let mut extra_headers = Vec::new();
+        for (k, v) in headers {
+            if k.eq_ignore_ascii_case("user-agent") {
+                cmd.arg(format!("--user-agent={v}"));
+            } else if !v.contains(',') {
+                extra_headers.push(format!("{k}: {v}"));
+            }
+        }
+        if !extra_headers.is_empty() {
+            cmd.arg(format!("--http-header-fields={}", extra_headers.join(",")));
         }
 
         cmd.arg(url)
@@ -616,10 +641,8 @@ fn observe(
     }
 }
 
-pub fn extract_mpv_error(
-    lines: &[String],
-    exit_status: Option<std::process::ExitStatus>,
-) -> String {
+#[cfg(feature = "legacy-ytdl")]
+fn extract_legacy_ytdl_error(lines: &[String]) -> Option<String> {
     for line in lines.iter().rev() {
         if line.contains("[ytdl_hook] ERROR:") {
             let msg = line
@@ -628,9 +651,20 @@ pub fn extract_mpv_error(
                 .unwrap_or(line)
                 .trim();
             if !msg.is_empty() {
-                return msg.to_string();
+                return Some(msg.to_string());
             }
         }
+    }
+    None
+}
+
+pub fn extract_mpv_error(
+    lines: &[String],
+    exit_status: Option<std::process::ExitStatus>,
+) -> String {
+    #[cfg(feature = "legacy-ytdl")]
+    if let Some(err) = extract_legacy_ytdl_error(lines) {
+        return err;
     }
 
     for line in lines.iter().rev() {
@@ -788,9 +822,13 @@ pub fn start_dump_cancellable(
         return PrefetchResult::Cancelled;
     }
 
-    let media = match resolve_stream(url) {
-        Ok(m) => m,
-        Err(err) => return PrefetchResult::Failed(err),
+    let media = if crate::ytdlp::is_youtube_watch_url(url) {
+        match resolve_stream(url) {
+            Ok(m) => m,
+            Err(err) => return PrefetchResult::Failed(err),
+        }
+    } else {
+        url.to_string()
     };
 
     if cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
@@ -998,11 +1036,10 @@ mod tests {
         let lines = vec![
             "[ffmpeg] tcp: Failed to resolve hostname invalid.example.com: No address".into(),
             "Failed to open https://invalid.example.com/audio.mp3.".into(),
-            "[ytdl_hook] ERROR: [youtube] Video unavailable".into(),
             "Exiting... (Errors when loading file)".into(),
         ];
         let err = extract_mpv_error(&lines, None);
-        assert_eq!(err, "[youtube] Video unavailable");
+        assert_eq!(err, "Failed to open https://invalid.example.com/audio.mp3.");
 
         let lines_media = vec![
             "Failed to recognize file format.".into(),
@@ -1187,8 +1224,8 @@ mod tests {
         match res {
             PrefetchResult::Failed(err) => {
                 assert!(
-                    err.contains("resolution failed") || err.contains("yt-dlp"),
-                    "Expected resolution failure message, got: {err}"
+                    !err.is_empty(),
+                    "Expected failure message, got empty string"
                 );
             }
             other => panic!("Expected PrefetchResult::Failed, got {other:?}"),

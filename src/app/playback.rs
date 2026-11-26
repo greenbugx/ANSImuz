@@ -340,6 +340,14 @@ pub fn handle_playback_ended(
     false
 }
 
+fn is_expired_or_forbidden_error(message: &str) -> bool {
+    let low = message.to_ascii_lowercase();
+    low.contains("403")
+        || low.contains("410")
+        || low.contains("loading failed")
+        || low.contains("-13")
+}
+
 pub fn handle_playback_failed(
     app: &mut App,
     player: &mut AudioPlayer,
@@ -352,6 +360,28 @@ pub fn handle_playback_failed(
         retire_active_track_while_resolving(app);
         return true;
     }
+
+    if !app.active_direct_retried
+        && is_expired_or_forbidden_error(message)
+        && let Some(current) = app.current_track().cloned()
+        && let Some(watch_url) = current.stream_url.as_deref()
+        && crate::ytdlp::is_youtube_watch_url(watch_url)
+        && AudioPlayer::cached_audio(watch_url).is_none()
+    {
+        crate::ytdlp::evict_cached_stream(watch_url);
+        app.active_direct_retried = true;
+        return play_track_with_direct(
+            app,
+            player,
+            player_tx,
+            resolve_tx,
+            current,
+            PlaybackSource::Current,
+            None,
+        );
+    }
+
+    app.active_direct_retried = false;
     app.set_status(format!("PLAYER ERROR: {}", message));
     if let Some(current) = app.current_track().cloned() {
         app.push_history(current);
@@ -491,12 +521,27 @@ pub fn start_playback_with_direct(
     direct_url: Option<String>,
 ) -> Result<(), String> {
     let raw_stream = track.stream_url.as_deref().unwrap_or_default();
-    let audio_source = AudioPlayer::cached_audio(raw_stream)
+    let disk_cached = AudioPlayer::cached_audio(raw_stream);
+    let headers = if disk_cached.is_none() {
+        crate::ytdlp::get_cached_stream(raw_stream)
+            .map(|s| s.headers)
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let audio_source = disk_cached
         .map(|path| path.to_string_lossy().into_owned())
         .or(direct_url)
         .unwrap_or_else(|| raw_stream.to_string());
 
-    match player.play(&audio_source, app.volume, events) {
+    if app
+        .current_track()
+        .is_none_or(|cur| !cur.same_identity(&track))
+    {
+        app.active_direct_retried = false;
+    }
+
+    match player.play_direct(&audio_source, &headers, app.volume, events) {
         Ok(()) => {
             if let Some(old) = app.current_track().cloned()
                 && !old.same_identity(&track)
@@ -1249,5 +1294,71 @@ mod tests {
             app.current_track().and_then(|t| t.stream_url.as_deref()),
             Some("https://youtube.com/watch?v=123")
         );
+    }
+
+    #[test]
+    fn test_expired_direct_url_evicts_cache_and_retries_once() {
+        let _guard = crate::paths::ENV_LOCK.lock().unwrap();
+        crate::ytdlp::clear_stream_cache();
+
+        let watch = "https://www.youtube.com/watch?v=retry123";
+        crate::ytdlp::cache_stream(
+            watch,
+            &crate::ytdlp::ResolvedStream {
+                url: "https://rr1.googlevideo.com/expired".into(),
+                headers: Vec::new(),
+                expires_at: None,
+                ext: Some("webm".into()),
+                acodec: Some("opus".into()),
+                abr: Some(128.0),
+                duration_s: Some(200.0),
+                video_id: Some("retry123".into()),
+                title: Some("Retry Song".into()),
+                ytdlp_version: "2026.11.23".into(),
+                js_runtime: "system-node".into(),
+            },
+        );
+        assert!(crate::ytdlp::get_cached_stream(watch).is_some());
+
+        let mut app = App::new();
+        let mut player = AudioPlayer::new();
+        let (player_tx, _player_rx) = channel();
+        let (resolve_tx, _resolve_rx) = channel();
+
+        let track = Track::new("Retry Song", "Artist")
+            .with_provider("ytmusic")
+            .with_stream_url(watch);
+        app.set_playing(track);
+
+        let retrying = handle_playback_failed(
+            &mut app,
+            &mut player,
+            player_tx.clone(),
+            resolve_tx.clone(),
+            "loading failed",
+        );
+        assert!(retrying);
+        assert!(app.active_direct_retried);
+        assert!(app.is_resolving());
+        assert!(crate::ytdlp::get_cached_stream(watch).is_none());
+
+        app.cancel_pending_resolution();
+        let track_after = Track::new("Retry Song", "Artist")
+            .with_provider("ytmusic")
+            .with_stream_url(watch);
+        app.set_playing(track_after);
+
+        // Second failure after single retry must stop and surface error instead of looping
+        let retried_again = handle_playback_failed(
+            &mut app,
+            &mut player,
+            player_tx,
+            resolve_tx,
+            "loading failed",
+        );
+        assert!(!retried_again);
+        assert!(app.playback_state.is_stopped());
+        assert!(app.status.contains("PLAYER ERROR"));
+        assert!(!app.active_direct_retried);
     }
 }

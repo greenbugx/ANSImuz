@@ -159,6 +159,7 @@ pub struct App {
     pub prefetch_generation: u64,
     pub prefetch_in_flight: Option<u64>,
     pub prefetch_tx: Option<std::sync::mpsc::Sender<PrefetchResolveResponse>>,
+    pub active_direct_retried: bool,
 }
 
 impl App {
@@ -213,6 +214,7 @@ impl App {
             prefetch_generation: 0,
             prefetch_in_flight: None,
             prefetch_tx: None,
+            active_direct_retried: false,
         }
     }
 

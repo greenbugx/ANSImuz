@@ -369,3 +369,47 @@ fn native_dump_stream_enforces_timeout() {
         "timeout took too long: {elapsed:?}"
     );
 }
+
+#[test]
+fn native_loadfile_direct_plays_file_url_with_ytdl_no() {
+    let Some(mut mpv) = new_player() else {
+        return;
+    };
+
+    assert_eq!(mpv.ytdl_property().as_deref(), Ok("no"));
+
+    let dir = std::env::temp_dir().join("ansimuz-native-smoke-direct");
+    let _ = fs::create_dir_all(&dir);
+    let wav = dir.join("direct.wav");
+    write_silence_wav(&wav, 1);
+
+    let url = format!("file:///{}", wav.to_string_lossy().replace('\\', "/"));
+    let load_id = mpv
+        .loadfile_direct(&url, &[("User-Agent".into(), "ANSImuz-Test/1.0".into())])
+        .expect("loadfile_direct failed");
+    assert!(load_id >= 1);
+    assert_eq!(mpv.ytdl_property().as_deref(), Ok("no"));
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut loaded = false;
+    while Instant::now() < deadline {
+        if let Ok(Some(ev)) = mpv.poll_event()
+            && ev.load_id == load_id
+            && matches!(
+                ev.event_type,
+                NativeEventType::FileLoaded | NativeEventType::PlaybackRestart
+            )
+        {
+            loaded = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let _ = fs::remove_file(&wav);
+    let _ = fs::remove_dir(&dir);
+    assert!(
+        loaded,
+        "expected FileLoaded/PlaybackRestart for file:// direct load"
+    );
+}

@@ -126,6 +126,28 @@ void ansimuz_mpv_destroy(ansimuz_mpv *player);
 int ansimuz_mpv_loadfile(ansimuz_mpv *player, const char *path);
 
 /*
+ * Loads a pre-resolved direct media URL with ytdl explicitly forced off.
+ * Optional user_agent and header_fields are applied via mpv properties before
+ * dispatching loadfile so behavior stays uniform across libmpv versions.
+ */
+int ansimuz_mpv_loadfile_direct(
+    ansimuz_mpv *player,
+    const char *url,
+    const char *user_agent,
+    const char *header_fields
+);
+
+/*
+ * Reads the current ytdl property value ("yes" or "no") into buffer.
+ * Returns 0 on success or a negative mpv error code on failure.
+ */
+int ansimuz_mpv_get_ytdl(
+    const ansimuz_mpv *player,
+    char *buffer,
+    size_t buffer_size
+);
+
+/*
  * Returns the sequence identifier of the most recently initiated load.
  * Returns 0 if no track has been loaded.
  */

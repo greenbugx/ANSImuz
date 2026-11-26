@@ -75,20 +75,17 @@ static int configure_option(
     return status;
 }
 
-/* YTDL_PLAYER_CLIENTS */
-#define ANSIMUZ_YTDL_EXTRACTOR_ARGS \
-    "youtube:player_client=android,ios,mweb,web,web_music,android_vr,tv,tv_samsung,tv_simply,visionos,default"
-
+#ifdef ANSIMUZ_LEGACY_YTDL
 /*
- * Checks whether target URL points to YouTube so ytdl can be enabled selectively.
+ * Checks whether target URL points to YouTube so legacy ytdl can be enabled selectively.
  */
 static int is_youtube_url(const char *url) {
     return url && (strstr(url, "youtube.com") != NULL || strstr(url, "youtu.be") != NULL);
 }
+#endif
 
 /*
- * Configures ytdl and preserves the YouTube player client fallback chain via
- * MPV_FORMAT_NODE_MAP so commas inside player_client are not split by mpv.
+ * Configures ytdl mode ("yes" or "no") on the uninitialized mpv handle.
  */
 static int configure_ytdl(
     mpv_handle *handle,
@@ -96,39 +93,10 @@ static int configure_ytdl(
     char *error_buffer,
     size_t error_buffer_size
 ) {
-    int status = configure_option(
+    return configure_option(
         handle, "ytdl", enable ? "yes" : "no",
         error_buffer, error_buffer_size
     );
-    if (status < 0) {
-        return status;
-    }
-
-    char *keys[] = { "extractor-args" };
-    mpv_node val;
-    val.format = MPV_FORMAT_STRING;
-    val.u.string = (char *)ANSIMUZ_YTDL_EXTRACTOR_ARGS;
-
-    mpv_node_list map;
-    map.num = 1;
-    map.keys = keys;
-    map.values = &val;
-
-    mpv_node root;
-    root.format = MPV_FORMAT_NODE_MAP;
-    root.u.list = &map;
-
-    status = mpv_set_option(handle, "ytdl-raw-options", MPV_FORMAT_NODE, &root);
-    if (status < 0) {
-        set_error(
-            error_buffer,
-            error_buffer_size,
-            "ytdl-raw-options",
-            status
-        );
-    }
-
-    return status;
 }
 
 /*
@@ -307,13 +275,17 @@ int ansimuz_mpv_create(
 
     if (status < 0) goto fail;
 
-    /*
-     * Enable mpv internal ytdl hook and YouTube client fallback chain.
-     */
+#ifdef ANSIMUZ_LEGACY_YTDL
     status = configure_ytdl(
         player->handle, 1,
         error_buffer, error_buffer_size
     );
+#else
+    status = configure_ytdl(
+        player->handle, 0,
+        error_buffer, error_buffer_size
+    );
+#endif
 
     if (status < 0) goto fail;
 
@@ -464,21 +436,7 @@ void ansimuz_mpv_destroy(ansimuz_mpv *player) {
     free(player);
 }
 
-/*
- * Loads an audio file or stream URL by issuing the loadfile replace command
- * Zero allocations, delegates directly to libmpv command dispatch
- */
-int ansimuz_mpv_loadfile(ansimuz_mpv *player, const char *path) {
-    if (!player || !player->handle || !path || path[0] == '\0') {
-        return MPV_ERROR_INVALID_PARAMETER;
-    }
-
-    (void)mpv_set_property_string(
-        player->handle,
-        "ytdl",
-        is_youtube_url(path) ? "yes" : "no"
-    );
-
+static int loadfile_common(ansimuz_mpv *player, const char *path, const char *log_tag) {
     const char *args[] = {
         "loadfile",
         path,
@@ -498,13 +456,73 @@ int ansimuz_mpv_loadfile(ansimuz_mpv *player, const char *path) {
 
     if (player->log_file) {
         fprintf(player->log_file,
-            "[LOAD] load_id=%llu path=%s\n",
+            "[%s] load_id=%llu path=%s\n",
+            log_tag,
             (unsigned long long)player->current_load_id,
             path
         );
         fflush(player->log_file);
     }
 
+    return 0;
+}
+
+/*
+ * Loads an audio file or stream URL by issuing the loadfile replace command
+ */
+int ansimuz_mpv_loadfile(ansimuz_mpv *player, const char *path) {
+    if (!player || !player->handle || !path || path[0] == '\0') {
+        return MPV_ERROR_INVALID_PARAMETER;
+    }
+
+#ifdef ANSIMUZ_LEGACY_YTDL
+    const char *ytdl_mode = is_youtube_url(path) ? "yes" : "no";
+#else
+    const char *ytdl_mode = "no";
+#endif
+    (void)mpv_set_property_string(player->handle, "ytdl", ytdl_mode);
+
+    return loadfile_common(player, path, "LOAD");
+}
+
+int ansimuz_mpv_loadfile_direct(
+    ansimuz_mpv *player,
+    const char *url,
+    const char *user_agent,
+    const char *header_fields
+) {
+    if (!player || !player->handle || !url || url[0] == '\0') {
+        return MPV_ERROR_INVALID_PARAMETER;
+    }
+
+    (void)mpv_set_property_string(player->handle, "ytdl", "no");
+
+    if (user_agent && user_agent[0] != '\0') {
+        (void)mpv_set_property_string(player->handle, "user-agent", user_agent);
+    }
+    if (header_fields && header_fields[0] != '\0') {
+        (void)mpv_set_property_string(player->handle, "http-header-fields", header_fields);
+    }
+
+    return loadfile_common(player, url, "LOAD_DIRECT");
+}
+
+int ansimuz_mpv_get_ytdl(
+    const ansimuz_mpv *player,
+    char *buffer,
+    size_t buffer_size
+) {
+    if (!player || !player->handle || !buffer || buffer_size == 0) {
+        return MPV_ERROR_INVALID_PARAMETER;
+    }
+
+    char *val = mpv_get_property_string(player->handle, "ytdl");
+    if (!val) {
+        return MPV_ERROR_PROPERTY_UNAVAILABLE;
+    }
+
+    snprintf(buffer, buffer_size, "%s", val);
+    mpv_free(val);
     return 0;
 }
 
@@ -1058,7 +1076,11 @@ int ansimuz_mpv_dump_stream(
     mpv_set_option_string(handle, "input-default-bindings", "no");
     mpv_set_option_string(handle, "input-vo-keyboard", "no");
     mpv_set_option_string(handle, "network-timeout", "30");
+#ifdef ANSIMUZ_LEGACY_YTDL
     int status = configure_ytdl(handle, is_youtube_url(url), NULL, 0);
+#else
+    int status = configure_ytdl(handle, 0, NULL, 0);
+#endif
     if (status < 0) {
         mpv_destroy(handle);
         return status;
