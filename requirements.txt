@@ -2,3 +2,5 @@ pillow
 requests
 ytmusicapi
 spotifyscraper
+yt-dlp>=2026.11.23
+yt-dlp-ejs>=0.8.0

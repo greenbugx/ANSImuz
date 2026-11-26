@@ -2,11 +2,13 @@
 name = "ansimuz-backend"
 version = "0.1.1"
 description = "Python search, resolution, and artwork backend for ANSImuz"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "pillow>=10.0.0",
     "requests>=2.28.0",
     "spotifyscraper>=3.0.0",
+    "yt-dlp>=2026.11.23",
+    "yt-dlp-ejs>=0.8.0",
     "ytmusicapi>=1.12.3",
 ]
 
