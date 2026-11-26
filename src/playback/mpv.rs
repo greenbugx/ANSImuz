@@ -102,6 +102,10 @@ impl CliPlayer {
         }
     }
 
+    pub fn is_mock(&self) -> bool {
+        self.is_mock
+    }
+
     pub fn record_error(&mut self, error: String) {
         self.last_error = Some(error);
     }
@@ -936,52 +940,7 @@ pub fn start_dump_cancellable(
 }
 
 pub fn resolve_stream(url: &str) -> Result<String, String> {
-    // Try with comprehensive player client fallback chain
-    match resolve_stream_with_client(url, Some(YTDL_PLAYER_CLIENTS)) {
-        Ok(media) if !media.is_empty() => Ok(media),
-        Ok(_) | Err(_) => {
-            // Fallback to default yt-dlp extractor settings without player_client override
-            resolve_stream_with_client(url, None)
-        }
-    }
-}
-
-fn resolve_stream_with_client(url: &str, client_arg: Option<&str>) -> Result<String, String> {
-    let mut cmd = Command::new("yt-dlp");
-    if let Some(clients) = client_arg {
-        cmd.arg("--extractor-args")
-            .arg(format!("youtube:player_client={clients}"));
-    }
-    let output = cmd
-        .arg("-f")
-        .arg("bestaudio/best")
-        .arg("--get-url")
-        .arg(url)
-        .output()
-        .map_err(|e| format!("Failed to execute yt-dlp: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let err_msg = if !stderr.is_empty() {
-            stderr
-        } else {
-            format!("yt-dlp exited with status {}", output.status)
-        };
-        return Err(format!("yt-dlp stream resolution failed: {err_msg}"));
-    }
-
-    let media = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_string();
-
-    if media.is_empty() {
-        return Err("yt-dlp returned empty media stream URL".into());
-    }
-
-    Ok(media)
+    crate::ytdlp::resolve_stream(url, true).map(|resolved| resolved.url)
 }
 
 #[cfg(test)]

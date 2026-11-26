@@ -93,6 +93,7 @@ fn test_rapid_track_switching_ignores_stale_responses() {
             "Artist Zero",
             "yt0",
         )),
+        direct: None,
     };
     let handled_0 =
         handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, stale_resp_0);
@@ -115,6 +116,7 @@ fn test_rapid_track_switching_ignores_stale_responses() {
         title: "Track One".into(),
         artist: "Artist One".into(),
         result: Ok(make_resolved_track("sp1", "Track One", "Artist One", "yt1")),
+        direct: None,
     };
     let handled_1 =
         handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, stale_resp_1);
@@ -129,6 +131,7 @@ fn test_rapid_track_switching_ignores_stale_responses() {
         title: "Track Two".into(),
         artist: "Artist Two".into(),
         result: Ok(make_resolved_track("sp2", "Track Two", "Artist Two", "yt2")),
+        direct: None,
     };
     let handled_2 =
         handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, fresh_resp_2);
@@ -203,6 +206,7 @@ fn test_cancelling_while_old_track_is_playing_preserves_playback() {
         title: "New Track".into(),
         artist: "New Artist".into(),
         result: Ok(make_resolved_track("sp1", "New Track", "New Artist", "yt1")),
+        direct: None,
     };
     let handled =
         handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, stale_resp);
@@ -248,6 +252,7 @@ fn test_resolution_failure_preserves_playing_track() {
         title: "Failing Song".into(),
         artist: "Failing Artist".into(),
         result: Err("No matching YouTube video found".into()),
+        direct: None,
     };
 
     let handled =
@@ -296,6 +301,7 @@ fn test_resolution_failure_when_idle_cleans_up() {
         title: "Idle Fail".into(),
         artist: "Artist".into(),
         result: Err("Network timeout".into()),
+        direct: None,
     };
 
     let handled =
@@ -341,6 +347,7 @@ fn test_stale_response_rejected_on_slot_mismatch() {
             "Old Artist",
             "yt_old",
         )),
+        direct: None,
     };
 
     let handled = handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, response);
@@ -393,6 +400,7 @@ fn test_queue_track_resolution_plays_directly_without_touching_search_results() 
         title: "Queued Song".into(),
         artist: "Queued Artist".into(),
         result: Ok(resolved_queue_track),
+        direct: None,
     };
 
     let handled = handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, response);
@@ -620,6 +628,7 @@ fn test_old_track_ended_preserves_in_flight_resolution_with_nonempty_queue() {
         title: "End Track 1".into(),
         artist: "End Artist 1".into(),
         result: Ok(t1_resolved),
+        direct: None,
     };
     let handled_resolve =
         handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, resp);

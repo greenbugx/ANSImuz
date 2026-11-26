@@ -418,6 +418,7 @@ fn test_removed_resolving_queue_entry_does_not_start_playback() {
         title: "Unresolved Queue Track".to_string(),
         artist: "Artist".to_string(),
         result: Ok(resolved_track),
+        direct: None,
     };
 
     let handled = handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, response);
@@ -462,6 +463,7 @@ fn test_failed_queue_resolution_skips_to_next_queued_item() {
         title: "Failing Track".to_string(),
         artist: "Artist".to_string(),
         result: Err("404 Not Found".to_string()),
+        direct: None,
     };
 
     let handled = handle_resolve_response(
@@ -518,6 +520,7 @@ fn test_repeat_one_does_not_interfere_with_failed_queue_resolution() {
         title: "Q Fail".to_string(),
         artist: "Artist".to_string(),
         result: Err("Audio stream unavailable".to_string()),
+        direct: None,
     };
 
     handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, fail_resp);
@@ -685,6 +688,7 @@ fn test_failed_queue_resolution_preserves_currently_playing_track_when_player_ac
         title: "Song B".to_string(),
         artist: "Artist".to_string(),
         result: Err("YouTube extraction failed".to_string()),
+        direct: None,
     };
 
     let handled =
@@ -925,6 +929,7 @@ fn test_cancellation_during_resolution_preserves_queue_entry() {
         title: "Queued Song".to_string(),
         artist: "Artist".to_string(),
         result: Ok(resolved),
+        direct: None,
     };
 
     let handled =
@@ -1135,6 +1140,7 @@ fn test_resolution_cancellation_switching_removing_and_cancelling() {
             "Artist",
             "http://stream/resolved0",
         )),
+        direct: None,
     };
     let handled =
         handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, late_resp);
@@ -1223,6 +1229,7 @@ fn test_non_head_queue_item_resolution_starts_playback() {
         title: "Track 1".to_string(),
         artist: "Artist 1".to_string(),
         result: Ok(resolved_t1),
+        direct: None,
     };
 
     let handled = handle_resolve_response(&mut app, &mut player, &player_tx, &resolve_tx, response);

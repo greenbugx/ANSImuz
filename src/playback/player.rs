@@ -121,6 +121,14 @@ impl AudioPlayer {
         self.startup_message.as_deref()
     }
 
+    pub fn is_mock(&self) -> bool {
+        match &self.inner {
+            Inner::Cli(p) => p.is_mock(),
+            #[cfg(feature = "native-mpv")]
+            Inner::Native(p) => p.is_mock(),
+        }
+    }
+
     pub fn set_mock_fail(&mut self, fail: bool) {
         match &mut self.inner {
             Inner::Cli(p) => p.set_mock_fail(fail),

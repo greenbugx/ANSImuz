@@ -231,6 +231,10 @@ impl NativeBackend {
         }
     }
 
+    pub fn is_mock(&self) -> bool {
+        self.is_mock
+    }
+
     pub fn record_error(&mut self, error: String) {
         self.last_error = Some(error);
     }

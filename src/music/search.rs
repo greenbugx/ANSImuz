@@ -25,6 +25,7 @@ pub struct ResolveResponse {
     pub title: String,
     pub artist: String,
     pub result: Result<Track, String>,
+    pub direct: Option<crate::ytdlp::ResolvedStream>,
 }
 
 #[derive(Debug)]
@@ -238,6 +239,41 @@ pub fn format_py_error(py: Python<'_>, err: PyErr) -> String {
                 message
             }
         }
+        "GeoBlockedError" => {
+            if message.is_empty() {
+                "This track is not available in your region.".to_string()
+            } else {
+                message
+            }
+        }
+        "BotCheckError" => {
+            if message.is_empty() {
+                "YouTube requested sign-in or bot verification. Try again later.".to_string()
+            } else {
+                message
+            }
+        }
+        "StreamUnavailableError" => {
+            if message.is_empty() {
+                "No playable audio stream found for this track.".to_string()
+            } else {
+                message
+            }
+        }
+        "ResolverOutdatedError" => {
+            if message.is_empty() {
+                "YouTube extraction needs an updated resolver (:update-ytdlp).".to_string()
+            } else {
+                message
+            }
+        }
+        "JsRuntimeError" => {
+            if message.is_empty() {
+                "JavaScript runtime missing or failed for YouTube extraction.".to_string()
+            } else {
+                message
+            }
+        }
         "ProviderError" => {
             if message.is_empty() {
                 "Provider error occurred.".to_string()
@@ -308,7 +344,26 @@ pub fn spawn_resolve(
     let artist = track.artist.clone();
 
     std::thread::spawn(move || {
-        let result = resolve_playable(&track);
+        let mut direct = None;
+        let result = match resolve_playable(&track) {
+            Ok(resolved) => {
+                if let Some(watch_url) = resolved.stream_url.as_deref()
+                    && crate::ytdlp::is_youtube_watch_url(watch_url)
+                    && crate::playback::AudioPlayer::cached_audio(watch_url).is_none()
+                {
+                    match crate::ytdlp::resolve_stream(watch_url, false) {
+                        Ok(stream) => {
+                            direct = Some(stream);
+                            Ok(resolved)
+                        }
+                        Err(err) => Err(err),
+                    }
+                } else {
+                    Ok(resolved)
+                }
+            }
+            Err(err) => Err(err),
+        };
         let _ = tx.send(ResolveResponse {
             generation,
             source,
@@ -316,6 +371,7 @@ pub fn spawn_resolve(
             title,
             artist,
             result,
+            direct,
         });
     });
 }
@@ -492,6 +548,34 @@ mod tests {
             let not_found_pyerr = PyErr::from_value(not_found_err);
             let formatted_not_found = format_py_error(py, not_found_pyerr);
             assert_eq!(formatted_not_found, "No confident match for 'Song'");
+
+            for (attr, msg, expected) in [
+                (
+                    "GeoBlockedError",
+                    "",
+                    "This track is not available in your region.",
+                ),
+                ("BotCheckError", "Sign in to confirm", "Sign in to confirm"),
+                (
+                    "StreamUnavailableError",
+                    "",
+                    "No playable audio stream found for this track.",
+                ),
+                (
+                    "ResolverOutdatedError",
+                    "",
+                    "YouTube extraction needs an updated resolver (:update-ytdlp).",
+                ),
+                (
+                    "JsRuntimeError",
+                    "",
+                    "JavaScript runtime missing or failed for YouTube extraction.",
+                ),
+            ] {
+                let cls = bridge.getattr(attr).unwrap();
+                let py_err = PyErr::from_value(cls.call1((msg,)).unwrap());
+                assert_eq!(format_py_error(py, py_err), expected);
+            }
         });
     }
 }

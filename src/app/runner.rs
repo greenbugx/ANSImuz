@@ -23,6 +23,7 @@ pub fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::new();
     app.init_discord();
+    crate::ytdlp::spawn_warmup();
     let mut player = AudioPlayer::from_backend(app.settings.backend);
     if let Some(msg) = player.startup_message() {
         crate::playback::player::log_playback(msg);

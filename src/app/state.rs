@@ -810,12 +810,12 @@ impl App {
                 return;
             }
 
-            match crate::playback::resolve_stream(&watch_url) {
-                Ok(direct_url) => {
+            match crate::ytdlp::resolve_stream(&watch_url, true) {
+                Ok(resolved_stream) => {
                     let _ = tx.send(PrefetchResolveResponse {
                         prefetch_generation: generation,
                         entry_id,
-                        result: Ok((resolved_track, Some(direct_url))),
+                        result: Ok((resolved_track, Some(resolved_stream.url))),
                     });
                 }
                 Err(_) => {

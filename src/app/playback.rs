@@ -414,7 +414,23 @@ pub fn play_track_with_direct(
         }
     }
 
-    if !track.has_stream_url() {
+    let mut resolved_direct = direct_url;
+    let needs_youtube_resolve = if resolved_direct.is_none()
+        && let Some(watch_url) = track.stream_url.as_deref()
+        && crate::ytdlp::is_youtube_watch_url(watch_url)
+        && AudioPlayer::cached_audio(watch_url).is_none()
+    {
+        if let Some(cached_stream) = crate::ytdlp::get_cached_stream(watch_url) {
+            resolved_direct = Some(cached_stream.url);
+            false
+        } else {
+            !player.is_mock()
+        }
+    } else {
+        false
+    };
+
+    if !track.has_stream_url() || needs_youtube_resolve {
         app.cancel_pending_resolution();
         let generation = app.resolve_generation;
         app.set_resolving(track.clone(), source);
@@ -436,7 +452,14 @@ pub fn play_track_with_direct(
     }
 
     app.cancel_pending_resolution();
-    match start_playback_with_direct(app, player, player_tx.clone(), track, source, direct_url) {
+    match start_playback_with_direct(
+        app,
+        player,
+        player_tx.clone(),
+        track,
+        source,
+        resolved_direct,
+    ) {
         Ok(()) => true,
         Err(error) => {
             if let PlaybackSource::Queue { .. } = source {
@@ -600,6 +623,7 @@ pub fn handle_resolve_response(
     match response.result {
         Ok(resolved) => {
             crate::music::cache_resolved_track(&resolved);
+            let direct_url = response.direct.map(|d| d.url);
 
             match response.source {
                 PlaybackSource::SearchResult { index } => {
@@ -631,12 +655,13 @@ pub fn handle_resolve_response(
 
                     *slot = resolved.clone();
 
-                    if let Err(error) = start_playback(
+                    if let Err(error) = start_playback_with_direct(
                         app,
                         player,
                         player_tx.clone(),
                         resolved,
                         PlaybackSource::SearchResult { index },
+                        direct_url,
                     ) {
                         app.set_status(format!("PLAYER ERROR: {error}"));
                         return false;
@@ -649,12 +674,13 @@ pub fn handle_resolve_response(
                         let entry = app.remove_queue_item(pos).expect("valid queue item");
                         let mut track = resolved;
                         track.spotify_id = entry.track.spotify_id;
-                        if let Err(error) = start_playback(
+                        if let Err(error) = start_playback_with_direct(
                             app,
                             player,
                             player_tx.clone(),
                             track,
                             PlaybackSource::Queue { entry_id },
+                            direct_url,
                         ) {
                             app.set_status(format!("PLAYER ERROR: {error}"));
                             return recover_queue_failure(
@@ -671,9 +697,14 @@ pub fn handle_resolve_response(
                     }
                 }
                 PlaybackSource::History | PlaybackSource::Current => {
-                    if let Err(error) =
-                        start_playback(app, player, player_tx.clone(), resolved, response.source)
-                    {
+                    if let Err(error) = start_playback_with_direct(
+                        app,
+                        player,
+                        player_tx.clone(),
+                        resolved,
+                        response.source,
+                        direct_url,
+                    ) {
                         app.set_status(format!("PLAYER ERROR: {error}"));
                         return false;
                     }
@@ -807,6 +838,7 @@ mod tests {
             title: "Song B".into(),
             artist: "Artist B".into(),
             result: Err("resolve failed".into()),
+            direct: None,
         };
         assert!(!handle_resolve_response(
             &mut h.app,
@@ -916,6 +948,7 @@ mod tests {
             title: "Song B".into(),
             artist: "Artist B".into(),
             result: Err("resolve failed".into()),
+            direct: None,
         };
         assert!(!handle_resolve_response(
             &mut h.app,
