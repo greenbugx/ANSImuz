@@ -57,7 +57,7 @@ jobs:
 
       - name: Python syntax check and unit tests
         run: |
-          python -m py_compile backend/bridge.py backend/exceptions.py backend/artwork/thumbnails.py backend/providers/spotify/spotify.py backend/providers/ytmusic/ytmusic.py backend/tests/test_ytdlp.py
+          python -m py_compile backend/bridge.py backend/exceptions.py backend/artwork/thumbnails.py backend/providers/spotify/spotify.py backend/providers/ytmusic/ytmusic.py backend/providers/ytdlp/__init__.py backend/providers/ytdlp/errors.py backend/providers/ytdlp/options.py backend/providers/ytdlp/resolver.py backend/providers/ytdlp/runtime.py backend/tests/test_ytdlp.py
           python -m unittest discover -s backend/tests -p "test_*.py" -v
 
   ci:
@@ -84,7 +84,7 @@ jobs:
 
       - name: Python syntax check and unit tests
         run: |
-          python -m py_compile backend/bridge.py backend/exceptions.py backend/artwork/thumbnails.py backend/providers/spotify/spotify.py backend/providers/ytmusic/ytmusic.py backend/tests/test_ytdlp.py
+          python -m py_compile backend/bridge.py backend/exceptions.py backend/artwork/thumbnails.py backend/providers/spotify/spotify.py backend/providers/ytmusic/ytmusic.py backend/providers/ytdlp/__init__.py backend/providers/ytdlp/errors.py backend/providers/ytdlp/options.py backend/providers/ytdlp/resolver.py backend/providers/ytdlp/runtime.py backend/tests/test_ytdlp.py
           python -m unittest discover -s backend/tests -p "test_*.py" -v
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -177,7 +177,7 @@ jobs:
 
       - name: Python syntax check and unit tests
         run: |
-          python -m py_compile backend/bridge.py backend/exceptions.py backend/artwork/thumbnails.py backend/providers/spotify/spotify.py backend/providers/ytmusic/ytmusic.py backend/tests/test_ytdlp.py
+          python -m py_compile backend/bridge.py backend/exceptions.py backend/artwork/thumbnails.py backend/providers/spotify/spotify.py backend/providers/ytmusic/ytmusic.py backend/providers/ytdlp/__init__.py backend/providers/ytdlp/errors.py backend/providers/ytdlp/options.py backend/providers/ytdlp/resolver.py backend/providers/ytdlp/runtime.py backend/tests/test_ytdlp.py
           python -m unittest discover -s backend/tests -p "test_*.py" -v
 
       - name: Format check

@@ -20,10 +20,36 @@ class AuthenticationError(ProviderError):
 class TrackNotFoundError(ProviderError, LookupError):
     """No matching track could be found on the target provider."""
 
+
+class GeoBlockedError(ProviderError):
+    """Track is unavailable in the user's region."""
+
+
+class BotCheckError(AuthenticationError):
+    """YouTube requested sign-in, age confirmation, or a captcha check."""
+
+
+class StreamUnavailableError(ProviderError):
+    """Extractor returned no playable audio stream for the track."""
+
+
+class ResolverOutdatedError(ProviderError):
+    """Stream challenge solver failed and yt-dlp likely needs an update."""
+
+
+class JsRuntimeError(ResolverOutdatedError):
+    """JavaScript challenge runtime is missing or failed to execute."""
+
+
 def classify_error(context: str, exc: Exception) -> ProviderError:
     """Classifies an unexpected exception into a structured ProviderError subclass."""
     if isinstance(exc, ProviderError):
         return exc
+
+    if type(exc).__module__.startswith("yt_dlp"):
+        from providers.ytdlp.errors import classify_ytdlp_error
+
+        return classify_ytdlp_error(exc)
 
     msg = str(exc).lower()
 

@@ -3,27 +3,40 @@ from typing import Any
 
 from exceptions import (
     AuthenticationError,
+    BotCheckError,
+    GeoBlockedError,
+    JsRuntimeError,
     NetworkError,
     ProviderError,
     RateLimitError,
+    ResolverOutdatedError,
+    StreamUnavailableError,
     TrackNotFoundError,
     classify_error,
 )
-from providers import spotify, ytmusic
+from providers import spotify, ytdlp, ytmusic
 from providers.lyrics import get_lyrics as _get_lyrics
 
 TrackDict = dict[str, Any]
 
 __all__ = [
     "AuthenticationError",
+    "BotCheckError",
+    "GeoBlockedError",
+    "JsRuntimeError",
     "NetworkError",
     "ProviderError",
     "RateLimitError",
+    "ResolverOutdatedError",
+    "StreamUnavailableError",
     "TrackNotFoundError",
     "fetch_lyrics",
     "get_lyrics",
     "resolve_playable",
+    "resolve_stream",
     "search_music",
+    "ytdlp_status",
+    "ytdlp_warmup",
 ]
 
 
@@ -70,3 +83,23 @@ def fetch_lyrics(track: TrackDict, is_cancelled: Any = None) -> dict[str, Any] |
 
 # Maintain get_lyrics as an alias for backwards compatibility
 get_lyrics = fetch_lyrics
+
+
+def resolve_stream(url: str, background: bool = False) -> dict[str, Any]:
+    """Resolves a YouTube URL to a direct playable audio stream and headers."""
+    try:
+        return ytdlp.resolve_stream(url, background=background)
+    except (ProviderError, ValueError):
+        raise
+    except Exception as exc:
+        raise classify_error("Stream resolution failed", exc) from exc
+
+
+def ytdlp_status() -> dict[str, Any]:
+    """Returns embedded yt-dlp version and active JS runtime info."""
+    return ytdlp.ytdlp_status()
+
+
+def ytdlp_warmup() -> dict[str, Any]:
+    """Pre-initializes yt-dlp imports and interactive extractor state."""
+    return ytdlp.ytdlp_warmup()
